@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -26,6 +27,7 @@ from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule, Toke
 from worthless.storage.repository import ShardRepository, StoredShard
 
 from tests._fakes import pin_shard_b
+from tests.helpers import make_streaming_response
 
 
 # ------------------------------------------------------------------
@@ -592,6 +594,418 @@ class TestAnthropicNonStreamingMetering:
         result = extract_usage_anthropic(sse_data)
         assert result is not None
         assert result.total_tokens == 30
+
+
+# ------------------------------------------------------------------
+# WOR-1002: a null or non-int token count must not crash spend recording
+# ------------------------------------------------------------------
+
+ANTHROPIC_MESSAGES = "https://api.anthropic.com/v1/messages"
+
+
+@pytest.fixture()
+async def anthropic_alias(repo, proxy_app):
+    """Enroll an Anthropic key and return (alias, shard_a_utf8)."""
+    alias = "anthropic-key"
+    sr = split_key_fp("sk-ant-test-key-12345678901234", prefix="sk-ant-", provider="anthropic")
+    shard = StoredShard(
+        shard_b=bytearray(sr.shard_b),
+        commitment=bytearray(sr.commitment),
+        nonce=bytearray(sr.nonce),
+        provider="anthropic",
+    )
+    await repo.store(
+        alias, shard, prefix=sr.prefix, charset=sr.charset, base_url="https://api.anthropic.com/v1"
+    )
+    pin_shard_b(proxy_app, alias, sr.shard_b)
+    return alias, sr.shard_a.decode("utf-8")
+
+
+ANTHROPIC_BODY = b'{"model": "claude-3-5-sonnet-20241022", "max_tokens": 1000, "messages": []}'
+ANTHROPIC_STREAM_BODY = (
+    b'{"model": "claude-3-5-sonnet-20241022", "max_tokens": 1000, "messages": [], "stream": true}'
+)
+
+# (usage, tokens billed): None means the usage is unreadable.
+_NON_INT_USAGES = [
+    pytest.param(
+        {
+            "input_tokens": 5,
+            "cache_creation_input_tokens": None,
+            "cache_read_input_tokens": None,
+            "output_tokens": 3,
+        },
+        8,
+        id="null-cache-counts-bill-the-rest",
+    ),
+    pytest.param({"input_tokens": None, "output_tokens": 3}, None, id="null-required-count"),
+    pytest.param({"input_tokens": "5", "output_tokens": 3}, None, id="string-count"),
+    pytest.param({"input_tokens": 5.0, "output_tokens": 3}, 8, id="whole-float-count-is-the-count"),
+    pytest.param({"input_tokens": 5.5, "output_tokens": 3}, None, id="fractional-count"),
+    pytest.param({"input_tokens": 5, "output_tokens": True}, None, id="bool-count"),
+]
+
+# (message_start usage, message_delta usage, tokens billed): None means unreadable.
+_NON_INT_STREAM_USAGES = [
+    pytest.param(
+        {"input_tokens": 5, "cache_creation_input_tokens": None, "cache_read_input_tokens": None},
+        {"output_tokens": 3},
+        8,
+        id="null-cache-counts-bill-the-rest",
+    ),
+    pytest.param({"input_tokens": 5}, {"output_tokens": "3"}, None, id="string-output-count"),
+    pytest.param({"input_tokens": 5}, {"output_tokens": True}, None, id="bool-output-count"),
+    pytest.param(
+        {"input_tokens": 50000.0}, {"output_tokens": 3}, 50003, id="whole-float-input-count"
+    ),
+]
+
+# (provider, usage in a 400 reply, tokens billed): None means nothing is billed.
+_ERROR_REPLY_USAGES = [
+    pytest.param("openai", {"total_tokens": 42}, 42, id="openai-readable-total-is-billed"),
+    pytest.param("openai", {"total_tokens": None}, None, id="openai-null-total"),
+    pytest.param("openai", {"total_tokens": "42"}, None, id="openai-string-total"),
+    pytest.param(
+        "anthropic", {"input_tokens": None, "output_tokens": 0}, None, id="anthropic-null-input"
+    ),
+]
+
+
+def _anthropic_sse(start_usage: dict, delta_usage: dict) -> bytes:
+    """Anthropic SSE body: message_start, message_delta and message_stop."""
+    events = [
+        ("message_start", {"type": "message_start", "message": {"usage": start_usage}}),
+        ("message_delta", {"type": "message_delta", "usage": delta_usage}),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    return b"".join(f"event: {e}\ndata: {json.dumps(d)}\n\n".encode() for e, d in events)
+
+
+def _openai_sse(*usages: dict) -> bytes:
+    """OpenAI SSE body with one chunk per usage in *usages*, then [DONE]."""
+    chunks = ({"model": "gpt-4", "choices": [], "usage": usage} for usage in usages)
+    return b"".join(f"data: {json.dumps(c)}\n\n".encode() for c in chunks) + b"data: [DONE]\n\n"
+
+
+async def _cap_spend(db, alias: str) -> None:
+    """Give *alias* a spend cap far above anything these tests bill."""
+    await db.execute(
+        "INSERT INTO enrollment_config (key_alias, spend_cap) VALUES (?, ?)", (alias, 10_000_000)
+    )
+    await db.commit()
+
+
+async def _daily_budget(proxy_app, alias: str, tokens: int = 1000) -> TokenBudgetRule:
+    """Give *alias* a daily budget of *tokens* and no spend cap; return the rule."""
+    db = proxy_app.state.db
+    await db.execute(
+        "INSERT INTO enrollment_config (key_alias, token_budget_daily) VALUES (?, ?)",
+        (alias, tokens),
+    )
+    await db.commit()
+    budget = TokenBudgetRule(db=db)
+    proxy_app.state.rules_engine = RulesEngine(rules=[budget, *proxy_app.state.rules_engine.rules])
+    return budget
+
+
+async def _assert_budget_released(
+    db, budget: TokenBudgetRule, alias: str, billed: int | None
+) -> None:
+    """Both requests released their reservation. With no spend cap, unreadable usage
+    (None) records nothing (WOR-1031); readable usage is recorded twice."""
+    assert budget._reserved.get(alias, 0) == 0
+    async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
+        assert await cur.fetchall() == ([] if billed is None else [(billed,), (billed,)])
+
+
+async def _assert_billed_now(db, alias: str, billed: int | None) -> None:
+    """The hold became one spend row right away: *billed*, or max(estimate, ceiling)
+    when the usage is unreadable (None)."""
+    async with db.execute(
+        "SELECT COUNT(*) FROM pending_charges WHERE key_alias = ?", (alias,)
+    ) as cur:
+        assert await cur.fetchone() == (0,)
+    async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
+        assert await cur.fetchall() == [(GLOBAL_CEILING_TOKENS if billed is None else billed,)]
+
+
+class TestNonIntTokenCounts:
+    """A null cache count bills as 0; any other non-int count means unreadable usage."""
+
+    @pytest.mark.parametrize(("usage", "billed"), _NON_INT_USAGES)
+    @respx.mock
+    async def test_never_locks_a_budgeted_key_out(
+        self, proxy_client: httpx.AsyncClient, proxy_app, anthropic_alias, usage, billed
+    ):
+        """Each request reserves max_tokens against the daily budget. Before the fix
+        the background spend task crashed (ASGITransport re-raises that here) and
+        never released the reservation, so the next request got a 429."""
+        alias, shard_a_utf8 = anthropic_alias
+        budget = await _daily_budget(proxy_app, alias)
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            return_value=httpx.Response(200, content=_anthropic_json(usage=usage))
+        )
+
+        for _ in range(2):
+            resp = await proxy_client.post(
+                _proxy_url(alias, "/v1/messages"),
+                headers=_proxy_headers(alias, shard_a_utf8),
+                content=ANTHROPIC_BODY,
+            )
+            assert resp.status_code == 200
+
+        await _assert_budget_released(proxy_app.state.db, budget, alias, billed)
+
+    @pytest.mark.parametrize(
+        ("start_usage", "delta_usage", "billed"),
+        # The whole-float case bills 50,003 tokens, which really does spend the budget.
+        [p for p in _NON_INT_STREAM_USAGES if p.id != "whole-float-input-count"],
+    )
+    @respx.mock
+    async def test_never_locks_a_budgeted_key_out_with_a_streamed_reply(
+        self,
+        proxy_client: httpx.AsyncClient,
+        proxy_app,
+        anthropic_alias,
+        start_usage,
+        delta_usage,
+        billed,
+    ):
+        """Before the fix a null cache count crashed the stream while it was being
+        relayed and never released the reservation, so the next request got a 429."""
+        alias, shard_a_utf8 = anthropic_alias
+        budget = await _daily_budget(proxy_app, alias)
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            side_effect=lambda _: make_streaming_response(
+                [_anthropic_sse(start_usage, delta_usage)]
+            )
+        )
+
+        for _ in range(2):
+            resp = await proxy_client.post(
+                _proxy_url(alias, "/v1/messages"),
+                headers=_proxy_headers(alias, shard_a_utf8),
+                content=ANTHROPIC_STREAM_BODY,
+            )
+            assert resp.status_code == 200
+
+        await _assert_budget_released(proxy_app.state.db, budget, alias, billed)
+
+    @pytest.mark.parametrize(("usage", "billed"), _NON_INT_USAGES)
+    @respx.mock
+    async def test_capped_key_is_billed_now(
+        self, proxy_client: httpx.AsyncClient, proxy_app, anthropic_alias, usage, billed
+    ):
+        """The hold becomes one spend row right away: at the real total when it can
+        be read, otherwise at max(estimate, ceiling)."""
+        alias, shard_a_utf8 = anthropic_alias
+        db = proxy_app.state.db
+        await _cap_spend(db, alias)
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            return_value=httpx.Response(200, content=_anthropic_json(usage=usage))
+        )
+
+        resp = await proxy_client.post(
+            _proxy_url(alias, "/v1/messages"),
+            headers=_proxy_headers(alias, shard_a_utf8),
+            content=ANTHROPIC_BODY,
+        )
+
+        assert resp.status_code == 200
+        await _assert_billed_now(db, alias, billed)
+
+    @pytest.mark.parametrize(("start_usage", "delta_usage", "billed"), _NON_INT_STREAM_USAGES)
+    @respx.mock
+    async def test_capped_key_is_billed_now_for_a_streamed_reply(
+        self,
+        proxy_client: httpx.AsyncClient,
+        proxy_app,
+        anthropic_alias,
+        start_usage,
+        delta_usage,
+        billed,
+    ):
+        """Before the fix a null cache count crashed the stream while it was being
+        relayed and left the hold for the sweeper."""
+        alias, shard_a_utf8 = anthropic_alias
+        db = proxy_app.state.db
+        await _cap_spend(db, alias)
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            return_value=make_streaming_response([_anthropic_sse(start_usage, delta_usage)])
+        )
+
+        resp = await proxy_client.post(
+            _proxy_url(alias, "/v1/messages"),
+            headers=_proxy_headers(alias, shard_a_utf8),
+            content=ANTHROPIC_STREAM_BODY,
+        )
+
+        assert resp.status_code == 200
+        await _assert_billed_now(db, alias, billed)
+
+    @pytest.mark.parametrize("bad", [None, "90011"], ids=repr)
+    @respx.mock
+    async def test_unreadable_latest_stream_total_bills_capped_key_the_ceiling(
+        self, proxy_client: httpx.AsyncClient, proxy_app, enrolled_alias, bad
+    ):
+        """An upstream that sends usage on every chunk ends with an unreadable total.
+        The key must not be billed the earlier, smaller total."""
+        alias, shard_a_utf8, _ = enrolled_alias
+        db = proxy_app.state.db
+        await _cap_spend(db, alias)
+        sse = _openai_sse({"total_tokens": 11}, {"total_tokens": bad})
+        respx.post(OPENAI_COMPLETIONS).mock(return_value=make_streaming_response([sse]))
+
+        resp = await proxy_client.post(
+            _proxy_url(alias),
+            headers=_proxy_headers(alias, shard_a_utf8),
+            content=b'{"model": "gpt-4", "messages": [], "max_tokens": 1000, "stream": true}',
+        )
+
+        assert resp.status_code == 200
+        await _assert_billed_now(db, alias, None)
+
+    @pytest.mark.parametrize("stream", [False, True], ids=["json", "stream"])
+    @respx.mock
+    async def test_whole_float_total_bills_capped_key_the_count(
+        self, proxy_client: httpx.AsyncClient, proxy_app, enrolled_alias, stream
+    ):
+        """JSON can't tell 1234 from 1234.0, so the key is billed 1234, not the ceiling."""
+        alias, shard_a_utf8, _ = enrolled_alias
+        db = proxy_app.state.db
+        await _cap_spend(db, alias)
+        usage = {"total_tokens": 1234.0}
+        respx.post(OPENAI_COMPLETIONS).mock(
+            return_value=make_streaming_response([_openai_sse(usage)])
+            if stream
+            else httpx.Response(200, json={"model": "gpt-4", "choices": [], "usage": usage})
+        )
+
+        resp = await proxy_client.post(
+            _proxy_url(alias),
+            headers=_proxy_headers(alias, shard_a_utf8),
+            content=json.dumps(
+                {"model": "gpt-4", "messages": [], "max_tokens": 1000, "stream": stream}
+            ).encode(),
+        )
+
+        assert resp.status_code == 200
+        await _assert_billed_now(db, alias, 1234)
+
+    @pytest.mark.parametrize(("provider", "usage", "billed"), _ERROR_REPLY_USAGES)
+    @respx.mock
+    async def test_error_reply_with_unreadable_usage_refunds_capped_key(
+        self,
+        proxy_client: httpx.AsyncClient,
+        proxy_app,
+        enrolled_alias,
+        anthropic_alias,
+        provider,
+        usage,
+        billed,
+    ):
+        """An error reply is billed only for the usage it reports. Usage that can't be
+        read counts as none, so the hold is refunded like any error reply without usage."""
+        if provider == "openai":
+            alias, shard_a_utf8, _ = enrolled_alias
+            url, path, body = OPENAI_COMPLETIONS, "/v1/chat/completions", PROXY_BODY
+        else:
+            alias, shard_a_utf8 = anthropic_alias
+            url, path, body = ANTHROPIC_MESSAGES, "/v1/messages", ANTHROPIC_BODY
+        db = proxy_app.state.db
+        await _cap_spend(db, alias)
+        error = {"type": "error", "error": {"type": "invalid_request_error", "message": "bad"}}
+        respx.post(url).mock(return_value=httpx.Response(400, json={**error, "usage": usage}))
+
+        resp = await proxy_client.post(
+            _proxy_url(alias, path), headers=_proxy_headers(alias, shard_a_utf8), content=body
+        )
+
+        assert resp.status_code == 400
+        async with db.execute(
+            "SELECT COUNT(*) FROM pending_charges WHERE key_alias = ?", (alias,)
+        ) as cur:
+            assert await cur.fetchone() == (0,)
+        async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
+            assert await cur.fetchall() == ([] if billed is None else [(billed,)])
+
+
+class TestOverCapTokenCounts:
+    """One reply bills at most 10**12 tokens, so a bogus count can't break the key."""
+
+    @respx.mock
+    async def test_capped_key_is_billed_the_cap(
+        self, proxy_client: httpx.AsyncClient, proxy_app, anthropic_alias
+    ):
+        alias, shard_a_utf8 = anthropic_alias
+        db = proxy_app.state.db
+        await _cap_spend(db, alias)
+        usage = {"input_tokens": 9_000_000_000_000_000_000, "output_tokens": 3}
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            return_value=httpx.Response(200, content=_anthropic_json(usage=usage))
+        )
+
+        resp = await proxy_client.post(
+            _proxy_url(alias, "/v1/messages"),
+            headers=_proxy_headers(alias, shard_a_utf8),
+            content=ANTHROPIC_BODY,
+        )
+
+        assert resp.status_code == 200
+        await _assert_billed_now(db, alias, 10**12)
+
+    @respx.mock
+    async def test_two_over_cap_replies_close_a_budgeted_key_until_its_budget_resets(
+        self, proxy_client: httpx.AsyncClient, proxy_app, anthropic_alias
+    ):
+        """Two requests in flight at once both get a reply claiming 9e18 tokens. Before
+        the cap, the two rows overflowed the budget check's 64-bit sum: the check failed
+        closed, so the key was refused until the rows were 30 days old. Now it is
+        refused as over its daily budget, and reopens when that budget resets."""
+        alias, shard_a_utf8 = anthropic_alias
+        await _daily_budget(proxy_app, alias, tokens=10_000)
+        db = proxy_app.state.db
+        # Both requests reach the upstream before either replies (asyncio.Barrier is 3.11+).
+        arrived: list[httpx.Request] = []
+        both_upstream = asyncio.Event()
+
+        async def over_cap_reply(request: httpx.Request) -> httpx.Response:
+            arrived.append(request)
+            if len(arrived) == 2:
+                both_upstream.set()
+            await both_upstream.wait()
+            usage = {"input_tokens": 9_000_000_000_000_000_000, "output_tokens": 3}
+            return httpx.Response(200, content=_anthropic_json(usage=usage))
+
+        upstream = respx.post(ANTHROPIC_MESSAGES).mock(side_effect=over_cap_reply)
+
+        async def send() -> httpx.Response:
+            return await proxy_client.post(
+                _proxy_url(alias, "/v1/messages"),
+                headers=_proxy_headers(alias, shard_a_utf8),
+                content=ANTHROPIC_BODY,
+            )
+
+        replies = await asyncio.wait_for(asyncio.gather(send(), send()), 10)
+        assert [r.status_code for r in replies] == [200, 200]
+        async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
+            assert await cur.fetchall() == [(10**12,), (10**12,)]
+
+        refused = await send()
+        assert refused.status_code == 429
+        assert "daily token budget exceeded" in refused.json()["error"]["message"]
+
+        # A day later the daily budget has reset.
+        await db.execute(
+            "UPDATE spend_log SET created_at = datetime('now', '-2 days') WHERE key_alias = ?",
+            (alias,),
+        )
+        await db.commit()
+        upstream.side_effect = None
+        upstream.return_value = httpx.Response(
+            200, content=_anthropic_json(usage={"input_tokens": 5, "output_tokens": 3})
+        )
+        assert (await send()).status_code == 200
 
 
 # ------------------------------------------------------------------
