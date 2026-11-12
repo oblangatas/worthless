@@ -3062,7 +3062,7 @@ GUARD_MUTATIONS = [
     (
         # `type=registry` is the exporter `push: true` stands for: it pushes
         # whatever `push:` says.
-        "a release pushes through a registry exporter, under another step name, before the lock check",
+        "a release pushes via a registry exporter, under another step name, before the lock check",
         ".github/workflows/publish-docker.yml",
         "      - name: Image holds exactly the locked dependency set\n",
         "      - name: Export the image\n"
