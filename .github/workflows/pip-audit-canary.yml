@@ -9,6 +9,7 @@ name: Pip-audit canary (weekly)
 #   - This canary surfaces dependency vulnerabilities continuously into
 #     a single rolling issue so they can be triaged off-release-path.
 #   - Signal feeds WOR-333 (dependency hardening). NOT a release gate.
+#   - What the audits cover for users: docs/install-security.md "Dependencies".
 #
 # Design choices:
 #   - continue-on-error semantics via explicit `set +e`: the step always

@@ -27,6 +27,11 @@
 #     runtime packages. Still audited nowhere: dev tools pinned only for 3.10
 #     (filelock, numpy, scipy) and Windows-only pins. beads worthless-jymn.
 #
+# WHAT REACHES USERS (WOR-1077). The Docker image installs exactly this lock
+# (docker-security.yml's `scan` checks the built image against it); install.sh,
+# pip and uvx don't read it. That contract, and what an advisory against a
+# runtime dependency needs, is in docs/install-security.md under "Dependencies".
+#
 # Keep the `audit` command equal to the hook's pipeline. Both name their Python,
 # so the verdict does not change with the machine's Python (WOR-1006).
 

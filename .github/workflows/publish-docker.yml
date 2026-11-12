@@ -189,6 +189,15 @@ jobs:
           tags: worthless-proxy:scan-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      # WOR-1077: the image holds exactly uv.lock's runtime set, before anything
+      # is pushed. The smoke job checks the pulled image too, but only once it is
+      # public. First after the build, as in docker-security.yml's `scan`. amd64
+      # only: the arm64 build is a tarball this runner can't run natively.
+      - name: Image holds exactly the locked dependency set
+        env:
+          IMAGE: worthless-proxy:scan-${{ github.sha }}
+        run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"
+
       # Grype (Anchore) replaces Trivy (Aqua) after the TeamPCP supply-chain
       # compromise of aquasecurity/trivy-action in Feb-Mar 2026. Different
       # vendor, different codebase, different CI pipeline — limits blast
@@ -438,10 +447,12 @@ jobs:
       - name: Pull published image from registry
         run: docker pull "${IMAGE_REF}"
 
+      # `locked_runtime_set` (WOR-1077): the image users pull holds exactly
+      # uv.lock's runtime set. This runner pulls the amd64 image only.
       - name: Run Docker smoke tests against published image
         env:
           WORTHLESS_DOCKER_IMAGE: ${{ env.IMAGE_REF }}
         run: |
           uv run pytest tests/test_docker_e2e.py -v -m docker \
-            -k "container_starts_healthy or enroll_and_healthz or runs_as_non_root" \
+            -k "container_starts_healthy or enroll_and_healthz or runs_as_non_root or locked_runtime_set" \
             --tb=short
