@@ -1177,11 +1177,14 @@ _LOCK_CHECK_RUN = 'uv run --no-project python scripts/check_image_matches_lock.p
 def _pushes(step: dict) -> bool:
     """*step* pushes an image, going by what it does as well as by its name."""
     opts = step.get("with") or {}
-    # publish-docker.yml's real push sets `push: false` and pushes via `outputs`.
+    outputs = str(opts.get("outputs", "")).replace(" ", "")
+    # publish-docker.yml's real push sets `push: false` and pushes via `outputs`;
+    # a `type=registry` exporter pushes whatever `push:` says.
     return (
         str(step.get("name", "")).startswith("Push")
         or opts.get("push") not in (None, False, "false")
-        or "push=true" in str(opts.get("outputs", "")).replace(" ", "")
+        or "push=true" in outputs
+        or "type=registry" in outputs
     )
 
 
@@ -3053,6 +3056,21 @@ GUARD_MUTATIONS = [
         "          push: false\n"
         "          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}"
         "/worthless-proxy,push=true\n"
+        "      - name: Image holds exactly the locked dependency set\n",
+        "test_release_checks_the_image_before_pushing_it",
+    ),
+    (
+        # `type=registry` is the exporter `push: true` stands for: it pushes
+        # whatever `push:` says.
+        "a release pushes through a registry exporter, under another step name, before the lock check",
+        ".github/workflows/publish-docker.yml",
+        "      - name: Image holds exactly the locked dependency set\n",
+        "      - name: Export the image\n"
+        "        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6\n"
+        "        with:\n"
+        "          push: false\n"
+        "          outputs: type=registry,name=ghcr.io/${{ github.repository_owner }}"
+        "/worthless-proxy\n"
         "      - name: Image holds exactly the locked dependency set\n",
         "test_release_checks_the_image_before_pushing_it",
     ),
