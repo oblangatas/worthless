@@ -42,7 +42,18 @@ dependencies = [
     # 2026.10.19 kept.
     "certifi>=2026.10.23",
     "fastapi>=0.115.12",
+    # Floor is 2.14.2: below it, extra data gets past validation through
+    # aliased fields in TypedDicts and dataclasses (GHSA-3r8g-cqwr-jr29) and,
+    # from 2.13, through extra keys in JSON model validation
+    # (GHSA-qpmf-fgh3-ff25). fastapi brings pydantic in; never imported here,
+    # declared only for the floor.
+    "pydantic>=2.14.2",
     "uvicorn[standard]>=0.34",
+    # Floor is 17.4: below it, unbounded empty fragments can exhaust memory
+    # (GHSA-6m5v-9gmr-5665). uvicorn[standard] brings websockets in; never
+    # imported here, declared only for the floor. 17.x needs Python 3.11, so
+    # on 3.10 the lock stays on 16.1.1, which is still affected.
+    "websockets>=17.4; python_version >= '3.11'",
     "typer>=0.15",
     "python-dotenv>=1.0",
     "psutil>=5.9",
@@ -74,6 +85,12 @@ mcp = [
     # resolves this extra fresh (ignoring uv.lock), so an unbounded range
     # would pick up the next breaking major the day it ships (WOR-864).
     "mcp>=2.1,<3",
+    # Floor is 1.45.2: up to 1.45.1, parsing a crafted traceparent takes
+    # quadratic time (GHSA-mf5v-w3w3-f6cg). mcp's server middleware parses the
+    # traceparent in every request's _meta, with or without tracing set up.
+    # The proxy turns fastapi's tracing off, so only this extra needs the
+    # floor. Never imported here; declared only for the floor.
+    "opentelemetry-api>=1.45.2",
 ]
 dev = [
     "deptry>=0.22",
@@ -299,8 +316,9 @@ optional_dependencies_dev_groups = ["dev", "test", "qa", "fuzz"]
 DEP001 = ["tomllib"]
 # uvicorn: runtime ASGI server invoked via CLI, never imported
 # python-dotenv: planned refactor to replace custom parser (worthless-ic6)
-# certifi: never imported (httpx uses it); declared only for its advisory floor
-DEP002 = ["uvicorn", "python-dotenv", "certifi"]
+# certifi, pydantic, websockets, opentelemetry-api: never imported; declared
+# only for their advisory floors
+DEP002 = ["uvicorn", "python-dotenv", "certifi", "pydantic", "websockets", "opentelemetry-api"]
 # starlette: transitive dep of fastapi, but we import ASGI types directly
 # rich: transitive dep of typer (bundled in typer>=0.12), but we import directly for console output
 DEP003 = ["starlette", "rich"]

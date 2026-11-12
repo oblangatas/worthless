@@ -488,30 +488,70 @@ def test_worker_override_is_declared_exactly(name: str, fixed: tuple[int, ...]) 
 #   certifi       GHSA-6q48-6c7w-9gw2   < 2026.10.18
 #   cryptography  PYSEC-2026-3552       < 50.0.0
 #   msgpack       GHSA-j8c6-9vc5-hj6x   < 1.2.4
+#   pydantic      GHSA-3r8g-cqwr-jr29, GHSA-qpmf-fgh3-ff25   < 2.14.2
+#   websockets    GHSA-6m5v-9gmr-5665   < 17.4  (3.11+ only: 17.x needs 3.11)
 # certifi is held at 2026.10.23, above its advisory's fix: the CHANGELOG
 # promises that release, which also drops emSign Root CA - C1 and ECC C3.
+# The `mcp` extra carries its own floor for what only the MCP server runs:
+#   opentelemetry-api  GHSA-mf5v-w3w3-f6cg  <= 1.45.1 (mcp parses every
+#                      request's traceparent; the proxy has tracing off)
 
 PYPROJECT = REPO / "pyproject.toml"
-RUNTIME_FLOORS = {"certifi": (2026, 10, 23), "cryptography": (50, 0, 0), "msgpack": (1, 2, 4)}
+MCP_EXTRA_FLOORS = {"opentelemetry-api": (1, 45, 2)}
+RUNTIME_FLOORS = {
+    "certifi": (2026, 10, 23),
+    "cryptography": (50, 0, 0),
+    "msgpack": (1, 2, 4),
+    "pydantic": (2, 14, 2),
+    "websockets": (17, 4),
+}
+# The only marker a floor may carry. A marker anywhere else would quietly turn
+# the floor off for every install it doesn't match.
+RUNTIME_FLOOR_MARKERS = {"websockets": "python_version >= '3.11'"}
 
 
-def _declared_floor(name: str) -> str | None:
-    """The `>=` version pyproject's [project] dependencies give *name*, if any."""
-    for dep in tomllib.loads(PYPROJECT.read_text())["project"]["dependencies"]:
-        match = re.fullmatch(rf"{re.escape(name)}>=([0-9.]+)", dep)
+def _declared_floor(name: str, extra: str | None = None) -> tuple[str, str | None] | None:
+    """The `>=` version and marker pyproject gives *name*.
+
+    Read from [project] dependencies, or from the optional-dependencies *extra*.
+    """
+    project = tomllib.loads(PYPROJECT.read_text())["project"]
+    deps = project["optional-dependencies"][extra] if extra else project["dependencies"]
+    for dep in deps:
+        match = re.fullmatch(rf"{re.escape(name)}>=([0-9.]+)\s*(?:;\s*(.+))?", dep)
         if match:
-            return match.group(1)
+            return match.group(1), match.group(2)
     return None
 
 
 @pytest.mark.parametrize(("name", "required"), RUNTIME_FLOORS.items(), ids=list(RUNTIME_FLOORS))
 def test_runtime_floor_is_outside_the_advisory(name: str, required: tuple[int, ...]) -> None:
     """pyproject requires at least the listed version of each advised runtime dep."""
-    floor = _declared_floor(name)
-    assert floor, (
+    declared = _declared_floor(name)
+    assert declared, (
         f"{name} has no `>=` floor in pyproject.toml's dependencies. pip keeps an "
         f"existing env's {name}, so upgrading worthless can leave a vulnerable copy."
     )
+    floor, marker = declared
     assert _version_tuple(floor) >= required, (
         f"{name}>={floor} is below the required {'.'.join(map(str, required))}"
     )
+    assert marker == RUNTIME_FLOOR_MARKERS.get(name), (
+        f"{name}'s floor carries the marker {marker!r}, expected "
+        f"{RUNTIME_FLOOR_MARKERS.get(name)!r}: the floor doesn't apply where the marker is false"
+    )
+
+
+@pytest.mark.parametrize(("name", "required"), MCP_EXTRA_FLOORS.items(), ids=list(MCP_EXTRA_FLOORS))
+def test_mcp_extra_floor_is_outside_the_advisory(name: str, required: tuple[int, ...]) -> None:
+    """The `mcp` extra requires at least the listed version, with no marker."""
+    declared = _declared_floor(name, extra="mcp")
+    assert declared, (
+        f"{name} has no `>=` floor in pyproject.toml's `mcp` extra. pip keeps an "
+        f"existing env's {name}, so upgrading worthless[mcp] can leave a vulnerable copy."
+    )
+    floor, marker = declared
+    assert _version_tuple(floor) >= required, (
+        f"{name}>={floor} is below the required {'.'.join(map(str, required))}"
+    )
+    assert marker is None, f"{name}'s floor carries the marker {marker!r}; it must apply everywhere"
