@@ -223,9 +223,10 @@ class StreamingUsageCollector:
 
         if self.provider == "openai":
             usage = parsed.get("usage")
-            if usage and isinstance(usage, dict):
-                # Some upstreams send usage on every chunk: an unreadable latest
-                # total makes the usage unreadable rather than leaving an earlier one.
+            # A null or empty usage carries no new total. Anything else replaces the
+            # earlier one: some upstreams send usage on every chunk, and an unreadable
+            # latest total (or a usage that isn't an object) makes the usage unreadable.
+            if usage is not None and usage != {}:
                 self._total_tokens = _sum_counts(usage, "total_tokens")
                 self._model = parsed.get("model", self._model)
         elif self.provider == "anthropic":
@@ -239,9 +240,7 @@ class StreamingUsageCollector:
                 self._model = msg.get("model", self._model)
             elif self._pending_event == "message_delta":
                 usage = parsed.get("usage")
-                if not isinstance(usage, dict):
-                    return
-                if "output_tokens" in usage:
+                if usage is not None and (not isinstance(usage, dict) or "output_tokens" in usage):
                     # The count is cumulative: an unreadable latest one makes the
                     # usage unreadable rather than leaving an earlier count in place.
                     self._output_tokens = _sum_counts(usage, "output_tokens")
