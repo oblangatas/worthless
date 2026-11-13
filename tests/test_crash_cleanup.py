@@ -107,7 +107,7 @@ def test_kill_9_on_up_takes_the_proxy_sidecar_and_shares_with_it(
         assert not poll_health(port, timeout=0.5), "the port still answers after up died"
         # ...and drops proxy.pid, so `down` can't later kill a reused pid.
         assert not (home / "w" / "proxy.pid").exists(), "stale proxy.pid left behind"
-        kids["sidecar"].wait(timeout=10)
+        kids["sidecar"].wait(timeout=8)  # CHANGELOG: "less than 8 seconds"
     finally:
         _kill_all(sup, *kids.values())
 
