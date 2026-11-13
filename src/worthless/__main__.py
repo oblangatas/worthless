@@ -6,4 +6,5 @@ install, never whichever ``worthless`` is first on PATH (worthless-l0s1).
 
 from worthless.cli.app import app
 
-app(prog_name="worthless")
+if __name__ == "__main__":
+    app(prog_name="worthless")

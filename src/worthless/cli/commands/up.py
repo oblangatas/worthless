@@ -446,6 +446,10 @@ def start_supervised_proxy(
         log_fd = os.open(str(log_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         subprocess.Popen(  # nosec B603 — argv is this interpreter + fixed flags
             cmd,
+            # `-m` puts the cwd first on sys.path; the cwd is the user's project,
+            # so a `worthless/` package in a cloned repo would run as the proxy.
+            # Start in our own 0700 home instead (PR #767 security review).
+            cwd=str(home.base_dir),
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=log_fd,
