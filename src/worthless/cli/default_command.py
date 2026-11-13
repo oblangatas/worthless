@@ -78,7 +78,7 @@ def _proxy_is_running(home: WorthlessHome) -> tuple[bool, int | None, int]:
 
 
 def _raise_if_service_requires_start(runtime: ProxyRuntimeState, console) -> None:
-    """Stop default command when a platform service is installed but not running."""
+    """Stop the default command when an installed service is not answering."""
     if runtime.service_state == ServiceState.STOPPED:
         console.print_hint(
             "  Proxy not running. Service is installed but stopped — run `worthless service start`."
@@ -88,6 +88,15 @@ def _raise_if_service_requires_start(runtime: ProxyRuntimeState, console) -> Non
         console.print_hint(
             "  Proxy not running. Service failed — "
             "run `worthless service status` or `worthless service restart`."
+        )
+        raise typer.Exit(code=2)
+    if runtime.service_state == ServiceState.RUNNING:
+        # Alive but not answering (still starting, or waiting for a key that
+        # opens). A detached proxy would take its port and leave the service
+        # crash-looping on restart (worthless-n0xy).
+        console.print_hint(
+            "  Proxy not answering. The service is running but not healthy yet — "
+            "run `worthless service status`."
         )
         raise typer.Exit(code=2)
 

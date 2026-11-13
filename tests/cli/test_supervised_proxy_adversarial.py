@@ -349,6 +349,32 @@ class TestDefaultCommandStress:
         assert exc_info.value.exit_code == 2
         mock_spawn.assert_not_called()
 
+    def test_a_running_but_unanswering_service_gets_no_second_proxy(
+        self, home: WorthlessHome
+    ) -> None:
+        """worthless-n0xy: the service is up but not healthy yet (still starting,
+        or waiting for a key that opens). A detached proxy would take its port and
+        leave the service crash-looping, so plain `worthless` must not start one."""
+        runtime = ProxyRuntimeState(
+            running=False,
+            pid=None,
+            port=8787,
+            source="service",
+            service_state=ServiceState.RUNNING,
+        )
+        console = MagicMock()
+        with (
+            patch("worthless.cli.default_command.detect_proxy_runtime", return_value=runtime),
+            patch("worthless.cli.default_command.start_supervised_proxy") as mock_spawn,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            _ensure_proxy_running(home, console)
+
+        assert exc_info.value.exit_code == 2
+        mock_spawn.assert_not_called()
+        said = " ".join(str(c) for c in console.print_hint.call_args_list)
+        assert "worthless service status" in said
+
     def test_rapid_ensure_proxy_running_idempotent(
         self, home: WorthlessHome, monkeypatch: pytest.MonkeyPatch
     ) -> None:
