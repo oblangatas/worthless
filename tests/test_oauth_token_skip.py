@@ -268,7 +268,9 @@ class TestUnshardableCredentialsWarningStaysHonest:
         # Not vacuous: the warning fired, with the count and the fix.
         assert "2 oauth/token credentials" in low, console.lines
         assert "cannot protect" in low, console.lines
-        assert "worthless doctor --fix" in low, console.lines
+        # Plain `doctor --fix` doesn't run this check; `doctor --json` lists them.
+        assert "worthless doctor --json" in low, console.lines
+        assert "doctor --fix" not in low, console.lines
         for pattern in _FALSE_SAFETY_CLAIMS:
             assert re.search(pattern, low) is None, (
                 f"the unshardable-credentials warning offers false comfort "

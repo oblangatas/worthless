@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass
@@ -125,21 +126,25 @@ def _home_relative_path(*parts: str) -> Path:
 def _probe_is_file(path: Path, surface_label: str, caveats: list[str] | None) -> bool:
     """Presence probe that can never raise.
 
-    ``Path.is_file()`` does NOT swallow ``EACCES`` — pathlib ignores only
-    ENOENT/ENOTDIR/EBADF/ELOOP — so a credential directory this process
-    can't traverse propagates ``PermissionError`` and takes down the whole
-    scan. Treat an un-probeable surface as absent, but record a caveat:
-    "we couldn't look" must never be reported as "it isn't there", which is
-    exactly the false all-clear this module exists to prevent.
+    Only ENOENT/ENOTDIR mean "it isn't there". Any other failure, such as a
+    credential directory this process can't traverse, means "we couldn't
+    look": treat the surface as absent, but record a caveat. Reporting it as
+    "it isn't there" is exactly the false all-clear this module exists to
+    prevent.
+
+    ``stat()``, not ``is_file()``: on Python 3.14, ``is_file()`` returns
+    False where it can't look, instead of raising.
 
     The caveat names the surface, never the path — caveats surface in CLI
-    output and CI logs, and a home-relative path is needless detail there
-    (the full path goes to the debug log instead).
+    output and CI logs, and a home-relative path is needless detail there.
+    The full path is logged at DEBUG only, which the CLI doesn't print.
     """
     try:
-        return path.is_file()
+        return stat.S_ISREG(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
     except OSError as exc:
-        logger.warning("could not probe %s at %s: %s", surface_label, path, exc)
+        logger.debug("could not probe %s at %s: %s", surface_label, path, exc)
         if caveats is not None:
             caveats.append(f"{surface_label} could not be checked ({exc.strerror or 'unreadable'})")
         return False
@@ -236,6 +241,17 @@ def _detect_minimax_cli(
         )
 
 
+def _agent_store_label(agent_dir: Path) -> str:
+    """Where an agent's auth store is, for a caveat that ``lock`` prints and
+    CI logs keep: from ``~`` when it's under home (``~/.openclaw/agents/<id>/
+    agent``, or an ``agentDir`` the user set), else the path as configured.
+    """
+    try:
+        return f"~/{agent_dir.relative_to(Path.home()).as_posix()}"
+    except ValueError:
+        return str(agent_dir)
+
+
 def _detect_auth_profiles_oauth_token(
     findings: list[UnshardableCredentialFinding],
     caveats: list[str] | None = None,
@@ -271,10 +287,13 @@ def _detect_auth_profiles_oauth_token(
             # drop EVERY oauth/token profile inside it and still report "no
             # unshardable credentials found" — a false all-clear caused by a
             # file we couldn't parse. Skip it, but say so.
-            logger.warning("could not read %s: %s", auth_profiles_path, exc)
+            logger.debug("could not read %s: %s", auth_profiles_path, exc)
             if caveats is not None:
+                # The CLI prints no DEBUG log, so with several agents the
+                # caveat itself has to say which store to look at.
                 caveats.append(
-                    "an OpenClaw auth-profiles.json could not be read — any "
+                    "an OpenClaw auth-profiles.json could not be read "
+                    f"(in {_agent_store_label(agent_dir)}) — any "
                     "OAuth/token profiles inside it were not checked"
                 )
             continue

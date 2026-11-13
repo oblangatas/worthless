@@ -83,9 +83,18 @@ PLAYBOOKS: dict[str, str] = {
     ),
     "unshardable_credentials": (
         "These aren't API keys — they're OAuth logins (Claude Code, Codex, Gemini, MiniMax, "
-        "or Google Vertex), and the proxy can't shard or protect them at all. Run `worthless "
-        "doctor --fix` to clear the ones you don't need; each provider re-prompts you to log "
-        "in again on next use. Vertex needs one extra step after clearing: "
-        "`gcloud auth application-default login`."
+        "Google Vertex, or an OpenClaw auth profile), and the proxy can't shard or protect "
+        "them at all. Each finding's `location` says where it is, so you can remove only the "
+        "ones you don't need: delete a plain file path (if it's a symlink, delete the file it "
+        "points to; deleting the link leaves the login in place); for `keychain:<name>`, run "
+        '`security delete-generic-password -s "<name>"`; for `<file>#<id>`, delete only the '
+        "`<id>` entry under `profiles` in that file, not the whole file, which can hold other "
+        "profiles too. Each provider asks you to log in again on next use. Vertex needs one "
+        "extra step after removing its login: `gcloud auth application-default login`, which "
+        "writes to the default path, so if `GOOGLE_APPLICATION_CREDENTIALS` named the file you "
+        "removed, unset `GOOGLE_APPLICATION_CREDENTIALS` or point it at the new file. One "
+        "exception: a Vertex file whose `type` field is `service_account` is a service-account "
+        "key, not a login. Google never lets you download one again and `gcloud` doesn't "
+        "recreate it, so keep it."
     ),
 }

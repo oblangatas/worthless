@@ -2928,16 +2928,20 @@ def _print_unshardable_credentials_warning(console: WorthlessConsole) -> None:
         console.print_warning(
             f"[WARN] {n} OAuth/token credential{'s' if n != 1 else ''} found that lock "
             "CANNOT protect (the proxy is not load-bearing for these) — run "
-            "`worthless doctor --fix` to clear the ones you don't need."
+            "`worthless doctor --json` to review them before clearing any you don't need."
         )
     # WOR-797 (Gap 1, second surface): a Linux/WSL scan cannot inspect the two
     # macOS-keychain surfaces. Surface that caveat here — exactly as `doctor`
     # does — so a partial scan on the target platform never reads as a clean
-    # bill of health. Runs on both the has-keys and zero-keys paths.
+    # bill of health. Runs on both the has-keys and zero-keys paths. Only
+    # `doctor --json` runs this check; plain `doctor` can say "No issues found."
     caveats = detection_caveats() + probe_caveats
     if caveats:
         console.print_hint(
-            "[NOTE] " + "; ".join(caveats) + " — run `worthless doctor` for a full check."
+            "[NOTE] "
+            + "; ".join(caveats)
+            + " — run `worthless doctor --json` to list the logins it finds"
+            " and the places it couldn't check."
         )
 
 

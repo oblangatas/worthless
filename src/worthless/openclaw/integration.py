@@ -1590,10 +1590,27 @@ def _agent_auth_store_dirs(state_dir: Path, config: dict | None = None) -> list[
     dirs = {agents_root / "main" / "agent"}
     if agents_root.is_dir():
         for entry in agents_root.iterdir():
-            if entry.is_dir():
+            if _is_dir_or_unknown(entry):
                 dirs.add(entry / "agent")
     dirs.update(_agent_dir_overrides(config))
     return sorted(dirs)
+
+
+def _is_dir_or_unknown(path: Path) -> bool:
+    """True for a directory, and for an entry whose type can't be read.
+
+    Keeping the second, such as an ``agents/<id>`` symlink into a directory
+    this process can't search, lets detection report the unreadable files as
+    a caveat; scrub and restore skip them like any other unreadable store.
+    ``is_dir()`` can't decide this: on Python 3.14 it returns False where it
+    can't look, instead of raising.
+    """
+    try:
+        return stat.S_ISDIR(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
 
 
 def _scrub_models_json(path: Path, provider: str, secret_ref: str) -> bool:

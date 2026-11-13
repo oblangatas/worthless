@@ -8,7 +8,7 @@ none can be routed through the split-the-key proxy. This check enumerates
 all 8 such surfaces (see :mod:`worthless.openclaw.unshardable_credentials`
 for the full source-verified list) so the user gets an honest "the proxy
 isn't load-bearing for this credential" signal instead of assuming ``lock``
-already covers it, and can clear any of them via ``--fix``.
+already covers it, and can clear all of them via ``--fix``.
 
 Vertex ADC is the one surface with no in-app re-login flow of its own
 (real OpenClaw throws instead of returning ``null`` on a missing ADC file) —
