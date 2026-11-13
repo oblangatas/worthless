@@ -17,7 +17,6 @@ import os
 import shutil
 import socket
 import subprocess  # nosec B404 — required for sidecar subprocess lifecycle
-import sys
 import tempfile
 import threading
 import time
@@ -27,6 +26,7 @@ from typing import IO, NamedTuple
 from collections.abc import Callable
 
 from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.cli.platform import python_module_argv
 from worthless.crypto.splitter import split_key
 from worthless.crypto.types import zero_buf
 from worthless.sidecar import _hardening
@@ -623,7 +623,7 @@ def spawn_sidecar(
     # directly) so the drainer and the error path never race.
     stderr_buf: collections.deque[bytes] = collections.deque()
     proc = subprocess.Popen(  # noqa: S603  # nosec B603 — args are static, no shell
-        [sys.executable, "-m", "worthless.sidecar"],
+        python_module_argv("worthless.sidecar"),
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,

@@ -19,6 +19,7 @@ from worthless.cli.commands.service._common import ServiceState
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.commands.up import start_daemon, start_supervised_proxy
 from worthless.cli.default_command import _ensure_proxy_running
+from worthless.cli.platform import python_module_argv
 
 
 class TestStartSupervisedProxyIntegration:
@@ -55,7 +56,7 @@ class TestStartSupervisedProxyIntegration:
             pid = start_supervised_proxy(home_with_key, 8787, log_file, console)
 
         # worthless-l0s1: this interpreter's worthless, never whichever is on PATH.
-        assert captured["cmd"] == [sys.executable, "-m", "worthless", "up", "--port", "8787"]
+        assert captured["cmd"] == python_module_argv("worthless", "up", "--port", "8787")
         assert captured["kwargs"]["start_new_session"] is True
         assert captured["kwargs"]["env"]["WORTHLESS_HOME"] == str(home_with_key.base_dir)
         assert captured["kwargs"]["env"]["WORTHLESS_PORT"] == "8787"
@@ -246,7 +247,7 @@ class TestSupervisedUpSidecarContract:
                 MagicMock(),
             )
 
-        assert captured["cmd"][3:6] == ["up", "--port", "8787"]
+        assert captured["cmd"][-3:] == ["up", "--port", "8787"]
 
 
 class TestTheDefaultCommandStartsItself:
@@ -274,7 +275,7 @@ class TestTheDefaultCommandStartsItself:
             start_supervised_proxy(
                 home_with_key, 8787, home_with_key.base_dir / "proxy.log", MagicMock()
             )
-        assert captured["cmd"][:3] == [sys.executable, "-m", "worthless"]
+        assert captured["cmd"][:4] == python_module_argv("worthless")
 
     def test_python_dash_m_worthless_really_runs(self) -> None:
         """The spawn above is only real if `python -m worthless` is an entry point."""
