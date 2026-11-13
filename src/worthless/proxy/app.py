@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import re
+import signal
+import stat
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -173,6 +175,63 @@ def _sanitize_upstream_error(status_code: int, body: bytes, provider: str) -> by
     return _error_body(status_code, "upstream provider error", "api_error", provider)
 
 
+def _forget_pid_file() -> None:
+    """Remove ``proxy.pid`` when it names this proxy and the supervisor is gone.
+
+    The dead supervisor can't clean it up, and a stale pid there could later
+    name an unrelated process: ``worthless down`` kills whatever it names. A
+    file a newer ``up`` already rewrote names another pid and stays.
+    """
+    home = os.environ.get("WORTHLESS_HOME")
+    if not home:
+        return
+    pid_file = Path(home) / "proxy.pid"  # cli.process.pid_path; format "pid\nport"
+    with contextlib.suppress(OSError, ValueError, IndexError):
+        if int(pid_file.read_text().split()[0]) == os.getpid():
+            pid_file.unlink()
+
+
+def _watch_liveness_fd() -> int | None:
+    """Shut the proxy down when its supervisor dies (worthless-yfxm).
+
+    ``up`` and ``wrap`` keep the write end of a pipe and pass the read end as
+    ``WORTHLESS_LIVENESS_FD``. When the supervisor dies, even by ``kill -9``,
+    the kernel closes the write end and the read end hits EOF. We then SIGTERM
+    ourselves, so uvicorn runs its normal graceful shutdown, this lifespan's
+    cleanup included. Returns the watched fd, or None when there is no pipe
+    (a proxy started by hand or by a service manager).
+    """
+    raw = os.environ.get("WORTHLESS_LIVENESS_FD")
+    if not raw:
+        return None
+    loop = asyncio.get_running_loop()
+
+    def _on_readable() -> None:
+        try:
+            data = os.read(fd, 64)
+        except OSError:
+            data = b""
+        if data:  # only EOF means the supervisor is gone
+            return
+        loop.remove_reader(fd)
+        logger.warning("supervisor is gone (liveness pipe closed); shutting down")
+        _forget_pid_file()
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    # A stale or bogus value (a closed fd, a regular file that always reads
+    # as EOF on kqueue, a loop without add_reader) must never stop a healthy
+    # proxy or fail its startup: watch nothing and say so.
+    try:
+        fd = int(raw)
+        if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+            raise ValueError("not a pipe")
+        loop.add_reader(fd, _on_readable)
+    except (ValueError, OSError, NotImplementedError) as exc:
+        logger.warning("ignoring WORTHLESS_LIVENESS_FD=%r: %s", raw, exc)
+        return None
+    return fd
+
+
 async def _sweep_loop(ledger: SpendLedger, interval: float, max_age: float) -> None:
     """Background task: periodically settle orphaned holds at their estimate.
 
@@ -317,9 +376,14 @@ async def _lifespan(app: FastAPI):
         db.stop()
         raise
 
+    # Last step of startup: a supervisor that died while we started has
+    # already closed the pipe, so this fires at once.
+    liveness_fd = _watch_liveness_fd()
     try:
         yield
     finally:
+        if liveness_fd is not None:
+            asyncio.get_running_loop().remove_reader(liveness_fd)
         # Cancel background tasks before closing the DB — they MUST NOT race
         # db.close(). Both cancel() and await are required: cancel() alone leaves
         # the task running until the event loop closes, causing "task was

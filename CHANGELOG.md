@@ -113,13 +113,21 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - If your environment uses a Linux distribution's certifi older than 2026.10.23 that is patched to read the system certificate store, as Debian's is, the upgrade puts PyPI's copy in front of it. That happens through a `--system-site-packages` venv, `pip install --user`, or pip run against the system Python. A distribution certifi at 2026.10.23 or later stays in place instead, and if it reads the system store, as Arch's does (its `cacert.pem` is a link to `/etc/ssl/certs/ca-certificates.crt`), the proxy trusts that store: the floor doesn't change what it holds, so check the file `python -c 'import certifi; print(certifi.where())'` prints, run with the proxy's Python, as described at the end of this point. An up-to-date Debian store already leaves out the affected root, so there the upgrade adds no protection: it swaps Debian's store for certifi's list, which leaves out about 40 roots Debian 13 still trusts (among them DigiCert Global Root CA, GlobalSign Root CA and GTS Root R2) and any roots you added to the system store. If your upstream chains to one of those, or sits behind an internal CA or a TLS-inspecting proxy, the proxy's calls to it then fail certificate verification, and your app gets `502 bad gateway`. To use the system store again, keep `ca-certificates` up to date, check that the bundle contains none of the roots the oss-security notice lists for the compromised keys: emSign ECC Root CA - G3, emSign Root TLS CA - G3 and AAA Certificate Services, and none of the compromised intermediates the notice lists (an old store, or a certificate you added yourself, can still include one; Debian 13's current store has none of the three roots), and set `WORTHLESS_UPSTREAM_CA_BUNDLE` to it where the proxy starts: `/etc/ssl/certs/ca-certificates.crt` on Debian and Ubuntu, `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` on Fedora.
 
 ### Fixed
+- **A crashed `worthless up` or `worthless wrap` no longer leaves the proxy running** (`worthless-yfxm`).
+  Before: if `worthless up` or `worthless wrap` was killed with `kill -9` or crashed, the proxy kept running. It kept its port and kept answering requests until you ran `worthless down`.
+  Now: the proxy stops less than 2 seconds after `worthless up` or `worthless wrap` stops. In our tests the proxy of a killed `worthless up` stopped after about 0.2 seconds.
+
+  **Limits.**
+  - If `worthless up` is frozen (for example with `kill -STOP`) but not stopped, the proxy keeps running.
+  - A request that is still running finishes first. A long streaming answer can make the proxy stop later.
+  - If the proxy is killed at the same time as `worthless up` (for example `pkill -9 -f worthless`), the old `proxy.pid` stays. Delete `~/.worthless/proxy.pid` before you run `worthless down`.
+
 - **A crashed `worthless up` no longer leaves your key shares on disk** (`worthless-dhfn`, [#713](https://github.com/oblangatas/worthless/pull/713)).
   Before: if `worthless up` was killed with `kill -9` or crashed, its helper process kept running. Both key share files stayed in `~/.worthless/run/<pid>/`, also after a restart. `worthless doctor` reported "No issues found" because the helper still answered.
   Now: the helper checks every 0.5 seconds that `worthless up` is still running. When `worthless up` is gone, the helper deletes both share files and its socket, then stops. It stops less than 8 seconds after `worthless up` stopped.
 
   **Limits.**
-  - The key stays in the helper's memory for less than 8 seconds after `worthless up` stops. During that time it still answers the proxy that `worthless up` left running.
-  - The proxy also keeps running after `worthless up` crashes. Run `worthless down` to stop it.
+  - The key stays in the helper's memory for less than 8 seconds after `worthless up` stops.
   - If the helper is killed at the same time as `worthless up` (for example `pkill -9 -f worthless`), the share files stay. `worthless doctor` reports them.
   - A helper left running by an older version of Worthless does not stop. Stop it by hand. `worthless doctor` then reports its share files.
   - If `worthless up` is killed and the terminal closes less than 0.5 seconds later, the share files stay. `worthless doctor` reports them.

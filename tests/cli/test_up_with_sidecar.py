@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import collections
 import os
+import select
+import stat
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -183,7 +185,9 @@ class TestSidecarBeforeProxy:
 
         proxy_proc = _FakeProxyProc(poll_sequence=[None, 0])
 
-        def fake_spawn_proxy(*, env: dict[str, str], port: int) -> tuple[_FakeProxyProc, int]:
+        def fake_spawn_proxy(
+            *, env: dict[str, str], port: int, **_: Any
+        ) -> tuple[_FakeProxyProc, int]:
             order.append("proxy")
             captured_proxy_env.update(env)
             return proxy_proc, port
@@ -213,6 +217,52 @@ class TestSidecarBeforeProxy:
         assert captured_proxy_env["WORTHLESS_SIDECAR_SOCKET"].endswith("sidecar.sock")
         assert captured_proxy_env["WORTHLESS_SIDECAR_UID"] == "1002"
 
+    def test_up_hands_the_proxy_a_liveness_pipe_it_holds_open(self, home: WorthlessHome) -> None:
+        """worthless-yfxm: the proxy exits when this pipe hits EOF, i.e. when up dies.
+
+        At spawn time the fd must be a pipe read end whose write end ``up``
+        still holds (not readable: no EOF, no data).
+        """
+        from worthless.cli.commands import up as up_mod
+
+        seen: dict[str, object] = {}
+        proxy_proc = _FakeProxyProc(poll_sequence=[None, 0])
+
+        def fake_spawn_proxy(
+            *, env: dict[str, str], port: int, liveness_fd: int | None = None
+        ) -> tuple[_FakeProxyProc, int]:
+            seen["fd"] = liveness_fd
+            if liveness_fd is not None:
+                seen["is_pipe"] = stat.S_ISFIFO(os.fstat(liveness_fd).st_mode)
+                seen["readable"] = bool(select.select([liveness_fd], [], [], 0)[0])
+            return proxy_proc, port
+
+        with (
+            patch.object(
+                up_mod,
+                "spawn_sidecar",
+                lambda socket_path, shares, allowed_uid, **_: _make_handle(
+                    _FakeSidecarProc(), shares.run_dir
+                ),
+            ),
+            patch.object(up_mod, "spawn_proxy", fake_spawn_proxy),
+            patch.object(up_mod, "poll_health_pid", return_value=proxy_proc.pid),
+            patch.object(up_mod, "write_pid"),
+            patch.object(up_mod, "_upgrade_pidfile_if_trusted", return_value=proxy_proc.pid),
+            patch.object(up_mod, "shutdown_sidecar"),
+        ):
+            up_mod._start_foreground(
+                home=home,
+                proxy_env={"WORTHLESS_DB_PATH": "x", "WORTHLESS_HOME": str(home.base_dir)},
+                port=8787,
+                pid_file=home.base_dir / "proxy.pid",
+                console=MagicMock(),
+            )
+
+        assert seen["fd"] is not None, "up spawned the proxy without a liveness pipe"
+        assert seen["is_pipe"] is True
+        assert seen["readable"] is False, "write end already closed: the proxy would exit at once"
+
 
 class TestIgnoredUpstreamEnvNotice:
     def test_up_says_which_proxy_settings_the_proxy_ignores(
@@ -233,7 +283,7 @@ class TestIgnoredUpstreamEnvNotice:
 
         with (
             patch.object(up_mod, "spawn_sidecar", fake_spawn_sidecar),
-            patch.object(up_mod, "spawn_proxy", lambda *, env, port: (proxy_proc, port)),
+            patch.object(up_mod, "spawn_proxy", lambda *, env, port, **_: (proxy_proc, port)),
             patch.object(up_mod, "poll_health_pid", return_value=proxy_proc.pid),
             patch.object(up_mod, "write_pid"),
             patch.object(up_mod, "_upgrade_pidfile_if_trusted", return_value=proxy_proc.pid),
@@ -282,7 +332,9 @@ class TestShutdownOrdering:
         ) -> SidecarHandle:
             return _make_handle(sidecar_proc, shares.run_dir)
 
-        def fake_spawn_proxy(*, env: dict[str, str], port: int) -> tuple[_FakeProxyProc, int]:
+        def fake_spawn_proxy(
+            *, env: dict[str, str], port: int, **_: Any
+        ) -> tuple[_FakeProxyProc, int]:
             return proxy_proc, port
 
         with (
@@ -339,7 +391,9 @@ class TestSidecarCrashDetected:
         ) -> SidecarHandle:
             return _make_handle(sidecar_proc, shares.run_dir)
 
-        def fake_spawn_proxy(*, env: dict[str, str], port: int) -> tuple[_FakeProxyProc, int]:
+        def fake_spawn_proxy(
+            *, env: dict[str, str], port: int, **_: Any
+        ) -> tuple[_FakeProxyProc, int]:
             return proxy_proc, port
 
         with (
@@ -392,7 +446,7 @@ class TestSidecarCrashDetected:
 
         with (
             patch.object(up_mod, "spawn_sidecar", fake_spawn_sidecar),
-            patch.object(up_mod, "spawn_proxy", lambda *, env, port: (proxy_proc, port)),
+            patch.object(up_mod, "spawn_proxy", lambda *, env, port, **_: (proxy_proc, port)),
             # poll_health_pid returns None — proxy never became healthy.
             # Pre-fix: this triggers WRTLS-104. Post-fix: we check the
             # sidecar first, see it's dead, and raise WRTLS-113 instead.
@@ -448,7 +502,7 @@ class TestOrphanCleanupOnInitFailure:
             spawned_handles.append(handle)
             return handle
 
-        def fake_spawn_proxy(*, env: dict[str, str], port: int) -> tuple[Any, int]:
+        def fake_spawn_proxy(*, env: dict[str, str], port: int, **_: Any) -> tuple[Any, int]:
             raise RuntimeError("simulated proxy spawn failure")
 
         shutdown_calls: list[SidecarHandle] = []
@@ -587,7 +641,7 @@ class TestFernetKeyZeroedAfterSplit:
             patch.object(
                 up_mod,
                 "spawn_proxy",
-                lambda *, env, port: (proxy_proc, port),
+                lambda *, env, port, **_: (proxy_proc, port),
             ),
             patch.object(up_mod, "poll_health_pid", return_value=proxy_proc.pid),
             patch.object(up_mod, "write_pid"),
@@ -769,7 +823,7 @@ class TestSignalHandlersBeforeSpawn:
                 patch.object(
                     up_mod,
                     "spawn_proxy",
-                    lambda *, env, port: (proxy_proc, port),
+                    lambda *, env, port, **_: (proxy_proc, port),
                 ),
                 patch.object(up_mod, "poll_health_pid", return_value=proxy_proc.pid),
                 patch.object(up_mod, "write_pid"),
@@ -895,7 +949,7 @@ class TestConcurrentUpLock:
             patch.object(
                 up_mod,
                 "spawn_proxy",
-                lambda *, env, port: (proxy_proc, port),
+                lambda *, env, port, **_: (proxy_proc, port),
             ),
             patch.object(up_mod, "poll_health_pid", return_value=proxy_proc.pid),
             patch.object(up_mod, "write_pid"),
@@ -953,7 +1007,7 @@ class TestExpertPanelMustFix:
         try:
             with (
                 patch.object(up_mod, "spawn_sidecar", fake_spawn_sidecar),
-                patch.object(up_mod, "spawn_proxy", lambda *, env, port: (proxy_proc, port)),
+                patch.object(up_mod, "spawn_proxy", lambda *, env, port, **_: (proxy_proc, port)),
                 patch.object(up_mod, "poll_health_pid", return_value=proxy_proc.pid),
                 patch.object(up_mod, "write_pid"),
                 patch.object(up_mod, "_upgrade_pidfile_if_trusted", return_value=proxy_proc.pid),
