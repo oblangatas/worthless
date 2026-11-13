@@ -116,6 +116,13 @@ class TestLingerFinding:
 # --- run() integration --------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _systemd_is_up(monkeypatch):
+    """These run on any host; systemd being down is its own finding (tkv1),
+    tested in tests/cli/test_linger_refused.py."""
+    monkeypatch.setattr(service_health, "_systemd_down", lambda name: False)
+
+
 class TestRun:
     def test_skips_when_no_unit_installed(self, ctx, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(service_health, "current_platform_backend_name", lambda: "systemd")
@@ -156,6 +163,25 @@ class TestRun:
         result = service_health.run(ctx)
         assert result["status"] == "ok"
         assert result["findings"] == []
+
+    def test_systemd_down_replaces_the_linger_dead_end(self, ctx, tmp_path, monkeypatch) -> None:
+        """worthless-tkv1: an orphaned unit on a box without systemd (WSL with
+        systemd off) used to get "Run `loginctl enable-linger`", which can't work."""
+        home_dir = ctx.home.base_dir
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        unit = tmp_path / "worthless-proxy.service"
+        unit.write_text(f"ExecStart={binary} up\nEnvironment=WORTHLESS_HOME={home_dir}\n")
+        monkeypatch.setattr(service_health, "current_platform_backend_name", lambda: "systemd")
+        monkeypatch.setattr(service_health, "_installed_unit_path", lambda name: unit)
+        monkeypatch.setattr(service_health, "resolve_worthless_binary", lambda: binary)
+        monkeypatch.setattr(service_health, "_systemd_down", lambda name: True)
+        monkeypatch.setattr(service_health, "_linger_ok_if_systemd", lambda name: False)
+
+        result = service_health.run(ctx)
+        kinds = {f["kind"] for f in result["findings"]}
+        assert kinds == {"systemd_not_running"}
+        assert all("enable-linger" not in f["remediation"] for f in result["findings"])
 
     def test_detects_multiple_findings(self, ctx, tmp_path, monkeypatch) -> None:
         binary = tmp_path / "worthless"

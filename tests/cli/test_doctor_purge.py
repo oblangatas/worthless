@@ -13,6 +13,8 @@ embeds the test name and ``"orphan"`` matched any path-echoing error.
 
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 
 
@@ -21,6 +23,7 @@ from worthless.cli.bootstrap import WorthlessHome
 from tests.cli.conftest import (
     TEST_OPENAI_KEY,
     cli_invoke,
+    dotenv_value,
     has_all_tokens,
     list_enrollments,
     lock_env,
@@ -200,4 +203,279 @@ class TestDoctorOrphanPurge:
         )
         assert len(after) == 1, (
             f"expected exactly 1 row remaining (env_b's), got {len(after)}:\n{after}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A moved .env is not a dead key
+# ---------------------------------------------------------------------------
+
+
+class TestDoctorKeepsMovedEnv:
+    """A missing ``.env`` *file* is not the same as a deleted ``.env`` *line*.
+
+    Removing a git worktree or moving a project folder leaves the ``.env`` —
+    and Shard A inside it — intact, just somewhere else. ``doctor --fix`` used
+    to treat a missing file exactly like a deleted line and purge the key,
+    destroying Shard B: the half that was still safe. Only a deleted line in a
+    file that still exists is a dead key.
+    """
+
+    def test_doctor_fix_yes_keeps_key_when_env_file_moved(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+        assert len(list_enrollments(home_dir)) == 1, "precondition: key enrolled"
+
+        moved = tmp_path / "moved-project" / ".env"
+        moved.parent.mkdir()
+        env_file.rename(moved)
+
+        result = cli_invoke(["doctor", "--fix", "--yes"], home_dir)
+        assert not looks_like_traceback(result.output)
+        assert len(list_enrollments(home_dir)) == 1, (
+            "doctor --fix --yes purged a key whose .env had only moved:\n" + result.output
+        )
+
+        # The real proof: put the project back and the original key comes back.
+        moved.rename(env_file)
+        unlocked = cli_invoke(["unlock", "--env", str(env_file)], home_dir)
+        assert unlocked.exit_code == 0, (
+            "key not recoverable after moving the project back:\n" + unlocked.output
+        )
+        assert dotenv_value(env_file, "OPENAI_API_KEY") == TEST_OPENAI_KEY
+
+    def _move_project(self, env_file: Path, tmp_path: Path) -> Path:
+        moved = tmp_path / "moved-project" / ".env"
+        moved.parent.mkdir()
+        env_file.rename(moved)
+        return moved
+
+    @staticmethod
+    def _flat(output: str) -> str:
+        """Collapse Rich's 80-column wrap so a phrase can't be split by a newline."""
+        return " ".join(output.split()).lower()
+
+    def test_doctor_says_env_not_found_not_line_deleted_when_moved(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+        self._move_project(env_file, tmp_path)
+
+        result = cli_invoke(["doctor"], home_dir)
+        out = self._flat(result.output)
+
+        assert "line deleted" not in out, (
+            "doctor blames a deleted .env line when the whole file moved:\n" + result.output
+        )
+        assert "not found" in out, "doctor must say the .env was not found:\n" + result.output
+
+    def test_unlock_says_env_not_found_not_line_deleted_when_moved(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+        self._move_project(env_file, tmp_path)
+
+        result = cli_invoke(["unlock", "--env", str(env_file)], home_dir)
+        out = self._flat(result.output)
+
+        assert result.exit_code != 0, "unlock must refuse a key whose .env is gone"
+        assert not looks_like_traceback(result.output)
+        assert "line was deleted" not in out and "line deleted" not in out, (
+            "unlock blames a deleted .env line when the whole file moved:\n" + result.output
+        )
+
+    def test_json_fix_reports_only_the_key_it_actually_purged(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Agents read ``fixed`` to learn what was deleted. It must name the
+        purged key, never the moved key that was deliberately kept."""
+        moved_env = tmp_path / "moved" / ".env"
+        dead_env = tmp_path / "dead" / ".env"
+        for env in (moved_env, dead_env):
+            env.parent.mkdir()
+            env.write_text(f"OPENAI_API_KEY={TEST_OPENAI_KEY}\n")
+            lock_env(env, home_dir)
+
+        moved_env.rename(tmp_path / "elsewhere.env")  # project moved
+        dead_env.write_text("")  # line deleted: a genuinely dead key
+
+        result = cli_invoke(["doctor", "--fix", "--yes", "--json"], home_dir)
+        payload = json.loads(result.stdout)
+        check = next(c for c in payload["checks"] if c["check_id"] == "orphan_db")
+
+        assert {f["env_path"] for f in check["fixed"]} == {str(dead_env)}, check
+        remaining = {e.env_path for e in list_enrollments(home_dir)}
+        assert str(moved_env) in remaining, "the moved key was purged"
+        assert str(dead_env) not in remaining, "the dead key was not purged"
+
+    def test_json_advice_for_missing_env_is_honest(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        """A missing .env means moved OR deleted — `git worktree remove` deletes it.
+        So the agent is never told the key is gone (it may have moved) nor that it
+        is safe (it may be deleted). Its fix is never `uninstall`, which wipes every
+        key it can't restore — `revoke --alias` removes exactly this one. The summary
+        may still name `uninstall --force`, but only as removing Worthless entirely
+        (tests/test_doctor_uninstall_diagnosis.py pins that route)."""
+        lock_env(env_file, home_dir)
+        self._move_project(env_file, tmp_path)
+
+        result = cli_invoke(["doctor", "--json"], home_dir)
+        assert result.exit_code == 0, result.output
+        check = next(c for c in json.loads(result.stdout)["checks"] if c["check_id"] == "orphan_db")
+        (finding,) = check["findings"]
+        advice = finding["remediation"]
+
+        assert finding["reason"] == "env_file_missing", check
+        assert "this key is gone" not in advice.lower(), finding
+        assert "is safe" not in advice.lower(), finding
+        assert "worthless unlock" in advice, finding
+        assert f"worthless revoke --alias {finding['key_alias']}" in advice, finding
+        assert "uninstall" not in advice, finding
+        summary = check["summary"]
+        assert "uninstall" not in summary or "remove worthless entirely" in summary.lower(), check
+        assert check["fixable"] is False, "--fix has nothing to do for a moved key"
+
+    def test_shared_key_advice_never_offers_revoke(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """A worktree usually holds a copy of the main repo's .env, so one key is
+        locked twice under one alias. `revoke --alias` deletes the key in BOTH
+        places. With the other copy still alive, doctor must never offer it."""
+        main_env = tmp_path / "main" / ".env"
+        wt_env = tmp_path / "wt" / ".env"
+        for env in (main_env, wt_env):
+            env.parent.mkdir()
+            env.write_text(f"OPENAI_API_KEY={TEST_OPENAI_KEY}\n")
+            lock_env(env, home_dir)
+        shutil.rmtree(wt_env.parent)  # what `git worktree remove` does
+
+        doc = json.loads(cli_invoke(["doctor", "--json"], home_dir).stdout)
+        check = next(c for c in doc["checks"] if c["check_id"] == "orphan_db")
+        (finding,) = check["findings"]
+        assert "revoke" not in finding["remediation"], finding
+        assert "revoke --alias" not in check["summary"], check
+        assert str(main_env) in finding["remediation"], finding
+
+        for args in (["doctor"], ["doctor", "--fix", "--yes"]):
+            text = self._flat(cli_invoke(args, home_dir).output)
+            assert "revoke" not in text, (args, text)
+            assert str(main_env).lower() in text, (args, text)
+
+        unlocked = cli_invoke(["unlock", "--env", str(main_env)], home_dir)
+        assert unlocked.exit_code == 0, unlocked.output
+        assert dotenv_value(main_env, "OPENAI_API_KEY") == TEST_OPENAI_KEY
+
+    def test_two_moved_copies_of_one_key_never_offer_revoke(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Both copies missing: each may only have moved, and revoking either one
+        removes the key from both."""
+        envs = [tmp_path / name / ".env" for name in ("main", "wt")]
+        for env in envs:
+            env.parent.mkdir()
+            env.write_text(f"OPENAI_API_KEY={TEST_OPENAI_KEY}\n")
+            lock_env(env, home_dir)
+            shutil.rmtree(env.parent)
+
+        doc = json.loads(cli_invoke(["doctor", "--json"], home_dir).stdout)
+        check = next(c for c in doc["checks"] if c["check_id"] == "orphan_db")
+        assert len(check["findings"]) == 2, check
+        for finding in check["findings"]:
+            assert "revoke" not in finding["remediation"], finding
+        assert "revoke" not in self._flat(cli_invoke(["doctor"], home_dir).output)
+
+    def test_text_advice_for_missing_env_points_to_revoke_not_uninstall(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+        self._move_project(env_file, tmp_path)
+
+        for args in (["doctor"], ["doctor", "--fix", "--yes"]):
+            out = self._flat(cli_invoke(args, home_dir).output)
+            assert "worthless unlock" in out, (args, out)
+            assert "worthless revoke --alias" in out, (args, out)
+            assert "uninstall" not in out and "is safe" not in out, (args, out)
+
+    def test_fix_prompt_never_asks_to_delete_a_moved_key(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+        self._move_project(env_file, tmp_path)
+
+        result = cli_invoke(["doctor", "--fix"], home_dir, input="n\n")
+        out = self._flat(result.output)
+
+        assert "delete" not in out, (
+            "asked to approve a delete that will not happen:\n" + result.output
+        )
+        assert "kept 1 key" in out, result.output
+        assert len(list_enrollments(home_dir)) == 1
+
+    def test_dry_run_shows_how_to_recover_a_moved_key(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+        self._move_project(env_file, tmp_path)
+
+        result = cli_invoke(["doctor", "--fix", "--dry-run"], home_dir)
+
+        assert "put the project back" in self._flat(result.output), result.output
+
+    def test_env_path_replaced_by_a_directory_is_kept(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        """Docker creates a directory for a missing bind-mount. dotenv reads it as
+        empty, which used to look like a deleted line and get the key purged."""
+        lock_env(env_file, home_dir)
+        env_file.unlink()
+        env_file.mkdir()
+
+        cli_invoke(["doctor", "--fix", "--yes"], home_dir)
+
+        assert len(list_enrollments(home_dir)) == 1, "a key behind a directory was purged"
+
+
+# ---------------------------------------------------------------------------
+# The agent repair path must not destroy healthy keys
+# ---------------------------------------------------------------------------
+
+
+class TestAgentFixKeepsHealthyKeys:
+    """``doctor --fix --json`` is the command agents run. Its ``broken_status``
+    check called a key BROKEN when ``~/.worthless/shard_a/<alias>`` was
+    missing — but that is the *legacy* Shard A location. Current keys keep
+    Shard A in the ``.env``, so the file is never there, every healthy key
+    looked broken, and ``--fix`` deleted its enrollment. ``unlock`` then
+    failed with WRTLS-102. Shipped since v0.3.7.
+    """
+
+    def test_agent_fix_keeps_healthy_key_unlockable(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+
+        result = cli_invoke(["doctor", "--fix", "--yes", "--json"], home_dir)
+        payload = json.loads(result.stdout)
+        broken = next(c for c in payload["checks"] if c["check_id"] == "broken_status")
+
+        assert broken["findings"] == [], f"a healthy key was reported BROKEN: {broken}"
+        assert len(list_enrollments(home_dir)) == 1, "doctor --fix --json deleted a healthy key"
+
+        unlocked = cli_invoke(["unlock", "--env", str(env_file)], home_dir)
+        assert unlocked.exit_code == 0, f"healthy key not unlockable:\n{unlocked.output}"
+        assert dotenv_value(env_file, "OPENAI_API_KEY") == TEST_OPENAI_KEY
+
+    def test_agent_diagnose_does_not_call_healthy_key_broken(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+
+        result = cli_invoke(["doctor", "--json"], home_dir)
+        broken = next(
+            c for c in json.loads(result.stdout)["checks"] if c["check_id"] == "broken_status"
+        )
+        assert broken["findings"] == [], (
+            f"diagnose told the agent a healthy key is BROKEN: {broken}"
         )

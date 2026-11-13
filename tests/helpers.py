@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import errno
 import hashlib
 import os
+import sqlite3
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+
+from worthless.storage.repository import ShardRepository, StoredShard
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +69,71 @@ def fake_openrouter_key() -> str:
     return fake_key("sk-" + "or-" + "v1-", seed="openrouter-fixture-seed")
 
 
+def seed_enrollment(db_path: Path, alias: str, var_name: str, env_path: str | None) -> None:
+    """Insert one shard and its enrollment straight into the DB.
+
+    The shard bytes are placeholders, so use it only for rows nothing
+    reconstructs: an enroll-only key (``env_path=None``) or a .env that is gone.
+    """
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.execute(
+            "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (alias, b"x", b"c", b"n", "openai"),
+        )
+        con.execute(
+            "INSERT INTO enrollments (key_alias, var_name, env_path) VALUES (?, ?, ?)",
+            (alias, var_name, env_path),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def assert_not_shown(output: str, *secrets: str) -> None:
+    """Fail if any of *secrets* is in *output*, without echoing it.
+
+    Rich folds a long word across lines, so line breaks are dropped first.
+    """
+    unwrapped = output.replace("\n", "")
+    if any(secret in unwrapped for secret in secrets):
+        pytest.fail("the output shows a value it must never print")
+
+
+def make_unrestorable(env: Path) -> None:
+    """A live symlink in place of a locked .env: safe_rewrite refuses it, so
+    uninstall can't put the key back (f2ge)."""
+    target = env.with_name("elsewhere.env")
+    target.write_text("OPENAI_API_KEY=whatever\n")
+    env.unlink()
+    env.symlink_to(target)
+
+
+def refuse_console_writes(
+    monkeypatch: pytest.MonkeyPatch, method: str, *, times: int | None = None, containing: str = ""
+) -> list[str]:
+    """``WorthlessConsole.<method>`` raises EAGAIN, as a non-blocking pipe that
+    refuses a write does, for the first *times* messages containing *containing*
+    (all of them when *times* is None). Returns every message it was asked to print."""
+    from worthless.cli.console import WorthlessConsole
+
+    real = getattr(WorthlessConsole, method)
+    calls: list[str] = []
+    refused = 0
+
+    def _refuse(console, message: str) -> None:  # noqa: ANN001
+        nonlocal refused
+        calls.append(message)
+        if containing in message and (times is None or refused < times):
+            refused += 1
+            raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+        real(console, message)
+
+    monkeypatch.setattr(WorthlessConsole, method, _refuse)
+    return calls
+
+
 class MockAsyncByteStream(httpx.AsyncByteStream):
     """Mock async byte stream that yields chunks one at a time."""
 
@@ -111,3 +182,36 @@ def make_streaming_response(
         headers=_headers,
         stream=stream,
     )
+
+
+# ---------------------------------------------------------------------------
+# Enrolled shards sealed with a chosen Fernet key — worthless-saaz
+# ---------------------------------------------------------------------------
+
+
+def seal_enrolled(db_path: Path, key: bytes, *aliases: str) -> None:
+    """Enroll *aliases* in *db_path* with shard B sealed under *key*.
+
+    Real Fernet tokens, so "this key can't open that shard" is genuine. Call it
+    twice with different keys to build the mixed database a stray
+    ``WORTHLESS_FERNET_KEY`` lock creates.
+    """
+
+    async def go() -> None:
+        repo = ShardRepository(str(db_path), key)
+        try:
+            await repo.initialize()
+            for alias in aliases:
+                shard = StoredShard(
+                    shard_b=bytearray(b"b" * 32),
+                    commitment=bytearray(b"c" * 32),
+                    nonce=bytearray(b"n" * 32),
+                    provider="openai",
+                )
+                await repo.store_enrolled(
+                    alias, shard, var_name="OPENAI_API_KEY", prefix="sk-", charset="x"
+                )
+        finally:
+            repo.close()
+
+    asyncio.run(go())

@@ -34,7 +34,7 @@ Worthless protects API keys in three scenarios:
 
 ### Scope (important for agents)
 
-Worthless scans for **LLM provider API key prefixes only** — currently `openai` (`sk-`, `sk-proj-`), `anthropic` (`sk-ant-`), `google` (`AIza`), and `xai` (`xai-`). It will NOT detect general secrets: cloud-provider tokens (AWS, GCP, Azure), GitHub Personal Access Tokens, npm tokens, Cloudflare API tokens, database passwords, JWT signing keys, etc. If the user asks for a broad "find all secrets" or full `.env` audit, clarify the boundary and recommend [gitleaks](https://github.com/gitleaks/gitleaks) or [trufflehog](https://github.com/trufflesecurity/trufflehog) as a companion tool. `worthless scan --json` returns `{"schema_version": 2, "findings": [...], "orphans": [...]}` — `findings` are `.env` keys (each with `is_protected` and `is_unshardable`; `is_unshardable: true` marks a Claude Code login token in a local `.env` file, in neither git's index nor its latest commit, that `lock` deliberately won't protect; such a token alone does not fail the scan, except in the `--pre-commit` hook. The same token anywhere else — a `.env` in git's index or latest commit, a symlink, another file, the environment — is exposed and fails. Either way, any finding that carries a `remediation` is a login token: do NOT run `lock` for it, follow the `remediation`; its `exposure` field says why — `local`, `committed`, `staged`, `git_unknown`, `symlink`, `other_file` or `environment`; a `local` one may also carry `committed_before`, the newest commit on any branch or tag that added or changed that `.env` — tell the user to revoke any login token that was ever in any committed version of it (the `remediation` says so), but it does not fail the scan), `orphans` are DB enrollments whose `.env` line was deleted (run `worthless doctor --fix` to clean them up). Both arrays are empty when nothing matches; an empty `findings` on a `.env` full of cloud tokens is correct behaviour, not a miss. Agents iterating findings: `for f in result["findings"]`. Guard against future shape breaks: `assert result["schema_version"] >= 2`. (HF5 changed shape from a bare findings array — schema 1.) `worthless scan --code` is a separate, opt-in scan that detects hardcoded provider base URLs (routing bypasses) in source files — it does NOT scan for key-prefix patterns and does NOT overlap with the default `.env` scan. Both scans have distinct limits: `--code` cannot detect runtime-composed URLs, IP literals, regional endpoints, or env-var interpolation.
+Worthless scans for **LLM provider API key prefixes only** — currently `openai` (`sk-`, `sk-proj-`), `anthropic` (`sk-ant-`), `google` (`AIza`), and `xai` (`xai-`). It will NOT detect general secrets: cloud-provider tokens (AWS, GCP, Azure), GitHub Personal Access Tokens, npm tokens, Cloudflare API tokens, database passwords, JWT signing keys, etc. If the user asks for a broad "find all secrets" or full `.env` audit, clarify the boundary and recommend [gitleaks](https://github.com/gitleaks/gitleaks) or [trufflehog](https://github.com/trufflesecurity/trufflehog) as a companion tool. `worthless scan --json` returns `{"schema_version": 2, "findings": [...], "orphans": [...]}` — `findings` are `.env` keys (each with `is_protected` and `is_unshardable`; `is_unshardable: true` marks a Claude Code login token in a local `.env` file, in neither git's index nor its latest commit, that `lock` deliberately won't protect; such a token alone does not fail the scan, except in the `--pre-commit` hook. The same token anywhere else — a `.env` in git's index or latest commit, a symlink, another file, the environment — is exposed and fails. Either way, any finding that carries a `remediation` is a login token: do NOT run `lock` for it, follow the `remediation`; its `exposure` field says why — `local`, `committed`, `staged`, `git_unknown`, `symlink`, `other_file` or `environment`; a `local` one may also carry `committed_before`, the newest commit on any branch or tag that added or changed that `.env` — tell the user to revoke any login token that was ever in any committed version of it (the `remediation` says so), but it does not fail the scan), `orphans` are DB enrollments whose `.env` line or file is missing. Doctor treats a missing line as a dead key, and `worthless doctor --fix` purges it. That is a guess: a renamed variable or a commented-out line looks the same, and its key may still be recoverable (WOR-938) — check before running `--fix`. A missing file means the project moved or was deleted. If it moved, the key may still be recoverable — put the project back at the recorded path, then run `worthless unlock`. If it was deleted (`git worktree remove` deletes the `.env` too), that copy is gone — `worthless revoke --alias <alias>` removes it — but only if no other project has the same key locked: revoke removes a key everywhere it is locked, and `doctor --json` names the other copy when there is one. Never use `worthless uninstall` to clean one up: it deletes every key it can't restore. `worthless doctor --json` tells them apart: every orphan finding carries `reason`, either `env_line_missing` or `env_file_missing`. Both arrays are empty when nothing matches; an empty `findings` on a `.env` full of cloud tokens is correct behaviour, not a miss. Agents iterating findings: `for f in result["findings"]`. Guard against future shape breaks: `assert result["schema_version"] >= 2`. (HF5 changed shape from a bare findings array — schema 1.) `worthless scan --code` is a separate, opt-in scan that detects hardcoded provider base URLs (routing bypasses) in source files — it does NOT scan for key-prefix patterns and does NOT overlap with the default `.env` scan. Both scans have distinct limits: `--code` cannot detect runtime-composed URLs, IP literals, regional endpoints, or env-var interpolation.
 
 ---
 
@@ -89,7 +89,7 @@ Restart your editor. Cold-start install time on a fresh machine with only Node:
 ### Package Info
 - **Package name**: `worthless`
 - **npm wrapper**: `worthless-mcp`
-- **Version**: 0.3.13
+- **Version**: 0.3.16
 - **Entry point**: `worthless` (CLI command)
 - **Python**: 3.10+
 - **License**: AGPL-3.0
@@ -134,7 +134,7 @@ worthless --json     # Read-only state report (never writes)
 All commands are available via `worthless <command> [OPTIONS]`.
 
 ### Global Options (apply to all commands)
-- `--quiet`, `-q`: Suppress non-error output
+- `--quiet`, `-q`: Hide progress output; errors, lost keys (such as one `uninstall --force` couldn't restore) and changes to your files (such as a `*_BASE_URL` line unlock removed) still show
 - `--json`: Emit machine-readable JSON output
 - `--debug`: Show full tracebacks on error
 - `--version`, `-V`: Show version and exit
@@ -186,6 +186,7 @@ Walks every `.env` Worthless locked on this machine, reconstructs each real key 
 
 **Behavior:**
 - Restore-all-then-wipe: if ANY `.env` can't be restored, nothing is wiped (Shard B is kept for a retry)
+- Exception: a key with no link (unlock reports WRTLS-102) is not checked and IS wiped. Never run `uninstall` while unlock reports WRTLS-102
 - Enroll-only keys (no `.env`) warn and are removed, but never block the uninstall
 - OpenClaw symmetric undo is best-effort and never blocks the wipe
 
@@ -233,14 +234,15 @@ Proxy: http://127.0.0.1:8787 (running)
 #### `worthless verify [OPTIONS]`
 **Confirm the gateway is alive and routing a request right now.**
 
-Fires a live loopback probe through the proxy and reports a GREEN/RED verdict earned by a fresh delta this instant (not the cumulative `requests_proxied` counter, which can't say "now"). GREEN means the proxy is live and routing now — it does NOT prove OpenClaw isn't also bypassing on a cached token. RED (gateway down, or routing unproven) exits non-zero so scripts can gate on it.
+Fires a live loopback probe through the proxy and reports a GREEN/RED verdict earned by a fresh delta this instant (not the cumulative `requests_proxied` counter, which can't say "now"). GREEN means the proxy is live and routing now — it does NOT prove OpenClaw isn't also bypassing on a cached token. RED (gateway down, or routing unproven) exits non-zero so scripts can gate on it. GREEN also says whether protection survives a restart: only a running background service (`worthless service install`) does; a proxy from `worthless up` or plain `worthless` does not. `worthless status` prints the same line.
 
 **Options:**
-- `--json`: emit a machine-readable verdict (`{"verdict", "healthy", "aliases", "reason"}`).
+- `--json`: emit a machine-readable verdict (`{"verdict", "healthy", "aliases", "reason", "survives_restart"}`).
 
 **Output:**
 ```
 GREEN — proxy is live and a request routed through it just now (alias: openai).
+Not after a restart: the proxy isn't a background service. Keep it running: `worthless service install`
         Note: proves the proxy is live and routing now; does NOT prove OpenClaw
         isn't also bypassing on a cached token — see `worthless status`.
 ```
@@ -353,7 +355,7 @@ Runs foreground `worthless up` (sidecar-supervised) under a platform unit — no
 ```bash
 worthless service install              # interactive confirm
 worthless service install --yes        # non-interactive
-worthless service status --json
+worthless service status
 worthless service start
 worthless service logs -f
 ```
@@ -423,7 +425,7 @@ Runs three checks in sequence:
 
 1. **Recovery file imports** — if a sibling Mac ran `--fix` and wrote recovery files to `~/.worthless/recovery/`, import any missing keys into this Mac's local keychain automatically.
 2. **iCloud-synced keychain entries** — Worthless keys should stay on this Mac only. If any have been synced across your Apple devices via iCloud Keychain, doctor lists them and (`--fix`) migrates them to device-local storage. A one-time recovery copy is saved to `~/.worthless/recovery/` before migration so a second Mac can re-import. The migration prompts with an explicit multi-device warning before any changes.
-3. **Orphan DB rows** — DB enrollment rows whose `.env` line was deleted by the user. Surfaces and (`--fix`) purges them. Closes the dogfood-discovered stuck state where `worthless unlock` says "no enrolled keys" but `worthless status` lists them as PROTECTED.
+3. **Orphan DB rows** — DB enrollment rows whose `.env` line was deleted by the user. Surfaces and (`--fix`) purges them. A row whose `.env` file is missing — a moved or deleted project — is reported but never purged, because a moved key may still be recoverable. Closes the dogfood-discovered stuck state where `worthless unlock` says "no enrolled keys" but `worthless status` lists them as PROTECTED.
 
 **Options:**
 
@@ -464,6 +466,7 @@ Run: worthless doctor --fix
 
 **Use cases:**
 - `.env` line manually deleted → `worthless doctor --fix` purges the orphan row.
+- `.env` file moved or missing → doctor keeps the key. Moved: put the project back at the old path, then `worthless unlock`. Deleted (including `git worktree remove`): that copy is gone — `worthless revoke --alias <alias>` removes it — but only if no other project has the same key locked: revoke removes a key everywhere it is locked, and `doctor --json` names the other copy when there is one. Don't run `worthless uninstall` — it deletes every key it can't restore.
 - Keys appearing in iCloud Keychain → `worthless doctor --fix` migrates to device-local storage (multi-device warning shown first).
 - Moved to a new Mac → `worthless doctor` auto-imports recovery files left by the originating Mac.
 

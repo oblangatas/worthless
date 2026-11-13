@@ -51,6 +51,7 @@ from worthless.proxy.rules import (
     _estimate_tokens,
     extract_model,
 )
+from worthless.proxy.upstream import build_upstream_client, warn_ignored_env
 from worthless.storage.schema import SCHEMA, migrate_db
 from worthless.cli.log_redaction import install_redaction_filter
 from worthless.storage.shard_reader import ShardReader
@@ -270,16 +271,9 @@ async def _lifespan(app: FastAPI):
             await ipc.connect()
         app.state.ipc_supervisor = ipc
 
-        client = httpx.AsyncClient(
-            follow_redirects=False,
-            timeout=httpx.Timeout(
-                connect=10.0,
-                read=settings.streaming_timeout,
-                write=settings.upstream_timeout,
-                pool=10.0,
-            ),
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
-        )
+        # WOR-1071: proxy, CA and keylog settings come from ProxySettings only,
+        # never from HTTP(S)_PROXY / SSL_CERT_FILE / SSLKEYLOGFILE.
+        client = build_upstream_client(settings)
         app.state.httpx_client = client
 
         # One transaction lock per connection: every BEGIN IMMEDIATE path on `db`
@@ -368,6 +362,9 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         settings = ProxySettings()
 
     settings.validate()
+    # WOR-1071: say which HTTP(S)_PROXY / SSL_CERT_FILE settings the upstream call
+    # ignores. Here rather than in the lifespan, so it shows even if startup fails.
+    warn_ignored_env(settings)
 
     app = FastAPI(
         title="worthless-proxy",
@@ -598,7 +595,9 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         if encrypted.base_url is None:
             logger.warning(
                 "alias %r has NULL base_url (legacy pre-8rqs row); "
-                "operator should run `worthless relock`",
+                "operator should run `worthless unlock --alias %r --env <its .env>` then "
+                "`worthless lock --env <its .env>` (re-locking stores the base_url)",
+                alias,
                 alias,
             )
             return _uniform_401()
@@ -700,9 +699,18 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
             shard_a[:] = b"\x00" * len(shard_a)
             await _release_reservations()
             return _make_gateway_response(503, "sidecar unavailable")
-        except Exception:
+        except Exception as exc:
             shard_a[:] = b"\x00" * len(shard_a)
             await _release_reservations()
+            # saaz: a stale Fernet key lands here; say so server-side. Class only —
+            # the message could carry token bytes (SR-04). The client gets the
+            # same uniform 401 either way.
+            logger.warning(
+                "sidecar could not open the stored key for alias %r (%s) — "
+                "run `worthless doctor --explain fernet_drift`",
+                alias,
+                type(exc).__name__,
+            )
             return _uniform_401()
 
         # Reconstruct key inside secure_key context (body already read above)

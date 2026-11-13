@@ -31,6 +31,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEPLOY_DIR = REPO_ROOT / "deploy"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
+SIDECAR_DOCKERFILE = REPO_ROOT / "docker" / "sidecar" / "Dockerfile"
 COMPOSE_FILE = DEPLOY_DIR / "docker-compose.yml"
 ENV_EXAMPLE = DEPLOY_DIR / "docker-compose.env.example"
 ENTRYPOINT = DEPLOY_DIR / "entrypoint.sh"
@@ -1076,6 +1077,28 @@ class TestDockerfile:
         """PYTHONDONTWRITEBYTECODE must be set to avoid .pyc files on read-only fs."""
         assert "PYTHONDONTWRITEBYTECODE=1" in dockerfile_text
 
+    @pytest.mark.parametrize(
+        "dockerfile", [DOCKERFILE, SIDECAR_DOCKERFILE], ids=["proxy-image", "sidecar-prototype"]
+    )
+    def test_sidecar_uid_env_is_the_crypto_users_uid(self, dockerfile: Path):
+        """WOR-1078: clients refuse a sidecar socket served by any uid but this one.
+
+        The HEALTHCHECK, ``docker exec`` CLI calls and the smoke client never
+        pass through ``deploy/start.py``, so the image ENV is how they learn
+        the sidecar's uid. It must be the uid ``useradd`` gives worthless-crypto,
+        the user the sidecar runs as.
+        """
+        text = dockerfile.read_text()
+        crypto = re.search(
+            r"useradd [^\n]*-u (\d+) [^\n]* worthless-crypto \\?$", text, re.MULTILINE
+        )
+        assert crypto, f"no useradd line for worthless-crypto in {dockerfile}"
+        env = re.search(r"^\s*(?:ENV\s+)?WORTHLESS_SIDECAR_UID=(\d+)\b", text, re.MULTILINE)
+        assert env, f"{dockerfile} must set WORTHLESS_SIDECAR_UID in its ENV"
+        assert env.group(1) == crypto.group(1), (
+            f"WORTHLESS_SIDECAR_UID={env.group(1)} but worthless-crypto is uid {crypto.group(1)}"
+        )
+
 
 # ------------------------------------------------------------------
 # Compose env example
@@ -1183,6 +1206,32 @@ class TestCrossConfigConsistency:
 # ------------------------------------------------------------------
 # Failure/edge case awareness tests
 # ------------------------------------------------------------------
+
+
+class TestReleaseSyncSendsARealUserAgent:
+    """A fixed curl User-Agent is one no real curl sends: a tampered Worker could
+    serve the genuine script only to it, and this check would pass. Bare curl
+    sends its own, so the check looks like any user running `curl | sh`."""
+
+    # Any form: -A x, -Ax, -fsSLA x (grouped), --user-agent=x, -H "user-agent: x"
+    # (header in any case). -A is case-sensitive: curl's -a is --append.
+    SETS_UA = re.compile(
+        r"(?:^|\s)(?:-[A-Za-z]*A|--user-agent(?=[\s='\"]|$))|(?i:user-agent)\s*:", re.M
+    )
+
+    def test_script_fetches_set_no_user_agent(self, release_sync_text: str):
+        # A2b sends a browser User-Agent on purpose (it tests the redirect), so
+        # scope to the steps that compare served bytes against the tag.
+        steps = [
+            s
+            for job in yaml.safe_load(release_sync_text)["jobs"].values()
+            for s in job.get("steps", [])
+            if s.get("name", "").startswith(("A2a", "A2c"))
+        ]
+        assert len(steps) == 2, [s.get("name") for s in steps]
+        for step in steps:
+            found = self.SETS_UA.findall(step["run"])
+            assert not found, f"{step['name']} must send curl's own User-Agent: {found}"
 
 
 class TestInstallPinDriftCheck:

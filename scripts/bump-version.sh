@@ -204,8 +204,8 @@ Done. Next steps:
      git switch main && git pull --ff-only && ./scripts/tag-release.sh $new_version "<headline>"
 
   6. tag-release.sh then prints the four approvals and exactly what to check before
-     each one. The Release page should then be created automatically (not yet proven
-     on a real release — check it). Never create it yourself. Everything else,
+     each one. The Release page should then be created automatically (check it
+     appeared). Never create it yourself. Everything else,
      including what to do if something fails: RELEASING.md
 
      # WARNING: NEVER run gh release create before the signed tag is pushed.

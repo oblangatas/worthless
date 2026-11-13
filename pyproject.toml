@@ -1,6 +1,6 @@
 [project]
 name = "worthless"
-version = "0.3.13"
+version = "0.3.16"
 description = "Split-key reverse proxy that makes leaked API keys worthless"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
@@ -27,13 +27,26 @@ dependencies = [
     "cryptography>=50.0.0",
     "aiosqlite>=0.22.1",
     "httpx>=0.28",
+    # Floor is 2026.10.23, not unpinned: certifi below 2026.10.18 trusts the
+    # emSign root above the compromised eMudhra intermediate keys
+    # (GHSA-6q48-6c7w-9gw2, PYSEC-2026-4320), and httpx verifies the proxy's
+    # provider calls against this bundle. Never imported; declared only for
+    # the floor, because pip keeps an existing env's certifi otherwise.
+    # 2026.10.23 also drops emSign Root CA - C1 and ECC Root CA - C3, which
+    # 2026.10.19 kept.
+    "certifi>=2026.10.23",
     "fastapi>=0.115.12",
     "uvicorn[standard]>=0.34",
     "typer>=0.15",
     "python-dotenv>=1.0",
     "psutil>=5.9",
     "keyring>=25.0",
-    "msgpack>=1.0",
+    # Floor is 1.2.4, not 1.0: CVE-2026-114613 (GHSA-j586-36cw-2gc2, fixed in
+    # 1.2.3) leaks on the default strict_map_key=True path ipc/framing.py
+    # decodes with, and GHSA-j8c6-9vc5-hj6x (fixed in 1.2.4) lets a 5 KB frame
+    # preallocate ~513 MiB of containers. The lock alone never reaches users:
+    # the Dockerfile and `uv tool install` resolve from this line.
+    "msgpack>=1.2.4",
     # TOML reader for the provider registry (worthless-8rqs). Stdlib `tomllib`
     # is 3.11+; for 3.10 we fall back to the `tomli` backport at runtime.
     "tomli>=2.0; python_version < '3.11'",
@@ -42,12 +55,6 @@ dependencies = [
 
 [project.scripts]
 worthless = "worthless.cli.app:app"
-docs-generate = "worthless.dev.docs:generate_docs"
-test-unit = "worthless.testing.runners:unit"
-test-docker = "worthless.testing.runners:docker"
-test-live = "worthless.testing.runners:live"
-test-openclaw = "worthless.testing.runners:openclaw"
-test-all = "worthless.testing.runners:all_tests"
 
 [project.urls]
 Homepage = "https://github.com/oblangatas/worthless"
@@ -72,6 +79,7 @@ dev = [
 ]
 test = [
     "anthropic>=0.40",
+    "httpx2>=2.12",
     "hypothesis>=6.0",
     "openai>=1.54",
     "pytest>=8.0",
@@ -116,6 +124,7 @@ dev = [
 ]
 test = [
     "anthropic>=0.40",
+    "httpx2>=2.12",
     "hypothesis>=6.0",
     "openai>=1.54",
     "pytest>=8.0",
@@ -284,7 +293,8 @@ optional_dependencies_dev_groups = ["dev", "test", "qa", "fuzz"]
 DEP001 = ["tomllib"]
 # uvicorn: runtime ASGI server invoked via CLI, never imported
 # python-dotenv: planned refactor to replace custom parser (worthless-ic6)
-DEP002 = ["uvicorn", "python-dotenv"]
+# certifi: never imported (httpx uses it); declared only for its advisory floor
+DEP002 = ["uvicorn", "python-dotenv", "certifi"]
 # starlette: transitive dep of fastapi, but we import ASGI types directly
 # rich: transitive dep of typer (bundled in typer>=0.12), but we import directly for console output
 DEP003 = ["starlette", "rich"]

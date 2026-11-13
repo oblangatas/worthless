@@ -24,6 +24,8 @@ Predicate" and §"Failure modes" rows F01–F04, F36.
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import hmac
 import ipaddress
 import json
@@ -33,6 +35,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -830,7 +833,10 @@ def _check_world_writable(config_path: Path, events: list[OpenclawIntegrationEve
         st = config_path.stat()
     except OSError:
         return
-    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    risky = stat.S_IWGRP | stat.S_IWOTH
+    if os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+        risky = stat.S_IWOTH  # group write is the shared-volume design (WOR-510)
+    if st.st_mode & risky:
         events.append(
             OpenclawIntegrationEvent(
                 code=OpenclawErrorCode.WRITE_FAILED,
@@ -970,13 +976,17 @@ def _classify_config_state(
     silently returned ``{}`` and ``set_provider`` overwrote the config with a
     blank slate.  We now require a POSITIVE signal to declare "unreadable":
 
-    * ``WORTHLESS_OPENCLAW_CONFIG_SHARED`` set to a non-empty value — explicit
-      operator override for shared Docker volume topologies.
     * UID mismatch — ``os.stat(path).st_uid != os.geteuid()`` — the file is
       owned by a different user, classic Docker two-UID layout.
 
+    ``WORTHLESS_OPENCLAW_CONFIG_SHARED`` set to a non-empty value is the
+    operator declaring that shared layout intentional, so it skips the UID
+    check and returns "present"; the write path widens the file to 0644 and
+    :func:`_share_openclaw_tree` then grants the volume's group rw so the
+    openclaw container can still read and update it.
+
     Returns "missing" when the file does not exist (first lock on a fresh
-    install), "unreadable" for the two Docker signals, "present" otherwise.
+    install), "unreadable" on an undeclared UID mismatch, "present" otherwise.
     """
     try:
         file_exists = path.exists()
@@ -989,7 +999,12 @@ def _classify_config_state(
     if not file_exists:
         return "missing"
     if os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
-        return "unreadable"
+        # Operator declared the shared Docker volume (deploy/docker-compose.yml
+        # sets this): a different owner is expected, not a hazard. An
+        # unreadable file is still never clobbered — read_config surfaces it
+        # as CONFIG_UNREADABLE downstream. Treating the flag as "abort" made
+        # the all-container deployment unable to lock at all (WOR-510).
+        return "present"
     try:
         if os.stat(str(path)).st_uid != os.geteuid():  # noqa: PTH116 — must use os.stat so tests can patch("os.stat")
             return "unreadable"
@@ -1018,8 +1033,8 @@ def rollback_config(config_path: Path | None, original_config: dict | None) -> N
     Raises :class:`OSError` on disk-full or permission failure — the caller
     surfaces both the original write error and the rollback error via events.
     """
-    if config_path is None:
-        return
+    if config_path is None or isinstance(original_config, _UnreadSnapshot):
+        return  # never restore a snapshot we could not read: that wrote {}
     if original_config is None:
         # File was absent before this lock attempt — delete any partial file
         # written before the failure rather than leaving {} on disk.
@@ -1242,6 +1257,105 @@ def _apply_lock_write_providers(
     return False  # no rollback needed
 
 
+class _UnreadSnapshot(dict):
+    """An openclaw.json that existed but could not be read before the lock.
+
+    Behaves as ``{}`` everywhere, but is never restored over the file: that
+    replaced every entry the user had with ``{}`` (worthless-2nta).
+    """
+
+
+def _apply_lock_stage_a(
+    config_path: Path,
+    resolved_proxy_base_url: str,
+    planned_updates: list[tuple[str, str, str]],
+    events: list[OpenclawIntegrationEvent],
+    providers_set: list[str],
+    providers_skipped: list[tuple[str, str]],
+    policy: AdoptionPolicy | None,
+    *,
+    original_config: dict | None,
+) -> bool:
+    """Stage A(pre) + A; on an interrupt, undo this run's own provider writes.
+
+    The legacy-decoy migration (Stage A(pre)) is not undone. Extracted to keep
+    :func:`apply_lock` within xenon's complexity budget.
+
+    Returns ``True`` when a write failure needs the transactional rollback.
+    An interrupt (Ctrl-C between two provider writes, worthless-2nta) would
+    otherwise leave openclaw.json half switched. *original_config* is the
+    pre-write snapshot (an :class:`_UnreadSnapshot` when it could not be read).
+    """
+    try:
+        if _apply_lock_migrate_legacy_decoy(
+            config_path, resolved_proxy_base_url, planned_updates, events
+        ):
+            return True
+        return _apply_lock_write_providers(
+            config_path,
+            resolved_proxy_base_url,
+            planned_updates,
+            events,
+            providers_set,
+            providers_skipped,
+            policy,
+        )
+    except BaseException:
+        _undo_own_provider_writes(
+            config_path, original_config, resolved_proxy_base_url, planned_updates
+        )
+        raise
+
+
+_UNDO_BUDGET_S = 2.0  # after a Ctrl-C a second press is ignored: never wait longer
+
+
+def _undo_own_provider_writes(
+    config_path: Path,
+    original_config: dict | None,
+    resolved_proxy_base_url: str,
+    planned_updates: list[tuple[str, str, str]],
+) -> None:
+    """Put back the entries this lock wrote, and nothing else (worthless-2nta).
+
+    Never a whole-file restore: that erased other writers' changes and wrote
+    ``{}`` over files we could not parse. An entry is reverted only while it
+    still points at this lock's proxy alias (a later change by anyone else is
+    kept), and only to a pre-lock entry that was not already ours (on a
+    re-lock the old entry carries a stale key half: ours is the right one).
+    Without a readable snapshot nothing is reverted. Each revert is a
+    compare-and-swap under the flock, all within :data:`_UNDO_BUDGET_S`: a
+    config lock held elsewhere stops the undo instead of hanging it (the
+    entries stay; the lock's interrupt message points at doctor). Best
+    effort: a failure here must not mask the interrupt that brought us here.
+    """
+    if isinstance(original_config, _UnreadSnapshot):
+        return
+    # None: no openclaw.json before the lock (a first lock), so nothing was there.
+    prior = _config_mod._providers_view(original_config or {}, strict=False) or {}
+    base = resolved_proxy_base_url.rstrip("/")
+    deadline = time.monotonic() + _UNDO_BUDGET_S
+    for provider, alias, _shard_a in planned_updates:
+        ours = f"{base}/{alias}/v1"
+        before = prior.get(provider)
+        before_url = before.get("baseUrl") if isinstance(before, dict) else None
+        if (
+            isinstance(before_url, str)
+            and _is_proxy_url(before_url, resolved_proxy_base_url)
+            and before_url.rstrip("/").endswith(f"/{alias}/v1")
+        ):
+            continue  # ours before too (any proxy host): keep the new key half
+        with contextlib.suppress(OpenclawConfigError, OSError):
+            if not _config_mod.revert_provider_if_ours(
+                config_path,
+                provider,
+                ours_base_url=ours,
+                prior=before if isinstance(before, dict) else None,
+                deadline=deadline,
+            ):
+                return  # lock held elsewhere past the budget: leave the rest
+
+
 def _apply_lock_rollback(
     config_path: Path,
     original_config: dict | None,
@@ -1255,7 +1369,25 @@ def _apply_lock_rollback(
     rollback itself fails (double-fault). Marks written providers as
     rolled_back in providers_skipped and clears providers_set.
     Extracted to keep :func:`apply_lock` within xenon's complexity budget.
+
+    With no readable snapshot there is nothing safe to restore: restoring the
+    placeholder ``{}`` erased every entry the user had (worthless-2nta).
     """
+    if isinstance(original_config, _UnreadSnapshot):
+        events.append(
+            OpenclawIntegrationEvent(
+                code=OpenclawErrorCode.WRITE_FAILED,
+                level="error",
+                detail=(
+                    f"could not roll back {config_path}: it was unreadable before the "
+                    "lock, so it was left as is — run `worthless doctor`"
+                ),
+                extra={"path": str(config_path)},
+            )
+        )
+        # The writes made so far stay in the file: they still count as written,
+        # so the later stages scrub the real key from OpenClaw's agent caches.
+        return
     try:
         rollback_config(config_path, original_config)
     except OSError as rb_exc:
@@ -1917,6 +2049,176 @@ def _apply_lock_migrate_legacy_decoy(
     return False
 
 
+def _shares_openclaw_tree_on_exit(fn):  # noqa: ANN001, ANN202
+    """Run :func:`_share_openclaw_tree` on EVERY exit of ``fn`` — success,
+    early return, or exception. A lock that raises mid-write must not leave
+    root-owned files that crash-loop the openclaw container (security review)."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+                # Never mask fn's own result/exception with a best-effort walk.
+                with contextlib.suppress(Exception):
+                    state = detect()
+                    if state.present:
+                        root = _resolve_active_config_path(state, state.home_dir).parent
+                        _share_openclaw_tree(root)
+
+    return wrapper
+
+
+def _share_openclaw_tree(root: Path | None) -> None:
+    """Keep the shared Docker volume usable by the OpenClaw container (WOR-510).
+
+    Only when ``WORTHLESS_OPENCLAW_CONFIG_SHARED`` is set (all-container
+    compose). ``worthless lock`` runs via ``docker compose exec`` — as root by
+    default — so anything it creates under the volume is root-owned 0755/0600,
+    and the openclaw container (``node``, in the volume's group) then crashes
+    with EACCES creating ``agents/main/sessions``. Re-own to the volume dir's
+    uid:gid (root only) and add group rw (+x on dirs). Never adds "other"
+    bits, never raises.
+
+    Symlink-safe by construction: the openclaw container can write this
+    volume, so a path-based lstat-then-chmod could be raced into touching the
+    proxy's own ``/data`` (keys) as root. ``os.fwalk`` never follows links,
+    every entry is opened relative to its parent's fd with ``O_NOFOLLOW``,
+    and ownership/mode change via ``fchown``/``fchmod`` on that fd.
+    """
+    if root is None or not os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+        return
+    if not hasattr(os, "fwalk"):
+        return  # Windows: the shared Docker volume only exists in Linux containers
+    try:
+        root_st = os.lstat(root)
+    except OSError:
+        return
+    if not stat.S_ISDIR(root_st.st_mode):
+        return
+    owner = (root_st.st_uid, root_st.st_gid)
+    is_root = os.geteuid() == 0
+    try:
+        for _dirpath, _dirnames, filenames, dirfd in os.fwalk(root, follow_symlinks=False):
+            _share_fd_quietly(dirfd, owner, is_root)
+            for name in filenames:
+                _share_entry(name, dirfd, owner, is_root)
+    except OSError:
+        return  # best-effort; OpenClaw reports anything it still can't open
+
+
+def _shared_workspace_escape(workspace: Path, config_path: Path | None) -> str | None:
+    """Return why the skill dir must not be touched, or None if it's safe.
+
+    Cursor review (WOR-510): in the shared Docker volume the openclaw
+    container can plant ``workspace`` → ``/data`` (the proxy's keys); detect()
+    resolves the link, so lock (root) would install — and unlock would
+    ``rmtree`` — the skill outside the volume. Shared mode only.
+    """
+    if config_path is None or not os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+        return None
+    oc_dir = config_path.parent
+    for link in (oc_dir / "workspace", oc_dir / "workspace" / "skills"):
+        if link.is_symlink():
+            return f"{link} is a symlink in the shared volume"
+    try:
+        workspace.resolve().relative_to(oc_dir.resolve())
+    except (OSError, ValueError):
+        return f"workspace {workspace} is outside the shared volume {oc_dir}"
+    return None
+
+
+def _unlock_snapshot(
+    config_path: Path,
+    restores: list[OcRestore],
+    events: list[OpenclawIntegrationEvent],
+    providers_skipped: list[tuple[str, str]],
+) -> tuple[dict | None, bool]:
+    """Read the pre-unlock snapshot. Returns ``(snapshot, skip_stage_a)``.
+
+    Cursor review (WOR-510): with CONFIG_SHARED now classified "present",
+    this read is unlock's only gate — and Stage A's replace_provider reads
+    with permission_as_missing=True, so an unreadable config would be
+    rewritten as near-empty. A permission failure skips Stage A instead.
+    """
+    try:
+        return _config_mod.read_config(config_path), False
+    except (OpenclawConfigError, OSError) as exc:
+        if not (isinstance(exc, PermissionError) or isinstance(exc.__cause__, PermissionError)):
+            return None, False  # e.g. corrupt JSON: unchanged behaviour
+    events.append(
+        OpenclawIntegrationEvent(
+            code=OpenclawErrorCode.CONFIG_UNREADABLE,
+            level="error",
+            detail=f"openclaw.json at {config_path} is unreadable — skipping provider restore",
+            extra={"path": str(config_path)},
+        )
+    )
+    providers_skipped.extend((r.provider, "config_unreadable") for r in restores)
+    return None, True
+
+
+def _guarded_workspace(
+    workspace: Path | None,
+    config_path: Path | None,
+    events: list[OpenclawIntegrationEvent],
+    action: str,
+) -> Path | None:
+    """``workspace``, or None (with an error event) if the shared-volume guard trips."""
+    escape = _shared_workspace_escape(workspace, config_path) if workspace else None
+    if escape is None:
+        return workspace
+    events.append(
+        OpenclawIntegrationEvent(
+            code=OpenclawErrorCode.SKILL_INSTALL_FAILED,
+            level="error",
+            detail=f"refusing to {action} the skill: {escape}",
+        )
+    )
+    return None
+
+
+def _share_entry(name: str, dirfd: int, owner: tuple[int, int], is_root: bool) -> None:
+    """Open ``name`` relative to its parent fd without following a symlink."""
+    # getattr: O_NOFOLLOW/O_NONBLOCK don't exist on Windows, and this module
+    # must import there (only reached via fwalk, which is POSIX-only anyway).
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=dirfd)
+    except OSError:
+        return  # symlink (ELOOP), vanished, or unreadable — skip
+    try:
+        _share_fd_quietly(fd, owner, is_root)
+    finally:
+        os.close(fd)
+
+
+def _share_fd_quietly(fd: int, owner: tuple[int, int], is_root: bool) -> None:
+    with contextlib.suppress(OSError):
+        _share_fd(fd, owner, is_root)
+
+
+def _share_fd(fd: int, owner: tuple[int, int], is_root: bool) -> None:
+    """Re-own (root only) and grant the volume's group access, on an open fd."""
+    st = os.fstat(fd)
+    if is_root and (st.st_uid, st.st_gid) != owner:
+        os.fchown(fd, *owner)
+        st = os.fstat(fd)  # chown cleared setuid/setgid; don't restore them
+    # Group rw IS the design here: the volume's group is exactly the proxy and
+    # the openclaw container (WOR-510). "Other" bits are never added.
+    if stat.S_ISDIR(st.st_mode):
+        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+        os.fchmod(fd, (st.st_mode & 0o7777) | stat.S_IRWXG)
+    elif stat.S_ISREG(st.st_mode):
+        # Never leave a setuid/setgid file in a volume another container
+        # writes (security review: a planted 4755 would become setuid-10001).
+        mode = st.st_mode & 0o7777 & ~(stat.S_ISUID | stat.S_ISGID)
+        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+        os.fchmod(fd, mode | stat.S_IRGRP | stat.S_IWGRP)
+
+
+@_shares_openclaw_tree_on_exit
 def apply_lock(
     planned_updates: list[tuple[str, str, str]],
     *,
@@ -2060,10 +2362,10 @@ def apply_lock(
                 except PermissionError:
                     pass  # directory also locked → proceed, write will hit WRITE_FAILED
             # All other read failures: proceed; set_provider surfaces WRITE_FAILED.
-            original_config = {}
+            original_config = _UnreadSnapshot()
         except Exception:
             # Other exceptions (JSON decode error, OS error, etc.): proceed.
-            original_config = {}
+            original_config = _UnreadSnapshot()
 
     _check_world_writable(config_path, events)
 
@@ -2112,33 +2414,23 @@ def apply_lock(
             events=tuple(events),
         )
 
-    # ---- Stage A(pre): heal legacy decoy layout (WOR-656 F6) -------------
-    # Old installs wrote a separate ``worthless-<p>`` decoy beside the
-    # untouched original ``<p>``. Delete our stale decoy (and repoint a
-    # decoy-pointing default model) BEFORE Stage A rewrites the original in
-    # place. Runs under apply_lock's existing ``original_config`` rollback
-    # umbrella, so a mid-migration write failure restores byte-identically and
-    # Stage A is skipped.
-    rollback_needed = _apply_lock_migrate_legacy_decoy(
+    # ---- Stage A(pre) + A: heal the legacy decoy layout, write providers ---
+    # Old installs wrote a separate ``worthless-<p>`` decoy beside the original
+    # ``<p>``; it is deleted (and a decoy-pointing default model repointed)
+    # before the originals are rewritten in place (WOR-656 F6). A write failure
+    # takes _apply_lock_rollback below; an interrupt undoes this run's provider
+    # writes only, so a migrated decoy stays migrated (it was stale anyway).
+    # F-CFG-13 / DV-01/DV-02 handling is inside _apply_lock_write_providers.
+    rollback_needed = _apply_lock_stage_a(
         config_path,
         resolved_proxy_base_url,
         planned_updates,
         events,
+        providers_set,
+        providers_skipped,
+        adoption_policy,
+        original_config=original_config,
     )
-
-    # ---- Stage A: write providers ----------------------------------------
-    # F-CFG-13 / DV-01/DV-02 handling is inside _apply_lock_write_providers.
-    # Extracted to keep apply_lock within xenon's complexity budget (rank C).
-    if not rollback_needed:
-        rollback_needed = _apply_lock_write_providers(
-            config_path,
-            resolved_proxy_base_url,
-            planned_updates,
-            events,
-            providers_set,
-            providers_skipped,
-            adoption_policy,
-        )
 
     # ---- Transactional rollback on write failure -------------------------
     if rollback_needed:
@@ -2174,7 +2466,7 @@ def apply_lock(
     # ---- Stage B: install skill ------------------------------------------
     skill_installed = False
     skill_path: Path | None = None
-    workspace = state.workspace_path
+    workspace = _guarded_workspace(state.workspace_path, config_path, events, "install")
     if workspace is not None:
         try:
             skill_path = _skill_mod.install(workspace / "skills")
@@ -2447,6 +2739,7 @@ def _restore_agent_auth_stores_after_unlock(
 # ---------------------------------------------------------------------------
 
 
+@_shares_openclaw_tree_on_exit
 def apply_unlock(
     restores: list[OcRestore],
     *,
@@ -2582,10 +2875,10 @@ def apply_unlock(
     agent_cache_blocked: set[str] = set()
     rollback_needed = False
     if not config_missing:
-        try:
-            original_config_snapshot = _config_mod.read_config(config_path)
-        except (OpenclawConfigError, OSError):
-            original_config_snapshot = None
+        original_config_snapshot, config_missing = _unlock_snapshot(
+            config_path, restores, events, providers_skipped
+        )
+    if not config_missing:
         rollback_needed = _apply_unlock_stage_a(
             config_path,
             restores,
@@ -2630,8 +2923,12 @@ def apply_unlock(
 
     # ---- Stage B: uninstall skill folder ---------------------------------
     skill_uninstalled = False
-    workspace = state.workspace_path
     skill_path = state.skill_path
+    workspace = (
+        _guarded_workspace(state.workspace_path, config_path, events, "remove")
+        if remove_skill
+        else state.workspace_path
+    )
     if remove_skill and workspace is not None:
         try:
             skill_uninstalled = _skill_mod.uninstall(workspace / "skills")

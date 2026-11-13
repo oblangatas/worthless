@@ -4,6 +4,383 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Security
+- **One message to the sidecar can no longer make it grab hundreds of MiB** (WOR-1075, [#746](https://github.com/oblangatas/worthless/pull/746)).
+  Before: the sidecar is the process that holds your key shares. Four kinds of message from a process it lets connect made it take far more memory than the message's own size:
+  - Each list or table could claim up to 65,536 entries, and msgpack sets memory aside for every entry a list claims before it reads any. One 5 KB message of 1,023 nested lists, each claiming 65,535 entries, took the sidecar over 500 MiB on macOS (about 150 MiB on Linux) before it was refused (GHSA-j8c6-9vc5-hj6x). msgpack 1.2.4 lowers that to between about 75 MiB (Linux) and 240 MiB (macOS).
+  - On any msgpack version, a 1 MiB message packed with empty lists became about 67 MiB once read. A hello padded that way was accepted and kept for as long as its connection stayed open: four such connections held about 267 MiB.
+  - When the sidecar refused a hello, the reason it logged quoted the peer's values in full. A 1 MiB string with one emoji in it became a quote of about 16 MiB, and on macOS 32 such refusals left the sidecar 150 to 270 MiB larger.
+  - A request that crashed the sidecar's handler, such as an `op` sent as a list or a `seal` whose reply would be over 1 MiB, stayed in memory until Python's garbage collector ran, and so did any message whose sender closed without reading the reply. On macOS, 32 crashed requests left the sidecar about 90 MiB larger; on Linux, 32 refused hellos whose sender didn't read the reply left it about 120 MiB larger, and repeated waves of them reached 1.5 GiB with no connection open.
+
+  A few of these could run the sidecar out of memory, and while it is down nothing can be decrypted. In the Docker image run with a 128 MiB memory limit (it idles at about 65 MiB), one 5 KB message of nested lists was enough: on msgpack 1.2.4 the sidecar was killed for running out of memory. The proxy reads the sidecar's replies with the same decoder.
+  Now: a message may hold at most 16 lists and tables, each with at most 32 entries. Worthless's own messages need at most 3, with at most 6 entries. A message over either limit is refused as soon as the decoder gets there. Refusal reasons quote only short values and name a longer one by its type and length. An `op` that isn't a string is refused like an unknown op, and a connection's messages are freed once it closes, whether the handler crashed or the peer left without reading. Measured on a real sidecar, each attack above now costs it about 10 MiB at most, and the limits work the same on every msgpack version. New tests start a real sidecar on Linux and macOS and check its memory under all four, and under the CVE-2026-114613 message (a table with a number as a key; see the msgpack entry below). Another checks the proxy's client the same way, against a sidecar that answers with the 5 KB message. They allow up to 32 MiB of growth (the CVE test, a quarter of the bytes it sends), so they catch a return to the old costs, not a few MiB of drift.
+
+  **Limits.**
+  - Only a process that passes the sidecar's peer-uid check can send it a message. This bounds what that process can do to the sidecar's memory; it doesn't keep the process out.
+  - These limits are per message. Connections are limited separately: the sidecar holds at most 32 at once, and a half-sent message must finish within 10 s (WOR-1076, entry below). A message can still be up to 1 MiB. The sidecar accepts keys it doesn't use and keeps each connection's hello and latest request while the connection stays open. A string with one emoji in it is stored at 4 bytes per character, so each open connection can still hold about 8 MiB, plus about 1 MiB for a half-sent frame. Many connections add up: before the cap, 64 held about 500 to 575 MiB on macOS. At the cap they can still hold about 250 MiB (WOR-1082).
+  - These limits don't stop leaks inside msgpack itself: older versions leak when they refuse some messages (CVE-2026-114613 in 1.2.2, and about 3 MiB per refused, deeply nested message in 1.0.8). This release requires msgpack 1.2.4 (msgpack entry below), but an install keeps the msgpack it has until you upgrade Worthless.
+  - The proxy's own error messages still quote a sidecar's values in full, an error's whole message included. Since WOR-1078 (entry below) the proxy refuses a socket served by any user other than the sidecar's, so only a process running as that user could do the same to the proxy (WOR-1083). Such a process can also make the proxy keep each reply it refuses, up to about 2 MiB per failed connection, until Python's garbage collector runs: the error the proxy holds while it retries refers back to the reply.
+  - A `seal` of a plaintext between about 786 KB and 1 MiB still fails with an internal error, because its reply would be over 1 MiB. Its memory is now freed (WOR-1094).
+- **The proxy no longer lets its environment pick an egress proxy or a CA for the call that carries your real key** (WOR-1071, [#744](https://github.com/oblangatas/worthless/pull/744)).
+  Before: the proxy's call to the provider went through `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` (or, with none set, the macOS or Windows system proxy) and trusted any CA named by `SSL_CERT_FILE` / `SSL_CERT_DIR`. Behind a TLS-inspecting corporate proxy whose CA was trusted that way, that proxy and its logs could read every real key. With an `http://` upstream, any proxy named that way got the key in clear. `SSLKEYLOGFILE` received the TLS secrets that decrypt a packet capture.
+  Now: the proxy ignores all of these. It verifies providers against its built-in CA list, and names any proxy or CA setting it ignored, and the variable to set instead (names only, never values). `worthless`, `worthless up` and `wrap` print that warning to your terminal. A proxy running in the background or under `worthless service install` also writes it to `~/.worthless/proxy.log`; on Linux, a service writes it to the user journal instead. In Docker it is in `docker logs`. `worthless status`, `up` and `lock` also stop sending their loopback health and bind checks to an `HTTP_PROXY`.
+  New: `WORTHLESS_UPSTREAM_PROXY=http://proxy.example.com:3128` sends `https://` provider calls through that proxy in a CONNECT tunnel. `http://` upstreams, such as a local gateway, always go direct. `WORTHLESS_UPSTREAM_CA_BUNDLE=/path/bundle.pem` verifies providers against your bundle instead of the built-in list. A proxy that inspects TLS can read your real keys only if you also trust its CA through that bundle. Anyone holding a key for a CA in the bundle can. See [Egress proxies and custom CAs](docs/security.md#egress-proxies-and-custom-cas).
+
+  **If you're behind a corporate proxy:** if your machine can reach the provider directly, nothing changes. If it can reach it only through the proxy, provider calls now fail with `502 bad gateway` (or `504 gateway timeout` if the blocked connection hangs) until you set `WORTHLESS_UPSTREAM_PROXY` where the Worthless proxy gets its environment. The warning above names the variable. If that proxy also inspects TLS, calls keep failing with `502 bad gateway`: the certificate check fails, but your app sees only the 502, not a certificate error. They fail until you either get a TLS-inspection bypass for your providers' hosts (the safer fix) or set `WORTHLESS_UPSTREAM_CA_BUNDLE` to its CA, which lets it read your keys.
+
+  **Limits.**
+  - This stops proxy and CA settings meant for other tools, such as ones IT sets for the whole machine, from applying to Worthless. It doesn't stop someone who can change the Worthless proxy's own environment or files: they can set `WORTHLESS_UPSTREAM_PROXY` and `WORTHLESS_UPSTREAM_CA_BUNDLE`, or edit the CA list installed with it. That is a compromised machine, which Worthless doesn't defend against.
+  - A proxy you opt into still sees which provider you call (the hostname in the CONNECT request), and when.
+  - There is no `NO_PROXY` equivalent: with `WORTHLESS_UPSTREAM_PROXY` set, every `https://` upstream goes through it, including an https gateway on your own network.
+  - SOCKS proxies and proxy auto-config (PAC) files aren't supported.
+  - Under `worthless up` / `wrap`, a bad `WORTHLESS_UPSTREAM_PROXY` or `WORTHLESS_UPSTREAM_CA_BUNDLE` stops the proxy with only `WRTLS-104: Proxy failed to become healthy`. The reason, which names the variable, is in the proxy's own output, and they don't show that yet (WOR-1074). Docker shows it.
+  - A proxy run by `worthless service install` doesn't read your shell, and re-running `service install` rewrites its unit, dropping settings you added there. On Linux a `systemctl --user edit` drop-in survives; on macOS add them to the plist again (WOR-1072).
+  - `SSLKEYLOGFILE` is still opened while the proxy builds its TLS settings, before key logging is turned off. If it names a path that can't be created, such as one in a missing directory, the proxy won't start, as before. If the path is writable, the file is created but gets no TLS secrets. Unset it for the proxy ([WOR-1073](https://linear.app/plumbusai/issue/WOR-1073) tracks not opening it at all).
+  - `WORTHLESS_UPSTREAM_CA_BUNDLE` replaces the built-in list rather than adding to it, so the bundle must also hold the CAs your providers use, unless every call goes through the inspecting proxy.
+- **The proxy only talks to a sidecar socket that the sidecar's own user is serving** (WOR-1078, [#749](https://github.com/oblangatas/worthless/pull/749)).
+  Before: the sidecar checked which user had connected before it read a byte, but the proxy never checked who it had connected to. Anyone who could create or replace the socket file, for example by winning a race against a stale socket after a restart (WOR-352) or through a run directory other users can write, could answer as the sidecar. They saw every value the proxy sent to be encrypted, and could send the proxy any reply, including the msgpack frames behind CVE-2026-114613.
+  Now: after it connects and before it sends anything, every Worthless client of the sidecar asks the kernel which user is serving the socket. That covers the proxy, CLI commands, the Docker health check, and the `worthless up` and `worthless doctor` probes. If the user isn't the sidecar's, the client closes the connection with an AUTH error. A proxy that hits this at startup refuses to start. One that hits it on a reconnect answers 503 and logs `sidecar connection refused` with both uids, so you can tell an impostor from a crashed sidecar. A local install expects the sidecar to run as your own user, which is how `worthless up` and `worthless wrap` start it. The Docker image runs the sidecar as `worthless-crypto` (uid 10002) and sets `WORTHLESS_SIDECAR_UID=10002`. `deploy/start.py` also passes the proxy the uid it actually started the sidecar as. Set `WORTHLESS_SIDECAR_UID` yourself only if you run the sidecar as another user. A value that isn't a plain number is refused, not ignored, and so is an empty one: compose's `${VAR}` gives an empty value when the variable is unset, and falling back to your own uid there would trust the proxy's user. 65534 and 4294967295 are refused too, the uids the kernel reports for a process from an unmapped user namespace or with no credentials, whether they come from the setting or from a client running as `nobody` with it unset. So a sidecar run as `nobody` is refused as well.
+
+  **Limits.**
+  - On a local install (`worthless up`, `worthless wrap`), the socket already sits in a directory only your user can write, so another user couldn't plant one there before this change either. The check adds protection where that isn't so: a socket path you set in a shared directory, and the Docker image. In the image the proxy's own user could plant one before this change, in two ways. It can replace the `/run/worthless/sidecar.sock` link that the health check and `docker exec` follow. And because it owns `/data`, it can rename `/data/run` and put its own socket at the path the proxy itself connects to. The check now refuses both.
+  - A process running as the sidecar's user can still pose as the sidecar. On a local install that is your own user, which can already read the proxy's memory.
+  - A socket that root serves as itself (uid 0) is refused like any other wrong uid. But root can switch to the sidecar's uid before it serves the socket, so this doesn't stop root.
+  - It doesn't make a compromised proxy safe. In the Docker image it stops a process running as the proxy's user from posing as the sidecar to the proxy, the health check and CLI commands, not from attacking the container in other ways.
+  - Someone who can replace the socket can still cut the proxy off from its sidecar. The proxy refuses their socket, so it won't start, or it answers 503 until the real socket is back. This keeps your values away from them, not your proxy up. The stale-socket race itself is WOR-352.
+  - The check reads the kernel's peer credentials, which Worthless supports on Linux and macOS only. On any other system every connection is refused, as the sidecar already refuses its own clients there.
+  - If you start the sidecar by hand as another user, set `WORTHLESS_SIDECAR_UID` for the proxy and for every CLI command or health check that reaches it, or they refuse to connect.
+- **Lock no longer says "You're protected" while a copy of your key is still in the `.env` as plain text** (WOR-1048, [#740](https://github.com/oblangatas/worthless/pull/740)).
+  Before: if the `.env` held a second copy of a key on a line lock doesn't replace, such as a quoted name (`'OPENROUTER_API_KEY'=sk-or-…`), a commented-out line with the same key, or the key inside another variable's value, lock replaced the key's own line, said "You're protected", and left the real key readable in the file. python-dotenv reads the last line, so an app reading a quoted copy, or anyone with a copy of the file, still got the real key. If that file also had a `*_BASE_URL` line with no value, or a quoted one, lock used to stop with WRTLS-199 instead; the WOR-1041 fix below makes such a file lock, so both changes ship together.
+  Now: before it stores anything or touches the `.env`, lock checks that no copy of a key it is replacing would stay in the file. If one would, it stops with WRTLS-112 and names the variable, never the value. Your `.env` is unchanged, nothing new is stored, and a key this `.env` had already locked stays locked. Delete the copy and run `worthless lock` again.
+
+  **Limits.**
+  - Lock looks for the key's exact text. A copy that was changed, for example split across lines, escaped, encoded or assembled from `${...}` parts, isn't found.
+  - Lock checks only the keys it is replacing now. A different key on a line it won't replace, such as a commented-out older key, stays readable, and lock still says you're protected.
+- **Unlocking a key that v0.3.16 or earlier locked puts back its vendor's address where that is safe, and tells you when it can't** (WOR-981, [#737](https://github.com/oblangatas/worthless/pull/737); WOR-1013, [#738](https://github.com/oblangatas/worthless/pull/738)).
+  If your `.env` had a `*_BASE_URL` line before a normal lock with v0.3.16 or earlier, for example `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`, lock replaced it with the proxy URL and kept no copy of your value. Unlock and uninstall now put back that vendor's address when your key names the vendor (an `sk-or-` key gets OpenRouter's), and say so. Removing the line instead would let an app that reads `OPENROUTER_BASE_URL` with no default send your OpenRouter key to OpenAI. Before this release, unlock left the dead proxy line, so calls failed on your machine (an `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL` line was removed instead).
+
+  **Limits.**
+  - If lock had added the line, unlock leaves it in place with the vendor's address. Delete it if you don't want it.
+  - Unlock removes the line instead, and tells you to set it again, when it can't be sure the address is right for every app that reads the line:
+    - The key is an OpenAI-style `sk-` key. That prefix also starts DeepSeek and other keys, and OpenAI's address is the SDK default anyway.
+    - Another key in the same `.env`, locked or not, reads that line too, for example an OpenAI key next to an OpenRouter key's `OPENAI_BASE_URL`.
+    - The address speaks Anthropic's protocol (Anthropic's own, or a gateway you registered with `--protocol anthropic`), or the line is `ANTHROPIC_BASE_URL`. The Anthropic SDK adds its own `/v1`.
+    - The stored address isn't in the provider list, isn't a public https address (a local Ollama, for example), or contains a `$`.
+
+    A gateway you registered yourself with `--protocol openai` still goes back under the same line rules, because it came from your own line. An app that reads a removed line with no default uses its SDK's default address. Unlock only sees keys in this `.env`. It does not see another `.env` your app also loads (such as `.env.local`) or keys your shell exports, so an OpenAI key kept there can still end up reading an OpenRouter address (WOR-1034).
+  - The stored address isn't sealed: someone who can write the Worthless database can change it. Unlock writes back only an address that passes the rules above, and the proxy already sends your key to the stored address while the key is locked (worthless-rzi1).
+  - For a key locked with this version, a saved value changed in the Worthless database is never replaced by the stored address: unlock removes the line and tells you.
+  - The written value is the one lock resolved, so a `${...}` reference you had comes back expanded.
+  - If the same key was also locked from another `.env`, the stored address is the last one lock saw for that key, which may be the other file's (WOR-1029).
+- **Malformed messages no longer leak the sidecar's memory** (CVE-2026-114613, [#745](https://github.com/oblangatas/worthless/pull/745)).
+  Before: Worthless accepted any msgpack from 1.0 on. msgpack 1.2.2 and earlier leak the rest of every message the sidecar rejects for having a non-string key. A process the sidecar accepts could grow it by about 1 MiB per message, without limit. Measured on the real sidecar, 200 such messages added 199 MiB. The proxy reads the sidecar's replies with the same decoder, so a fake sidecar could do the same to the proxy (WOR-1078).
+  Before, too: one 5 KB message that declares huge lists made the sidecar briefly allocate about 513 MiB (GHSA-j8c6-9vc5-hj6x).
+  Now: this release requires msgpack 1.2.4 or newer. It fixes the leak: the same 200 messages add 1 to 4 MiB, and 2,000 add no more. It also caps how much a list header can reserve, so the 5 KB message peaks at between about 75 and 240 MiB instead of 513 MiB. Installing or upgrading to this release upgrades msgpack with it.
+
+  **Limits.**
+  - Only a process that passes the sidecar's peer-uid check can send these messages to the sidecar. The proxy now talks only to a socket the sidecar's own user serves (WOR-1078), so a fake sidecar would have to run as that user to send them to the proxy. Root is refused too unless it first switches to that user's uid.
+  - An existing install keeps the msgpack it has until you upgrade Worthless.
+  - msgpack 1.2.4 alone still lets decoding cost far more memory than the message size: one 5 KB malformed message peaks at between about 75 and 240 MiB, and a valid 1 MiB message of empty lists costs about 67 MiB on any msgpack version. The decoder limits in the first entry of this section bring both under 4 MiB (WOR-1075, [#746](https://github.com/oblangatas/worthless/pull/746)).
+  - A process the sidecar accepts could also hold its memory by opening many connections and stalling half-sent 1 MiB frames. This release fixes that separately; see the next entry (WOR-1076).
+- **A process allowed to talk to the sidecar can no longer pin its memory by sending half a message and going quiet** (WOR-1076, [#748](https://github.com/oblangatas/worthless/pull/748)).
+  Before: the sidecar, the process that holds your encryption key and does all decrypting, waited forever for a message to finish arriving and kept any number of connections open. A process running as an allowed user, whether stuck, buggy or hostile, could open many connections, start a 1 MiB message on each, stop one byte short, and hold about 1 MiB of sidecar memory per connection until the sidecar ran out of file handles or was killed for using too much memory. Without the sidecar nothing decrypts, and in the Docker image nothing restarts it: every request fails with a 503 until the container is restarted. This keeps the sidecar up; it isn't a defence against a compromised proxy, which can already rebuild keys through the sidecar ([threat model](https://docs.wless.io/security/#threat-model-non-goals), non-goal 7) and, as the only route to your provider, can stop serving whenever it likes.
+  Now: once a message has started, the rest must arrive within 10 s, and the first message (the hello) within 10 s of connecting. Otherwise the sidecar closes that connection. It holds at most 32 connections at once and closes any extra one as soon as it accepts it, before reading anything from it. A connection stalled mid-message holds about 1 MiB, so 32 hold about 34 MiB at a time, and only for 10 s before the message must be sent again. In a test against the sidecar process, 100 such connections made it grow by about 45 MiB in all. Worthless's own clients (the proxy, the CLI and the health check) send each message in one piece as soon as they connect or have a request, so neither limit affects them. A connection that is idle between messages stays open, because the proxy keeps one open for as long as it runs.
+
+  **Limits.**
+  - An allowed process can still fill all 32 connections and leave them idle, or stop partway through a message's 4-byte length, so new connections are refused: a health check, a CLI command, or the proxy reconnecting. The same happens if a client leaks connections. Only a process running as an allowed user (in Docker, the proxy's) can do this. Before, the same lockout took using up the sidecar's file handles; now it takes 32 connections. Worthless's own clients hold about 4 at most.
+  - The cap limits how many connections are open, not what each one keeps. An open connection, idle or not, also keeps the last whole message it sent, its hello and its latest request, in memory. With this release's decoder limits (WOR-1075, the first entry of this section), a connection can still keep about 8 MiB. In the Docker image with a 512 MiB memory limit, 31 such connections next to the proxy's own kept 248 MiB, the next ones were refused, and the sidecar stayed up. With the decoder limits but no cap, 48 connections took it to 412 MiB and it was killed for running out of memory. Not keeping them is WOR-1082.
+  - A process that sends requests and never reads the replies isn't covered. Its connection stays open with up to about 3 MiB of unread requests and unsent replies until it closes. The cap still limits this to 32 connections, about 100 MiB (WOR-1079).
+  - On macOS the sidecar doesn't hand all the memory it frees back to the system: repeated rounds of 100 stalled connections left the process 60 to 85 MiB larger, though its own data went back to its starting size. On Linux, where the Docker image runs, it does: 2 s after closing 30 stalled connections it was back within about 1 MiB of its starting size, round after round.
+  - Neither limit can be changed by config.
+- **The Docker image runs Python 3.13.18, which refuses TLS connections through the compromised eMudhra intermediate CA keys and fixes a way to write files outside the target folder when unpacking a tar archive** (CVE-2026-115557, CVE-2026-114583, [#750](https://github.com/oblangatas/worthless/pull/750)).
+  Before: the image ran Python 3.13.16. Several eMudhra intermediate CA keys were disclosed as compromised in October 2026, and a certificate chain through one of them verifies for as long as its issuing root is trusted. The proxy's calls to your provider, which carry your real key, are verified TLS connections that use the certifi bundle by default, and the image's bundle (certifi 2026.10.23) had already dropped the affected eMudhra root. So in the image this fix is a backstop: it also blocks cross-signed copies of those keys, and it holds when `WORTHLESS_UPSTREAM_CA_BUNDLE` names an older bundle. Separately, `tarfile`'s `filter="tar"` could be bypassed with crafted link entries, so extracting a hostile archive could write outside the target folder. Worthless never extracts archives, so that flaw sat in the interpreter only.
+  Now: the image is built on `python:3.13-slim-trixie` 3.13.18. Its `ssl` module rejects any chain containing one of those keys whenever certificate verification is on, as it always is for the proxy's calls to your provider.
+
+  **Limits.**
+  - This changes the Docker image only. An install outside Docker runs on the Python it was installed with, which needs 3.11.18, 3.12.16, 3.13.18, 3.14.10 or 3.15.2 (or a later release in the same series) for the eMudhra denylist. Python 3.10 has no fixed release: move to 3.11.18 or later. On 3.10 the certifi floor below (2026.10.23) still leaves out the affected root, unless `WORTHLESS_UPSTREAM_CA_BUNDLE` names a bundle that has it.
+  - The denylist covers only those eMudhra keys. It isn't general certificate revocation checking.
+  - The image still has about 70 known bugs with no fix yet (about 160 package matches), all but two in Debian packages and most marked won't-fix by Debian. The scan doesn't block on those unless one is High or Critical, not marked won't-fix, and not argued in `.grype.yaml`.
+- **Installing or upgrading Worthless now upgrades certifi to at least 2026.10.23, so the CA list the proxy checks your provider against no longer trusts the root above the compromised eMudhra intermediate keys** (GHSA-6q48-6c7w-9gw2, [#756](https://github.com/oblangatas/worthless/pull/756)).
+  Before: Worthless set no minimum certifi. The proxy's calls to your provider, which carry your real key, are verified against certifi's list. Installing Worthless with pip into an environment that already had certifi older than 2026.10.18 kept that certifi, whose list trusts the emSign root above the compromised eMudhra intermediate keys (GHSA-6q48-6c7w-9gw2, rated critical). A fresh environment, including `uv tool install` and install.sh, already got a fixed certifi.
+  Now: this release requires certifi 2026.10.23 or newer, so installing or upgrading Worthless upgrades certifi with it. Besides the affected root, 2026.10.23 also leaves out emSign Root CA - C1 and emSign ECC Root CA - C3, which 2026.10.19 still trusted.
+
+  **Limits.**
+  - An existing install keeps the certifi it has until you upgrade Worthless.
+  - A proxy that is already running keeps the CA list it loaded when it started, so if its old certifi trusted the affected root, it still does after the upgrade. Restart it: `worthless service restart` if it runs as a service, otherwise `worthless down` and then `worthless up`. A command running under `worthless wrap` has its own proxy: run the command again.
+  - This changes which roots are trusted. It isn't certificate revocation checking.
+  - If `WORTHLESS_UPSTREAM_CA_BUNDLE` is set where the proxy starts, the proxy trusts that bundle instead of certifi, and this upgrade doesn't change it. `SSL_CERT_FILE` and `SSL_CERT_DIR` no longer replace certifi's list ([#744](https://github.com/oblangatas/worthless/pull/744), in this section). If you point the bundle at macOS's `/etc/ssl/cert.pem`, note that it still trusts the affected root, and so does Homebrew's OpenSSL bundle before ca-certificates 2026-10-20 (`brew upgrade ca-certificates`). macOS's also trusts AAA Certificate Services, another root listed for the compromised keys (see the last point). The Python denylist in the entry above still blocks the compromised keys, on a Python release that has it.
+  - The tool that downloads Worthless checks PyPI against its own list. pip 26.2.1 and older ship their own copy of certifi's list with the affected root in it; pip 26.2.2 drops it, though pip also trusts your system store, so keep that up to date too. If pip is given its own bundle (`--cert`, `PIP_CERT`, `REQUESTS_CA_BUNDLE` or `CURL_CA_BUNDLE`), upgrading pip or the system store doesn't change that bundle, so check it the same way. uv before 0.13.4 has the affected root built in. A newer uv uses its built-in list only while nothing overrides it: if `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, or system certificates are turned on (`--system-certs`, `UV_SYSTEM_CERTS`, `system-certs` in `uv.toml`, or the older `--native-tls` / `UV_NATIVE_TLS`), uv trusts that store instead, so check that it doesn't hold the affected root. install.sh still installs uv 0.11.7, even when a newer uv is already there (WOR-1116): until that changes, run install.sh only from a network you trust. Before you install or upgrade Worthless with pip or uv, upgrade it from a network you trust, since that download uses the old list too. With pipx 1.6 or later, run `pipx upgrade-shared` the same way for its shared pip (`pipx upgrade-shared --global` for a `--global` install, with the same `PIPX_GLOBAL_HOME` if you set one); if pipx uses its uv backend, upgrade that uv to 0.13.4 or later instead, which `pipx upgrade-shared` doesn't do.
+  - If your environment uses a Linux distribution's certifi older than 2026.10.23 that is patched to read the system certificate store, as Debian's is, the upgrade puts PyPI's copy in front of it. That happens through a `--system-site-packages` venv, `pip install --user`, or pip run against the system Python. A distribution certifi at 2026.10.23 or later stays in place instead, and if it reads the system store, as Arch's does (its `cacert.pem` is a link to `/etc/ssl/certs/ca-certificates.crt`), the proxy trusts that store: the floor doesn't change what it holds, so check the file `python -c 'import certifi; print(certifi.where())'` prints, run with the proxy's Python, as described at the end of this point. An up-to-date Debian store already leaves out the affected root, so there the upgrade adds no protection: it swaps Debian's store for certifi's list, which leaves out about 40 roots Debian 13 still trusts (among them DigiCert Global Root CA, GlobalSign Root CA and GTS Root R2) and any roots you added to the system store. If your upstream chains to one of those, or sits behind an internal CA or a TLS-inspecting proxy, the proxy's calls to it then fail certificate verification, and your app gets `502 bad gateway`. To use the system store again, keep `ca-certificates` up to date, check that the bundle contains none of the roots the oss-security notice lists for the compromised keys: emSign ECC Root CA - G3, emSign Root TLS CA - G3 and AAA Certificate Services, and none of the compromised intermediates the notice lists (an old store, or a certificate you added yourself, can still include one; Debian 13's current store has none of the three roots), and set `WORTHLESS_UPSTREAM_CA_BUNDLE` to it where the proxy starts: `/etc/ssl/certs/ca-certificates.crt` on Debian and Ubuntu, `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` on Fedora.
+
+### Fixed
+- **A crashed `worthless up` no longer leaves your key shares on disk** (`worthless-dhfn`, [#713](https://github.com/oblangatas/worthless/pull/713)).
+  Before: if `worthless up` was killed with `kill -9` or crashed, its helper process kept running. Both key share files stayed in `~/.worthless/run/<pid>/`, also after a restart. `worthless doctor` reported "No issues found" because the helper still answered.
+  Now: the helper checks every 0.5 seconds that `worthless up` is still running. When `worthless up` is gone, the helper deletes both share files and its socket, then stops. It stops less than 8 seconds after `worthless up` stopped.
+
+  **Limits.**
+  - The key stays in the helper's memory for less than 8 seconds after `worthless up` stops. During that time it still answers the proxy that `worthless up` left running.
+  - The proxy also keeps running after `worthless up` crashes. Run `worthless down` to stop it.
+  - If the helper is killed at the same time as `worthless up` (for example `pkill -9 -f worthless`), the share files stay. `worthless doctor` reports them.
+  - A helper left running by an older version of Worthless does not stop. Stop it by hand. `worthless doctor` then reports its share files.
+  - If `worthless up` is killed and the terminal closes less than 0.5 seconds later, the share files stay. `worthless doctor` reports them.
+  - In Docker, the helper sometimes cannot remove the empty run folder. `worthless doctor` reports it.
+  - The share files are deleted, not securely erased.
+
+- **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).
+  Before: a `.env` with a name and no `=`, such as `OPENROUTER_BASE_URL` or `export OPENROUTER_BASE_URL`, on the line lock writes for a key made lock stop with WRTLS-199, an internal error. A name in quotes, such as `'OPENROUTER_BASE_URL'=https://openrouter.ai/api/v1`, did the same. Nothing changed: your `.env` kept its key, and lock left nothing in the Worthless database.
+  Now: lock leaves that line as it is, adds its proxy line after it, and says the line "had no value", or that it "can't edit the line you have for it". python-dotenv, Node's `--env-file` and docker compose read the last line for a name, which is now the proxy line. Unlock removes only the line lock added, so lock then unlock gives back the `.env` you started with. Lock also prints that it added a line only after the `.env` is written, so a refused write no longer reports a line it never added.
+  New: after writing, lock reads the `.env` the way python-dotenv does, and if a `*_BASE_URL` it wrote doesn't come back as its proxy address, it warns you, even with `--quiet`, that the app's calls won't reach the proxy and will fail.
+
+  **Limits.**
+  - If the same name also has a value on an earlier line, lock rewrites that line as before, and a later bare line (or a later quoted `'NAME'=...` line) still decides what python-dotenv reads, so your app doesn't reach the proxy and its calls fail. Lock exits 0 and warns you. Delete the later line (WOR-1045).
+  - Changed in this release: if the line lock rewrites sits inside another variable's multi-line quoted value, lock writes its proxy address into that value until unlock, and your app doesn't reach the proxy. Lock exits 0 and warns you. Before, lock routed the key, but unlock deleted that line from the value for good (WOR-1045).
+  - If you give the bare line a value while the key is locked, unlock removes it along with lock's line, as it does for any name on two lines (WOR-1014).
+  - A `.env` whose last line has no newline gets one, as with every lock that adds a line (see the WOR-981 entry below).
+- **`worthless unlock` puts back a `*_BASE_URL` line you had before lock** (WOR-1013, [#738](https://github.com/oblangatas/worthless/pull/738)).
+  Before: if your `.env` already had the line lock writes for a key, for example `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1` next to `OPENROUTER_API_KEY`, or your own gateway in `OPENAI_BASE_URL`, lock replaced its value with the proxy URL and did not keep yours. Unlock then removed the line. An app that reads `OPENROUTER_BASE_URL` with no default then used OpenAI's address and sent your OpenRouter key to OpenAI.
+  Now: lock saves, for each key, which line it writes and the value it replaces. Unlock writes that value back as you wrote it, with its quotes, comment and any `${...}` reference, and removes the line only if lock added it. Lock then unlock gives back the `.env` you started with. `worthless uninstall` does the same.
+
+  **Limits.**
+  - A key locked with an older version has nothing saved, so unlock puts back the vendor's address where that is safe, or removes the line, and says which. See Security above. Keys you lock with this version get back exactly what you wrote.
+  - Unlock writes your value back only while the line still points at that key on the proxy. If you changed or deleted the line after lock, unlock keeps your change and tells you, without putting your earlier value back (WOR-1024).
+  - The saved value is tied to your Worthless encryption key and to its own row. If someone without that key changes it in the Worthless database, unlock does not write it: it removes the line and tells you. Someone who can write that database can still delete the saved value, or swap in one saved by an earlier lock of the same key (WOR-1023). With the saved value deleted, unlock treats the key as one an older version locked (see Security above).
+  - A value that can't be written back unchanged (one with a quote, a space before `#`, or whitespace at one end) is not saved. Lock warns you, and unlock removes the line and tells you to set it again (WOR-1027, WOR-1042).
+  - A value that spells out one of your keys is not saved either, so the record never holds a key. A `${OPENAI_API_KEY}` reference is saved as written and comes back. Lock warns you, and unlock removes the line and tells you to set it again (WOR-1035, WOR-1042).
+  - An unquoted value loses whitespace at its end.
+  - A value that refers to another line lock rewrites, such as `OPENROUTER_BASE_URL=${OPENAI_BASE_URL}`, directly or through another variable, comes back as the value it had at lock, not as the reference. Restored as written, it would point at the other key's proxy line while that key is still locked. Lock says so (WOR-1026).
+  - If the `.env` sets the same `*_BASE_URL` on two lines, both get the last line's value back.
+  - Older versions don't read the saved value, so going back to one before you unlock loses your value: its unlock removes `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL`, and leaves any other proxy line, such as `OPENROUTER_BASE_URL`, pointing at the proxy. Unlock with this version first.
+  - When two keys share one line, for example `OPENAI_API_KEY` and `MY_OPENAI_KEY` both use `OPENAI_BASE_URL`, unlocking only `OPENAI_API_KEY` puts your value back while `MY_OPENAI_KEY` stays locked, so `MY_OPENAI_KEY`'s calls go to your URL with a locked value and fail. Unlock both together.
+  - If you replaced a key and kept the old one in the same `.env` under another name, lock now stops with the `.env` unchanged. Before, it left the old key's copy impossible to unlock (WOR-1017).
+- **`--quiet` no longer hides what unlock did to your `*_BASE_URL` line, and unlock says when lock couldn't save your value** (WOR-1042, [#739](https://github.com/oblangatas/worthless/pull/739)).
+  The notes `worthless unlock` and `worthless uninstall` print when they write back or remove a `*_BASE_URL` line (see the entries above) are printed even with `--quiet`, because they report a change to your `.env`, not progress. So are lock's warnings that it won't save a line's value as written. Agents often pass `--quiet`. When lock couldn't save the value you had on the line, unlock removes the line and says so, for example "lock couldn't save the value you had in OPENAI_BASE_URL", rather than removing it like a line lock added. The notes name the line, never its value.
+
+  **Limits.**
+  - If you changed or deleted the line after lock, unlock leaves it as it is and says nothing about the value lock couldn't save.
+  - A value that refers to another line lock rewrites comes back as the value it had at lock, and unlock doesn't say so again; lock does (WOR-1026).
+  - If the line appears more than once in the `.env`, unlock writes back or removes every copy, including one you added after lock, and says nothing about the extra copies (WOR-1014).
+  - The notes are plain text on stderr. `--json` output doesn't include them.
+- **`--quiet` no longer hides which keys `worthless uninstall` couldn't restore, or what it did to your files** (WOR-1043, [#741](https://github.com/oblangatas/worthless/pull/741)).
+  Before: `--quiet` hid every warning uninstall printed. `worthless --quiet uninstall --yes --force` could delete Worthless's half of a key it couldn't put back in its `.env` and print nothing, so nothing told you which file it was or to rotate that key. It was just as silent about an enroll-only key it removed, the record of a project whose `.env` is gone, a broken install `--force` wiped, and a `~/.worthless` it couldn't fully remove. It also gave no sign that it had set a `.env` other users could read to owner-only (0o600), or kept that mode because you said so at the prompt, that it couldn't tighten a file's mode, that `openclaw.json` may still point at the proxy, what `--remove-mcp` removed from an editor config or couldn't edit, or that one still names the Worthless MCP server. Without `--force`, the refusal said "fix the above" with nothing above it.
+  Now: those notes print even with `--quiet`, like unlock's `*_BASE_URL` notes (WOR-1042). `--quiet` still hides progress, such as "restored", "Worthless uninstalled" and OpenClaw's "[OK] restored". The OpenClaw `[FAIL]` block that unlock and uninstall print shows in full under `--quiet`, not only its first line, so it still says that `openclaw.json` may not be restored and to run `worthless doctor`. So do the notes that an OpenClaw entry stays on the proxy, because its saved record is damaged or because the restored `.env` couldn't be read back. The note about a project whose `.env` is gone now says to rotate its key if you moved the project rather than deleting it.
+  - If uninstall can't write a note while it restores keys (for example, stderr refuses the write), it stops with WRTLS-103 and Worthless not removed, rather than reading the error as a broken install. Before, `--force` then wiped the keys it hadn't restored yet, and without `--force` it told you to re-run with `--force`. The keys it already restored stay restored, and the message says `openclaw.json` may still point at the proxy for them. Re-run `worthless uninstall` to restore the rest.
+  - A project folder uninstall can't open is named like a `.env` it couldn't restore, so the refusal says which file, and `--force` can still finish. Before, on Python 3.13 and earlier it read as a broken install: without `--force` you were told to wipe, and `--force` wiped silently. On Python 3.14 it read as a deleted project, and uninstall dropped that key even without `--force`.
+  - A `.env` that is a symlink loop is named the same way. Before, it read as a deleted project and its key was dropped.
+  - Uninstall prints `.env`, editor-config and `~/.worthless` paths without control characters, so a folder name can't send escape codes to your terminal. Before, it did in a normal run. The `chmod` command it suggests quotes the path for the shell, so one with a space doesn't become two files. The `[FAIL]` block's details are printed the same way.
+
+  **Limits.**
+  - A `.env` on a drive or network share that isn't connected reads as a deleted project, the same as before: uninstall drops its key without `--force`. Connect the drive before you uninstall (WOR-1068).
+  - `--quiet` still hides that uninstall couldn't remove the service unit or the keychain entry, or couldn't stop the proxy (WOR-1055).
+  - If uninstall stops partway, or refuses because a `.env` can't be restored, `openclaw.json` may still point at the proxy for the keys it restored first. A second run doesn't fix that (WOR-1053).
+  - When uninstall refuses to read your encryption key (its mode, owner or a symlink), that message prints the key file's path as it is (WOR-1054).
+  - A suggested `chmod` command can still name another file when the path holds an emoji code such as `:fire:`, or wraps across lines when stderr is a pipe (WOR-1056).
+  - Under `--yes`, if setting a `.env` to 0o600 then fails, uninstall first says it set 0o600, then that it couldn't (WOR-1057).
+  - Lock's OpenClaw `[FAIL]` block still shows only its first line under `--quiet` (WOR-1052).
+  - The notes are plain text on stderr. `--json` output doesn't include them.
+- **`worthless uninstall --force` gives OpenClaw back the real key of each `.env` it restores** (WOR-1051, [#742](https://github.com/oblangatas/worthless/pull/742)).
+  Before: when one `.env` couldn't be restored, `uninstall --force` wrote NUL bytes in place of each restored key that OpenClaw uses, in `openclaw.json` and in the agent caches (`models.json`, `auth-profiles.json`). It pointed those providers back at the vendor, printed `[OK] OpenClaw: restored`, and exited 0. The keys were back in their `.env`, but OpenClaw couldn't use them, and the record that could fix `openclaw.json` was deleted with `~/.worthless`. If this happened to you, copy each key from its `.env` over the NUL bytes (`\u0000`) in OpenClaw's `openclaw.json` (usually `~/.openclaw/openclaw.json`) and in its agent caches (usually under `~/.openclaw/agents/`).
+  Now: OpenClaw gets each restored key back, the same as when every `.env` is restored. Uninstall still wipes from memory the keys it holds for OpenClaw before it exits, now also when it stops after restoring them, for example on a line it can't write. The limits below list the exceptions.
+
+  **Limits.**
+  - An `openclaw.json` entry that lock added still points at the removed proxy after uninstall. So does the entry for a key whose `.env` couldn't be restored, whether lock added it or replaced it. Uninstall still says `[OK]` (WOR-1062).
+  - If two projects set the same variable, such as `OPENAI_API_KEY`, to different keys, `openclaw.json` and the agent caches can get the other project's key instead of the one OpenClaw had before lock. This also happens when every `.env` is restored (WOR-1061, WOR-1067).
+  - Text copies of a key that Python makes while writing `openclaw.json` can't be wiped. Keys are also left in memory if closing the database fails, or a Ctrl-C lands, just after the restores (WOR-1064). Uninstall doesn't turn off core dumps, as lock and unlock do (WOR-1060).
+- **`worthless unlock` removes the proxy line that lock added for an OpenRouter key** (WOR-981, [#737](https://github.com/oblangatas/worthless/pull/737)).
+  Before: lock names the proxy line after the key's variable, so `OPENROUTER_API_KEY` gets `OPENROUTER_BASE_URL`. Unlock looked for `OPENAI_BASE_URL` instead. After unlock, `OPENROUTER_BASE_URL` still sent your app to the local proxy, for a key the proxy no longer had, and the `.env` did not match the original. The same happened for any other `<NAME>_API_KEY` variable, such as `GROQ_API_KEY`. If you had your own `OPENAI_BASE_URL` in that file, unlock deleted it, after a normal lock or a `--keys-only` one. If the `.env` also had a locked `OPENAI_API_KEY`, unlocking only the OpenRouter key deleted `OPENAI_BASE_URL`. The OpenAI key stayed locked, so its scrambled value then went straight to OpenAI and failed.
+  Now: unlock removes the line that lock wrote for each key it unlocks, and only while that line still sends that key's alias to the proxy (whatever the host or port). Other `*_BASE_URL` lines are kept, including your own after a `--keys-only` lock. If lock added the line, lock then unlock gives back the `.env` you started with. `worthless uninstall` restores the same way.
+
+  **Limits.**
+  - A `.env` you already unlocked with an older version keeps its leftover line. Run `worthless doctor` in that project's folder: it checks the file named `.env` there and reports the line as a BASE_URL alias missing from the DB. Delete that line by hand.
+  - If one `*_BASE_URL` name appears twice in the file, unlock decides on the last one, then keeps or removes every line with that name (WOR-1014).
+  - When two keys share one line (for example `OPENAI_API_KEY` and `MY_OPENAI_KEY` both use `OPENAI_BASE_URL`, which points at `OPENAI_API_KEY`), unlock both together. Unlocking only `OPENAI_API_KEY` removes the line if lock added it (if it was yours, see the WOR-1013 entry above) while `MY_OPENAI_KEY` stays locked. Unlocking only `MY_OPENAI_KEY` keeps the line, so an app that reads it sends `MY_OPENAI_KEY`'s real key to the local proxy, which refuses it (401) and never forwards it, and `lock` refuses that file until the other key is unlocked too.
+  - A `.env` whose last line has no newline gets one. This happened before too, for every key.
+- **A provider reply whose `usage` isn't an object no longer locks a key out of its token budget** (WOR-980, [#727](https://github.com/oblangatas/worthless/pull/727)).
+  Before: a reply such as `{"usage": "x"}` or `{"usage": null}` crashed the step that records spend after the response is sent. That step never released the request's token-budget hold. A key with a daily budget then got `429 token_budget_exceeded` with no tokens spent, and a spend-capped key's hold waited for the sweeper.
+  Now: such a reply counts as "usage unknown". The proxy logs a warning and releases the hold. A spend-capped key is billed right away at the larger of its admission estimate and the 128,000-token ceiling, the same amount the sweeper charged before.
+
+  **Limits.**
+  - A token count inside `usage` that is `null` or not a number still crashes the same step and can lock the key out the same way (WOR-1002, [#730](https://github.com/oblangatas/worthless/pull/730)).
+  - A reply nested thousands of levels deep still crashes the same step, with the same lockout (WOR-1030).
+  - On a key with a token budget but no spend cap, a reply whose usage can't be read is not counted against the budget (WOR-1031).
+
+## [0.3.16] — 2026-10-22
+
+### Security
+- **A key that the doctor bug unlinked keeps both of its halves until it can be re-linked** (WOR-959, [#709](https://github.com/oblangatas/worthless/pull/709)).
+
+  Before: on an old-format key, a second `worthless doctor --fix` deleted the key's first half from `~/.worthless/shard_a/`. After that, the key could not be recovered. `worthless unlock` told you to remove the locked values "if they are junk".
+
+  Now: `doctor --fix` keeps that file when the key's other half is still stored, and reports the key as probably recoverable. If doctor cannot read the stored halves, it deletes nothing. When the `.env` names a key that lost its link, `unlock` tells you to keep the locked lines, and not to re-lock or uninstall. If the file can't say which key it holds (a `--keys-only` lock) and this machine has such a key, it tells you not to re-lock yet. Otherwise, for raw keys, it tells you to lock them.
+
+  **Limits.**
+  - This release does not re-link the key. WOR-937 does that.
+  - A file whose key has no stored half left is still removed. Nothing can use that file.
+  - `worthless uninstall` still removes a key that lost its link, without a warning. If the doctor bug hit this machine, do not run `uninstall` until the re-link release (WOR-937) ships.
+
+### Fixed
+- **A busy-lock error no longer tells you to delete the lock file** (WOR-965).
+  Before: when another worthless command held the lock, the error said "Remove ~/.worthless/.lock-in-progress if stale." If that command was still running, deleting the file let two commands write to your keys at once.
+  Now: the error says "Another worthless command is running. Wait for it to finish, then try again." When worthless can't prove the lock is dead (a lock from another host, a file system without file locks, an empty lock file from an older version), the error says the lock clears by itself, and in how many seconds. A lock left by a crashed command clears itself (see the entry below), so you never need to delete it by hand.
+
+  **Limits.**
+  - `worthless doctor --fix` has its own lock and still uses its own wording (WOR-1003).
+  - If the lock file's time is in the future (clock skew between hosts), the countdown is long. It is accurate: the lock really clears only then.
+  - If something other than a file sits at the lock path (a symlink or a folder), the message does not say so.
+
+- **After a crash, the next worthless command runs at once** (WOR-962, [#714](https://github.com/oblangatas/worthless/pull/714)).
+  Before: if a worthless command was killed (`kill -9`, out of memory, power loss), every write command failed for 5 minutes with "WRTLS-105: Lock file is 1s old (< 300s). Another operation may be running." This included the `worthless lock` that `status` tells you to run after a cut-off lock. Also, a command that ran longer than 5 minutes could have its lock taken by a second command.
+  Now: the lock is held with the operating system's file lock, which is released when the process stops. The next command sees that the old holder is gone and runs at once. A command that is still running keeps its lock, however long it runs.
+
+  **Limits.**
+  - On native Windows, and on file systems that do not support file locks (some NFS, SMB and FUSE mounts), the old 5-minute rule still applies. These paths are tested with simulated failures, not on real NFS or SMB.
+  - A lock written on a different host or container, for example through a shared mount, also keeps the 5-minute rule.
+  - Two machines with the same hostname that share one `~/.worthless` on a mount whose file locks are local to each machine (for example NFSv3 with `local_lock`) are not protected: each can take over the other's live lock. Do not share `~/.worthless` between machines.
+  - A command killed in the first instant, before it takes the file lock, leaves an empty lock file. That file also keeps the 5-minute rule.
+  - `worthless doctor --fix` has its own lock, with a similar race. It is not changed here (WOR-963).
+
+- **A stale key can't make the background service look healthy any more** ([#729](https://github.com/oblangatas/worthless/pull/729)).
+
+  Before: if `~/.worthless/fernet.key` held a key that can't unlock your locked keys (for example, restored from an old backup), the background service still started. `/healthz` returned 200, and every request failed with 401. `worthless doctor` said "No issues found." `worthless lock` with a different `WORTHLESS_FERNET_KEY` in the shell printed `[OK]` and sealed the new project with a key the service does not have.
+
+  Now: the service prints WRTLS-121 once, serves nothing, and waits. When you fix `fernet.key`, it exits so launchd or systemd restart it. `worthless up` that you run yourself stops with the cause and the fix. `lock` refuses a shell `WORTHLESS_FERNET_KEY` that differs from the stored key, and changes nothing. `worthless doctor` names the projects the service's key can't unlock.
+
+  **Limits.**
+  - Worthless never repairs the key. `doctor` tells you which key source unlocks your keys; you choose.
+  - A key that unlocks only some projects still serves them. `status` stays green; only `doctor` and the service log name the broken ones.
+  - A stale key that is only in the keychain does not heal on its own. Run `worthless service restart` after you fix it.
+  - `worthless down` does not see a service that is waiting. Use `worthless service stop`, or fix the key.
+  - The restart after the exit is done by launchd or systemd. The tests prove the exit, not a real service manager's restart.
+
+## [0.3.15] — 2026-10-18
+
+### Changed
+- **`worthless status` and `verify` say whether your protection lasts past a restart** (WOR-860, [#708](https://github.com/oblangatas/worthless/pull/708)).
+  Before: `status` said "🟢 You're protected" and `verify` said GREEN for a proxy started with `worthless up` or plain `worthless`. That proxy stops at the next restart, and neither command said so. The AI editor status tool gave the same answer.
+  Now: without the background service, they say "You're protected now" and "GREEN now". They add one shared sentence: "Not after a restart", plus the fix, `worthless service install`. On WSL the sentence also says protection ends once your last WSL window closes. With the service running, they say when it starts on your platform. `status --json`, `verify --json` and the MCP status tool add `survives_restart`. It is true only when the background service is running on its own port and the proxy is proven to be Worthless.
+
+  **Limits.**
+  - `survives_restart` describes the service now. It does not prove that a restart brings it back.
+  - The WSL wording was checked in CI on real WSL, not by a person in an interactive WSL terminal.
+  - `status` now runs one `launchctl` or `systemctl` call when the proxy is up. This adds tens of milliseconds.
+
+### Removed
+- **Installing Worthless adds only the `worthless` command** (`worthless-nd65`, [#692](https://github.com/oblangatas/worthless/pull/692)).
+  Before: an install also added six internal commands. They were `test-unit`, `test-docker`, `test-live`, `test-openclaw`, `test-all` and `docs-generate`. They did not work outside the source repository. Their names could conflict with other tools.
+  Now: an install adds only `worthless`. If you run the installer again on an older version, it removes the six commands. A test stops a new non-Worthless command from being added.
+
+  **Limits.**
+  - We did not test an upgrade with `pipx`.
+  - Worthless does not remove copies that a different installer made, for example an old `pip install --user`.
+
+### Fixed
+- **Bare `worthless` reports a failed or stopped lock with its real exit code** (`worthless-nhc0`).
+  Before: when the lock step of bare `worthless` failed or was stopped, the command exited 0. A script or an agent read success after LOCK FAILED, Ctrl-C or `docker stop`.
+  Now: the exit code is the same as `worthless lock` gives: 73 or 87 for a failed OpenClaw step, 130 for Ctrl-C, 143 for SIGTERM, 129 when the terminal closes. The proxy does not start. If you say no at a prompt, the exit code is still 0.
+
+- **Stopping `worthless lock` puts OpenClaw's provider entries back, and never erases your OpenClaw config** (`worthless-2nta`, `worthless-1jfr`, [#698](https://github.com/oblangatas/worthless/pull/698)).
+  Before: a Ctrl-C between two OpenClaw provider writes left one provider on the Worthless proxy and the next one not. If `openclaw.json` could not be read before the lock and a later write failed, Worthless wrote `{}` over the whole file, and every provider was lost. A Ctrl-C during a skill reinstall deleted the OpenClaw skill.
+  Now: a Ctrl-C puts back the provider entries this lock wrote, or removes them if `openclaw.json` did not exist. It changes only entries that still point at this lock's proxy, so a change made by someone else stays. A re-lock keeps its new key. An unreadable `openclaw.json` stays as it is. The old skill stays until the new skill is in place.
+
+  **Limits.**
+  - A Ctrl-C does not undo the clean-up of an old `worthless-<provider>` entry.
+  - `kill -9` or a power cut during a write is not undone.
+  - OpenClaw writes its config without a lock. A write by OpenClaw at the same moment can still conflict with a Worthless write.
+  - If another Worthless process holds the `openclaw.json` lock for more than 2 seconds after a Ctrl-C, the undo stops. `worthless doctor` repairs the remaining entries.
+
+- **The all-container OpenClaw setup can lock and run again** (WOR-510, [#700](https://github.com/oblangatas/worthless/pull/700), [#695](https://github.com/oblangatas/worthless/pull/695)).
+  Before: running `deploy/docker-compose.yml` as the install page says failed at three points. `worthless lock` refused to set up OpenClaw, because it read `WORTHLESS_OPENCLAW_CONFIG_SHARED` as a reason to stop. On a working setup, lock exited 91 with "do NOT trust this lock", because its check called the `proxy` hostname and the check answers only on loopback. The OpenClaw container restarted again and again with `EACCES`, because it was not in the shared volume's group and could not write its config.
+  Now: lock sets up OpenClaw in the shared volume. An owner mismatch that compose did not declare still stops the lock, and an unreadable config is still never overwritten. Lock checks the proxy on `127.0.0.1`, as `worthless verify` already does. Compose adds the OpenClaw container to group `10001`, and lock and unlock keep the shared files group-writable, even when they fail. Lock does not follow symlinks in the shared volume, and it refuses to install or remove the skill through a link that points outside it. The install page now matches what lock does.
+
+  **Limits.**
+  - Unlock does not work in the all-container setup yet (WOR-953).
+  - We tested on Docker Desktop on macOS, not on native Linux.
+  - Lock still runs as root in the container (WOR-955).
+  - If you already run this setup: download `docker-compose.yml` again for the new `group_add`, pull the new image, then run lock again.
+
+- **`worthless doctor --json` finishes on a Mac instead of crashing** (`worthless-7xsa`, [#701](https://github.com/oblangatas/worthless/pull/701)).
+  Before: on macOS, `doctor --json` crashed with exit 134 when the keychain held a Worthless entry. It printed no JSON. Its lock file stayed behind and blocked every `doctor` for 5 minutes.
+  Now: `doctor --json` reports every check. Findings that the crash hid now show up.
+
+  **Limits.**
+  - A keychain account name longer than 1023 bytes reads as empty. Worthless writes only short names.
+
+- **Every command Worthless tells you, or your agent, to run now exists** (`worthless-qvvs`, [#680](https://github.com/oblangatas/worthless/pull/680)).
+  Before: two `worthless lock` failure messages said to run `worthless unlock --all`, which fails with `No such option: --all`. A proxy log line said to run `worthless relock`, which does not exist. SKILL.md told agents to run `worthless service status --json`, and `service status` has no `--json`.
+  Now: the lock error names the exact `worthless unlock --alias <alias> --env <path>` and `worthless lock --env <path>` to run. After a failed rollback, lock tells you to run `worthless lock --env <path>` again, which finishes the job. The proxy log names the alias to unlock and lock again. SKILL.md says `worthless service status`. A test checks every printed command and every SKILL.md command against the real CLI.
+
+  **Limits.**
+  - The test does not check commands printed without backticks, or commands built while the program runs.
+
+### Security
+- **Worthless's own repair command stops destroying healthy keys, and keys whose project moved** (WOR-935, [#676](https://github.com/oblangatas/worthless/pull/676)). Since v0.3.7, doctor's `broken_status` check called every current-format key broken: it looked for Shard A in `~/.worthless/shard_a/`, where only old-format keys keep it. So `worthless doctor --fix --json` — the command agents are told to run — deleted the enrollment of every healthy key, and `unlock` then failed with WRTLS-102 even though both shards survived. The check now judges old-format keys only, and deletes nothing if it can't read the shard rows. Separately, `doctor --fix` (text and JSON) treated a missing `.env` file like a deleted line and purged keys whose project had merely moved. A missing file is now always kept, because doctor can't tell a moved project from a deleted one. Every orphan finding carries `reason` (`env_line_missing` / `env_file_missing`). A key whose `.env` is missing gets honest advice: put a moved project back and run `worthless unlock`, or remove a deleted one with `worthless revoke --alias <alias>`, which doctor offers only when no other project has the same key locked (revoke removes a key everywhere). `--fix --json` reports only the records it actually deleted.
+
+  **If you were hit** (`unlock` fails with WRTLS-102 after running `doctor --fix`): do not run `worthless uninstall` or delete `~/.worthless`. Both halves of your key still exist, and getting them back is WOR-937.
+
+  **What this does NOT fix.** Keys already unlinked by v0.3.7–v0.3.14 stay unlinked until WOR-937. A deleted project's key — `git worktree remove` deletes the `.env` — is unrecoverable; doctor now keeps its record instead of purging it; remove it with `revoke --alias` only if no other project has the same key locked. Deleting still needs no extra consent and can't be undone (WOR-938). "Line missing" is still a guess: a renamed variable, a commented-out line, a branch whose `.env` lacks the line, or a re-cloned project with a fresh `.env` at the same path all look like a dead key and still get purged, though the key may be recoverable (WOR-938). An old-format key whose line was deleted is purged even though its Shard A file could rebuild it (WOR-940).
+
+- **After a crash in the middle of `worthless lock`, Worthless stops calling your plaintext key safe** (WOR-958, [#707](https://github.com/oblangatas/worthless/pull/707)).
+  Before: lock saves to its database, then rewrites `.env`. A `kill -9`, an out-of-memory kill or a power cut between the two left the real key in `.env`. `scan` still said "All 1 keys are protected" and passed the pre-commit hook. `status` said `PROTECTED`. `doctor` said "No issues found." Bare `worthless` said nothing.
+  Now: `scan` shows the key as `UNPROTECTED` and exits 1. `status` and the MCP status tool show the key as `EXPOSED`, a red "At risk" verdict, and exit 73. `doctor` and `doctor --json` name the key and the fix, `worthless lock --env <path>`. Bare `worthless` warns, then starts the proxy. Healthy locked keys read as before.
+
+  **Limits.**
+  - A crash in that moment still leaves the key in plain text. Worthless now tells you. You still need to run `worthless lock` again.
+  - `doctor --fix` does not repair this state.
+
+- **`worthless doctor` finds key shares that a stopped proxy left on disk, and `--fix` deletes them** (`worthless-7qb6`, [#699](https://github.com/oblangatas/worthless/pull/699)).
+  Before: `worthless up` and `wrap` write both key shares to `~/.worthless/run/<pid>/`. A crash or a kill skipped the clean-up, and the folder stayed forever. Together, the two shares rebuild your key. `doctor` said "No issues found."
+  Now: `doctor` names each folder and tells you to run `worthless doctor --fix`. `--fix` asks first (`--yes` skips the question). It deletes a folder only when its process is gone, its sidecar does not answer, and no proxy is recorded as running. `doctor --json` adds a `dead_proxy_run_dirs` check.
+
+  **Limits.**
+  - Worthless deletes the files. It does not securely erase them.
+  - Nothing cleans up by itself. You run `doctor --fix`.
+  - After `kill -9` on `worthless up` and then `worthless down`, the sidecar keeps answering. `doctor` treats the folder as in use and does not report it.
+  - A container and the host that share one Worthless home see different process IDs. `doctor` can miss a folder in that case.
+  - The check does not run on Windows.
+
+## [0.3.14] — 2026-10-13
+
+### Fixed
+- **Worthless does not overwrite a key file that it cannot read safely** (`worthless-6hu7`, [#669](https://github.com/oblangatas/worthless/pull/669)).
+  Before: Worthless treated a `fernet.key` as missing if it had the wrong permissions, had a different owner, or was a symlink. A fresh install then made a new key. Without a keychain, the new key overwrote the file. With a keychain, Worthless deleted the file as "stale". With a symlink, the write followed the link to a file outside your home folder. As root in the container, that file could be at any path.
+  Four more paths had the same mistake. The keychain migration read the file without checks and could put the wrong key in your keychain. A locked keychain, or a cancelled keychain prompt, made a key that was there look missing. `uninstall` called a key with the wrong permissions "unrecoverable" and offered `--force`.
+  Now: all of these stop with `WRTLS-121` and do not change the key. The error shows the repair: `chmod 0600 …`, or move a symlink to a different location. If a working keychain key exists, Worthless ignores a leftover key file with the wrong permissions, so it does not lock you out. Key writes do not follow symlinks. Each key file gets mode 0600.
+
+  **Limits.**
+  - A symlink to a missing file, for example on an unmounted volume, still counts as "no key" (`worthless-0atz`). The empty-database guard stops this from costing locked keys. A fresh install can still make a new key.
+  - Worthless does not repair the file for you. There is no `doctor --fix` for this. The error and `doctor --explain fernet_key_refused` show the command to run.
+  - This release cannot recover a key that an older version already replaced.
+  - A full disk during a write can still leave an empty key file. This was also true before this release.
+
+- **`worthless lock` stops safely on Ctrl-C, on `docker stop`, and when you close the terminal** (`worthless-595v`, `worthless-f1xx`, `worthless-y4fn`, `worthless-dnp9`, `worthless-v9gg`, `worthless-3em7`, [#691](https://github.com/oblangatas/worthless/pull/691)).
+  Before: #668 made Ctrl-C work after lock saved the keys. Other parts of lock still had gaps. On Python 3.11 and later, lock ignored Ctrl-C for seconds during the OpenClaw safety check, then ran the check again. Lock ignored a press at the end of the database writes or during the `.env` rewrite, and continued. `docker stop` (SIGTERM) exited with code 130, or killed lock before it was ready. Closing the terminal (SIGHUP) killed lock with no rollback and no record. A press during a rollback that an error started could cancel the rollback and leave old records.
+  Now: lock stops at once. If lock did not rewrite `.env` yet, it rolls back all changes. If lock already rewrote `.env`, your keys stay locked, and `worthless status` shows that OpenClaw setup is not complete. The exit code shows the signal: 130 for Ctrl-C, 143 for SIGTERM, 129 for a closed terminal. Worthless records the interrupt, also when the terminal is gone. On a machine without OpenClaw, the message does not mention OpenClaw.
+
+  **Limits.**
+  - `kill -9` (SIGKILL) cannot be caught. It can leave records behind (WOR-646 Part 2).
+  - The MCP `worthless_lock` tool runs off the main thread, where no signal arrives (`worthless-dqzj`).
+  - A signal in the first moments of lock, before the safety check, ends lock the normal way. Lock has not written anything at that time.
+  - Bare `worthless` still changes the exit code of an interrupted lock to 0 (`worthless-nhc0`).
+  - A press during a rollback that an error started exits with the error's code, not 128 plus the signal number. The rollback still finishes.
+  - An interrupted OpenClaw provider write can leave `openclaw.json` partly changed (`worthless-2nta`).
+
+- **A failed OpenClaw check after lock does not destroy your key** (`worthless-im3x`, [#688](https://github.com/oblangatas/worthless/pull/688)).
+  Before: after lock rewrote `.env`, it checked OpenClaw's files again if they changed. If that check refused (it found new plaintext), failed or timed out, lock deleted its stored half of the key. Your `.env` then held only the other half. For a newly locked key, you could not recover the key on this machine: `worthless unlock` found nothing, and `worthless lock` refused to run again.
+  Now: your keys stay locked and you can recover them. Lock does not change OpenClaw. Lock shows LOCK FAILED and exits with code 87. `worthless status` shows that OpenClaw setup is not complete. To recover, remove the plaintext key from OpenClaw. Then run `worthless unlock`, then `worthless lock`. If you only run `worthless lock` again, it exits with code 73 and does not say "still protected". This also applies after a lock that was interrupted during OpenClaw setup.
+
+  **Limits.**
+  - `worthless unlock` restores each OpenClaw provider entry to its value before lock. It does this also if you edited the entry during the failed lock (`worthless-kzpw`).
+  - Worthless records "not complete" for the Worthless home, not for each `.env`. After a failed lock in one project, a lock of a different, fully locked project also exits with code 73. A later successful lock in a different project hides the record (`worthless-seho`).
+  - To clear exit code 73, you must run unlock and then lock. This puts the real key back in `.env` for a short time. The MCP lock tool shows this case as a raw error (`worthless-098h`).
+
+### Changed
+- **Worthless asks you before it installs a background service** ([#673](https://github.com/oblangatas/worthless/pull/673)).
+  Worthless can install a background service that starts automatically: at login on macOS, and at boot on Linux through lingering. Before it installs the service, it now tells you what it adds and when it starts. It also tells you that the master key moves into a file, that Linux turns on lingering, and how to remove all of it. Enter means no. Worthless installs the service only after someone types `y`. `--yes` never installs it. Plain `worthless` now asks the same question. In a container, you get one line that tells you to run the proxy as the main process instead.
+
+  **Limits.**
+  - Worthless finds an AI coding agent only through the `CLAUDECODE` and `AI_AGENT` environment variables. It does not ask the question in that case. An agent that removes these variables gets the question like a person. A person whose terminal inherited them gets a hint, not the question.
+  - The "not protected after a reboot" line in `status` and `doctor` is not in this release (WOR-860).
+  - We did not test that the service starts again after a reboot (WOR-725).
+
 ## [0.3.13] — 2026-10-12
 
 ### Added
@@ -58,7 +435,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - The `--pre-commit` hook still blocks a staged token, because a commit writes it into history for good. In that mode `--format sarif` and `--json` still mark the token as a `note` while the hook exits 1.
   - Only Claude Code tokens in the files scan reads. OpenClaw's other unshardable credential stores are `worthless doctor`'s job, not scan's.
 
-- **Ctrl-C stops `worthless lock`'s OpenClaw setup at once, and never costs you your keys** (found while chasing `worthless-3clz`, [#668](https://github.com/oblangatas/worthless/pull/668)). Once the keys were committed, the rest of the lock was synchronous OpenClaw work, so Ctrl-C was dropped: for 15s during the reload wait, and forever while another process held OpenClaw's config file. Now Ctrl-C stops there in under a second and keeps the keys locked. It warns that OpenClaw may still be using the real key, `worthless status` flags OpenClaw as broken, and the CLI exits 130, even with `--quiet`. Ctrl-D at the "Route them through Worthless?" prompt no longer rolls back the database under a rewritten `.env`, as it did on earlier releases, and Ctrl-C there is now answered. A second Ctrl-C during a rollback now says why it is not stopping.
+- **Ctrl-C stops `worthless lock`'s OpenClaw setup at once, and never costs you your keys** (found while chasing `worthless-3clz`, [#668](https://github.com/oblangatas/worthless/pull/668)). Once the keys were committed, the rest of the lock was synchronous OpenClaw work, so Ctrl-C was dropped: for 15s during the reload wait, and forever while another worthless process held its lock on OpenClaw's config file (OpenClaw itself never takes that lock). Now Ctrl-C stops there in under a second and keeps the keys locked. It warns that OpenClaw may still be using the real key, `worthless status` flags OpenClaw as broken, and the CLI exits 130, even with `--quiet`. Ctrl-D at the "Route them through Worthless?" prompt no longer rolls back the database under a rewritten `.env`, as it did on earlier releases, and Ctrl-C there is now answered. A second Ctrl-C during a rollback now says why it is not stopping.
 
   **What this does NOT fix.**
   - The CI sighting that opened worthless-3clz came from a chaos trial with no OpenClaw, and its cause is still unknown. The chaos hang guard now records the stuck stack.
@@ -415,6 +792,9 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.16]: https://github.com/oblangatas/worthless/releases/tag/v0.3.16
+[0.3.15]: https://github.com/oblangatas/worthless/releases/tag/v0.3.15
+[0.3.14]: https://github.com/oblangatas/worthless/releases/tag/v0.3.14
 [0.3.13]: https://github.com/oblangatas/worthless/releases/tag/v0.3.13
 [0.3.12]: https://github.com/oblangatas/worthless/releases/tag/v0.3.12
 [0.3.11]: https://github.com/oblangatas/worthless/releases/tag/v0.3.11

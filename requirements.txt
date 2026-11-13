@@ -16,10 +16,11 @@ anyio==4.14.2
     #   watchfiles
 backports-tarfile==1.2.0 ; python_full_version < '3.12'
     # via jaraco-context
-certifi==2026.7.22
+certifi==2026.10.23
     # via
     #   httpcore
     #   httpx
+    #   worthless
 cffi==2.0.0 ; platform_python_implementation != 'PyPy'
     # via cryptography
 click==8.4.2
@@ -73,9 +74,9 @@ more-itertools==11.0.2
     # via
     #   jaraco-classes
     #   jaraco-functools
-msgpack==1.2.2
+msgpack==1.2.4
     # via worthless
-opentelemetry-api==1.44.0
+opentelemetry-api==1.45.1
     # via fastapi
 psutil==7.2.2
     # via worthless
@@ -109,7 +110,7 @@ tomli==2.4.1 ; python_full_version < '3.11'
     # via worthless
 typer==0.27.2
     # via worthless
-typing-extensions==4.15.0
+typing-extensions==4.16.0
     # via
     #   anyio
     #   cryptography

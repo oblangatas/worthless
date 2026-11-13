@@ -82,12 +82,24 @@ fi
 # is the user's ~/.openclaw and must keep its default permissions.
 # Runs as root (entrypoint starts as uid 0); the priv-drop block below
 # re-owns this dir to worthless-proxy:worthless via the recursive find.
+OPENCLAW_DIR="${HOME_DIR}/.openclaw"
+SHARED_SKIP="/nonexistent-worthless-skip"
 if [ "${WORTHLESS_OPENCLAW_CONFIG_SHARED:-}" = "1" ]; then
-  OPENCLAW_DIR="${HOME_DIR}/.openclaw"
+  SHARED_SKIP="$OPENCLAW_DIR"
+  # WOR-510: the openclaw container (node, group_add 10001) can WRITE this
+  # volume, so nothing here may follow a path it controls. The dir itself is
+  # the volume mountpoint (not swappable). No setgid: under cap_drop ALL root
+  # lacks CAP_FSETID and the kernel silently drops it (verified live, WOR-510);
+  # node's own files stay node-owned and work without it. The seed is only
+  # written when nothing is there, with its mode set at creation — never
+  # chmod/chown a pre-existing entry.
   mkdir -p "$OPENCLAW_DIR" 2>/dev/null || true
+  chown worthless-proxy:worthless "$OPENCLAW_DIR" 2>/dev/null || true
   chmod 770 "$OPENCLAW_DIR" 2>/dev/null || true
-  [ -f "${OPENCLAW_DIR}/openclaw.json" ] || printf '{}' > "${OPENCLAW_DIR}/openclaw.json" 2>/dev/null || true
-  chmod 660 "${OPENCLAW_DIR}/openclaw.json" 2>/dev/null || true
+  if [ ! -e "${OPENCLAW_DIR}/openclaw.json" ] && [ ! -L "${OPENCLAW_DIR}/openclaw.json" ]; then
+    (umask 007 && printf '{}' > "${OPENCLAW_DIR}/openclaw.json") 2>/dev/null || true
+    chown -h worthless-proxy:worthless "${OPENCLAW_DIR}/openclaw.json" 2>/dev/null || true
+  fi
 fi
 
 # WOR-310: bootstrap ran as root (entrypoint started as uid 0 so
@@ -106,8 +118,12 @@ if [ "$(id -u)" = "0" ]; then
   # re-own fernet.key to worthless-proxy, letting a proxy-RCE
   # `chmod 0600` and re-create the file.  Skip fernet.key in the
   # recursive chown.
+  # WOR-510: skip the shared openclaw volume — its files belong to the
+  # openclaw container and must keep their owner — and use -h everywhere so a
+  # planted symlink can never redirect root's chown out of /data.
   find "$HOME_DIR" -mindepth 1 -not -path "$FERNET_PATH" \
-    -exec chown worthless-proxy:worthless {} + 2>/dev/null || true
+    -not -path "$SHARED_SKIP" -not -path "$SHARED_SKIP/*" \
+    -exec chown -h worthless-proxy:worthless {} + 2>/dev/null || true
   # WOR-465 A4: sidecar owns the Fernet key unconditionally — the A1 flag
   # gate is gone. Fail closed: a host bind-mount on macOS Docker Desktop or
   # WSL /mnt/c/... can silently swallow chown/chmod; the stat check verifies

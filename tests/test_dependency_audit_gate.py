@@ -68,6 +68,66 @@ def _hook_pipeline() -> str:
     return re.sub(r"^set -o pipefail\s*;\s*", "", entry).strip()
 
 
+# ── Python 3.10 (WOR-1006) ─────────────────────────────────────────────────
+# pip-audit skips lines whose markers don't match the Python running it. On 3.10
+# that adds dev tools stuck on old pins (filelock's fixes need 3.11+), which
+# blocked every push; on 3.13 it hides runtime packages real 3.10 users install.
+# So: the full tree on a fixed new Python, the runtime tree on the oldest one.
+
+PY310_JOB = "audit-py310"
+
+
+def _py310_step() -> dict:
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    steps = wf["jobs"][PY310_JOB]["steps"]
+    matches = [s for s in steps if "pip-audit" in str(s.get("run", ""))]
+    assert len(matches) == 1, f"expected exactly one pip-audit step, got {len(matches)}"
+    return matches[0]
+
+
+def test_hook_does_not_follow_the_contributors_python() -> None:
+    """Plain `uv run` uses .venv's Python, so a 3.10 clone audits 3.10-only dev pins."""
+    pipeline = _hook_pipeline()
+    assert "--python 3.13" in pipeline, "the hook's verdict must not depend on the local Python"
+    assert "--isolated" in pipeline, "without it, uv deletes and rebuilds the 3.10 .venv"
+
+
+def test_py310_job_audits_what_oldest_python_users_install() -> None:
+    run = _py310_step()["run"]
+    floor = re.search(
+        r'^requires-python = ">=(\d+\.\d+)"', (REPO / "pyproject.toml").read_text(), re.M
+    )
+    assert floor, "requires-python no longer has a plain floor; revisit this job"
+    assert f"--python {floor.group(1)}" in run, "this job must follow the oldest supported Python"
+    assert "--no-dev" in run, "the full tree on 3.10 stays red on dev-only filelock"
+    assert "--frozen" in run
+
+
+def test_py310_job_name_is_stable() -> None:
+    """The name is the required context in the `main` ruleset; a rename blocks every PR."""
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    assert wf["jobs"][PY310_JOB]["name"] == "uv-audit (oldest Python runtime)"
+
+
+def test_py310_job_can_fail() -> None:
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    job, step = wf["jobs"][PY310_JOB], _py310_step()
+    assert "continue-on-error" not in job and "continue-on-error" not in step
+    assert "if" not in job, "a skipped job reports SUCCESS to branch protection"
+    assert step.get("shell") == "bash", "a pipeline needs `shell: bash` for pipefail"
+    assert "|| true" not in step["run"] and "set +e" not in step["run"]
+
+
+def test_no_audit_ignores_anything() -> None:
+    """Advisories went from 3 to 9 in ten days; a list like that is never finished."""
+    for name, command in (
+        ("hook", _hook_entry()),
+        ("audit job", _audit_step()["run"]),
+        ("3.10 job", _py310_step()["run"]),
+    ):
+        assert "--ignore-vuln" not in command, f"{name} ignores an advisory"
+
+
 def test_hook_runs_with_pipefail() -> None:
     """The hook's pipeline can otherwise report clean over a partial export.
 
@@ -343,3 +403,92 @@ def test_the_docs_site_sharp_floor_is_also_outside_the_advisory() -> None:
         and _version_tuple(meta["version"]) < SHARP_FIXED
     }
     assert not stale, f"docs lockfile resolves a vulnerable sharp: {stale}"
+
+
+# ── undici and zod overrides (WOR-1007) ────────────────────────────────────
+#
+# Same shape as sharp: miniflare pins undici exactly and
+# @cloudflare/vitest-pool-workers pins zod to exactly 4.4.3, so only an
+# `overrides` entry reaches the fix.
+#   undici  GHSA-4qv8-2p9j-2685, GHSA-f72v-6w45-q472, GHSA-xjj6-f33q-929c  < 7.30.1
+#   zod     GHSA-mrhx-c7xc-m3w5                                            < 4.6.6
+# Unlike sharp these are pinned EXACTLY. A caret lets the next relock float a
+# newer release, compromised or not, into a toolchain that deploys with
+# Cloudflare credentials; on main zod could not move at all.
+
+EXACT_OVERRIDES = {"undici": (7, 30, 1), "zod": (4, 6, 6)}
+
+
+@pytest.mark.parametrize(("name", "fixed"), EXACT_OVERRIDES.items(), ids=list(EXACT_OVERRIDES))
+def test_worker_override_resolves_outside_the_advisory(name: str, fixed: tuple[int, ...]) -> None:
+    """Every resolved copy in the Worker lockfile is at or above the fix."""
+    lock = json.loads((WORKER / "package-lock.json").read_text())
+    found = {
+        path: meta["version"]
+        for path, meta in lock["packages"].items()
+        if path.split("node_modules/")[-1] == name and "version" in meta
+    }
+    assert found, (
+        f"no {name} in the Worker lockfile — if nothing pins it any more, "
+        "delete the override in package.json and this test's entry together"
+    )
+    stale = {p: v for p, v in found.items() if _version_tuple(v) < fixed}
+    assert not stale, f"{name} back inside its advisory range: {stale}"
+
+
+@pytest.mark.parametrize(("name", "fixed"), EXACT_OVERRIDES.items(), ids=list(EXACT_OVERRIDES))
+def test_worker_override_is_declared_exactly(name: str, fixed: tuple[int, ...]) -> None:
+    """package.json pins the fixed version exactly, not a range."""
+    override = json.loads((WORKER / "package.json").read_text()).get("overrides", {}).get(name)
+    assert override, (
+        f"overrides.{name} is gone from workers/worthless-sh/package.json; the "
+        "next `npm install` resolves back to the exact pin upstream ships"
+    )
+    assert re.fullmatch(r"\d+\.\d+\.\d+", override), (
+        f"overrides.{name} is {override!r}; pin an exact version so a relock "
+        "can't float a newer release in"
+    )
+    assert _version_tuple(override) >= fixed, (
+        f"overrides.{name} {override!r} is inside the advisory"
+    )
+
+
+# ── runtime floors in pyproject.toml ───────────────────────────────────────
+#
+# install.sh (`uv tool install`), pip and uvx resolve pyproject's
+# `dependencies`, never uv.lock, and pip keeps an existing env's copy of a
+# dependency unless a floor forces the upgrade. So an advisory
+# against a runtime dependency is closed by its floor, not by the lock.
+#   certifi       GHSA-6q48-6c7w-9gw2   < 2026.10.18
+#   cryptography  PYSEC-2026-3552       < 50.0.0
+#   msgpack       GHSA-j8c6-9vc5-hj6x   < 1.2.4
+# certifi is held at 2026.10.23, above its advisory's fix: the CHANGELOG
+# promises that release, which also drops emSign Root CA - C1 and ECC C3.
+
+PYPROJECT = REPO / "pyproject.toml"
+RUNTIME_FLOORS = {"certifi": (2026, 10, 23), "cryptography": (50, 0, 0), "msgpack": (1, 2, 4)}
+
+
+def _declared_floor(name: str) -> str | None:
+    """The `>=` version pyproject's [project] dependencies give *name*, if any.
+
+    Regex over the raw text, not a TOML parse: tomllib is 3.11+ and this suite
+    runs on 3.10 too.
+    """
+    block = re.search(r"^dependencies = \[(.*?)^\]", PYPROJECT.read_text(), re.S | re.M)
+    assert block, "no [project] dependencies list in pyproject.toml"
+    match = re.search(rf'^\s*"{re.escape(name)}>=([0-9.]+)"', block.group(1), re.M)
+    return match.group(1) if match else None
+
+
+@pytest.mark.parametrize(("name", "required"), RUNTIME_FLOORS.items(), ids=list(RUNTIME_FLOORS))
+def test_runtime_floor_is_outside_the_advisory(name: str, required: tuple[int, ...]) -> None:
+    """pyproject requires at least the listed version of each advised runtime dep."""
+    floor = _declared_floor(name)
+    assert floor, (
+        f"{name} has no `>=` floor in pyproject.toml's dependencies. pip keeps an "
+        f"existing env's {name}, so upgrading worthless can leave a vulnerable copy."
+    )
+    assert _version_tuple(floor) >= required, (
+        f"{name}>={floor} is below the required {'.'.join(map(str, required))}"
+    )

@@ -280,7 +280,7 @@ logging-passthrough is *required*.
 Sequence it with Phase 2 (same rig) but track it as its own deliverable because it is a *security*
 test, not an integration one, and it depends on a maintainer decision (§9) about "fails closed."
 
-**Phase 3 — Lane C (live smoke canary, opt-in).** Wire `verify-live-rig.sh` + `test-live` against the
+**Phase 3 — Lane C (live smoke canary, opt-in).** Wire `verify-live-rig.sh` + the live pytest lane (`engineering/tooling.md`) against the
 free OpenRouter recipe on a self-hosted/local runner; nightly + manual dispatch; key-in-CI prohibition
 enforced. Value: the "reality still matches our mocks" canary + mock-fidelity-drift owner.
 

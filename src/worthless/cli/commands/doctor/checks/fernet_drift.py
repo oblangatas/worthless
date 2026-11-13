@@ -8,15 +8,23 @@ that decrypts existing locked secrets.
 ``fixable`` is hardcoded False. The check emits instructions and
 relies on the user to pick a side. This is THE WOR-464 critical
 guardrail — never auto-repair drift.
+
+worthless-saaz: a key the background service can't use is drift too, even
+with one source. Each source is checked against every locked key by HMAC
+(no plaintext), and the result says which source opens what.
 """
 
 from __future__ import annotations
 
+import hmac
 import logging
+import stat
+from typing import Literal
 
 import keyring as _keyring
 
 from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
+from worthless.cli.key_check import KEY_FIX, aliases_key_cannot_open
 from worthless.cli.keystore import _SERVICE, _keyring_username, keyring_available
 
 logger = logging.getLogger(__name__)
@@ -35,68 +43,90 @@ _INSTRUCTIONS = (
 )
 
 
-def run(ctx: CheckContext) -> CheckResult:
-    fernet_path = ctx.home.fernet_key_path
-
-    keyring_value: bytes | None = None
-    if keyring_available():
-        try:
-            v = _keyring.get_password(_SERVICE, _keyring_username(ctx.home.base_dir))
-            if v is not None:
-                keyring_value = v.encode("utf-8")
-        except Exception as exc:  # noqa: BLE001 - SR-04
-            logger.debug("keyring read failed in fernet_drift: %s", type(exc).__name__)
-
-    file_value: bytes | None = None
-    try:
-        file_value = fernet_path.read_bytes().strip()
-    except FileNotFoundError:
-        pass  # file absent — only one source, no drift possible
-    except OSError as exc:
-        return CheckResult(
-            check_id=check_id,
-            status="error",
-            findings=[],
-            summary=f"Could not read fernet.key: {type(exc).__name__}",
-            fixable=False,
-            fixed=[],
-            skipped_reason=None,
-        )
-
-    if file_value is None or keyring_value is None:
-        return CheckResult(
-            check_id=check_id,
-            status="ok",
-            findings=[],
-            summary="No Fernet key drift (only one source present).",
-            fixable=False,
-            fixed=[],
-            skipped_reason=None,
-        )
-
-    if file_value == keyring_value:
-        return CheckResult(
-            check_id=check_id,
-            status="ok",
-            findings=[],
-            summary="Fernet key in keyring matches file (no drift).",
-            fixable=False,
-            fixed=[],
-            skipped_reason=None,
-        )
-
+def _result(
+    status: Literal["ok", "warn", "error"], summary: str, findings: list | None = None
+) -> CheckResult:
     return CheckResult(
         check_id=check_id,
-        status="error",
-        findings=[
-            {
-                "fernet_key_path": str(fernet_path),
-                "keyring_username": _keyring_username(ctx.home.base_dir),
-                "instructions": _INSTRUCTIONS,
-            }
-        ],
-        summary="Fernet keys differ between keyring and file — manual fix required.",
+        status=status,
+        findings=findings or [],
+        summary=summary,
         fixable=False,  # CRITICAL: never auto-repair drift.
         fixed=[],
         skipped_reason=None,
+    )
+
+
+def _read_keyring(home) -> bytes | None:  # noqa: ANN001 — WorthlessHome
+    if not keyring_available():
+        return None
+    try:
+        value = _keyring.get_password(_SERVICE, _keyring_username(home.base_dir))
+    except Exception as exc:  # noqa: BLE001 - SR-04
+        logger.debug("keyring read failed in fernet_drift: %s", type(exc).__name__)
+        return None
+    return value.encode("utf-8") if value is not None else None
+
+
+def _sources_differ(ctx: CheckContext, checked: dict[str, tuple[int, list[str]]]) -> CheckResult:
+    finding: dict = {
+        "fernet_key_path": str(ctx.home.fernet_key_path),
+        "keyring_username": _keyring_username(ctx.home.base_dir),
+        "instructions": _INSTRUCTIONS,
+    }
+    if any(total for total, _ in checked.values()):
+        finding["unlocks"] = {
+            name: f"{total - len(dead)} of {total}" for name, (total, dead) in checked.items()
+        }
+    return _result(
+        "error", "Fernet keys differ between keyring and file — manual fix required.", [finding]
+    )
+
+
+def _service_cannot_unlock(service: str, total: int, dead: list[str]) -> CheckResult:
+    return _result(
+        "error",
+        f"The key the background service uses ({service}) can't unlock "
+        f"{len(dead)} of your {total} locked key(s). {KEY_FIX}",
+        [{"key_source": service, "cannot_unlock": sorted(dead), "instructions": _INSTRUCTIONS}],
+    )
+
+
+def run(ctx: CheckContext) -> CheckResult:
+    keyring_value = _read_keyring(ctx.home)
+    path = ctx.home.fernet_key_path
+    try:
+        # A FIFO or device here would hang doctor while it holds its lock.
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return _result("error", "fernet.key is not a regular file — refusing to read it.")
+        file_value: bytes | None = path.read_bytes().strip()
+    except FileNotFoundError:
+        file_value = None  # file absent — only one source, no drift possible
+    except OSError as exc:
+        return _result("error", f"Could not read fernet.key: {type(exc).__name__}")
+
+    sources = {"file": file_value, "keyring": keyring_value}
+    checked = {
+        name: aliases_key_cannot_open(ctx.home, value)
+        for name, value in sources.items()
+        if value is not None
+    }
+    both = file_value is not None and keyring_value is not None
+    if (
+        file_value is not None
+        and keyring_value is not None
+        and not hmac.compare_digest(file_value, keyring_value)
+    ):
+        return _sources_differ(ctx, checked)
+
+    # The background service reads the file first, then the keyring.
+    service = "file" if file_value is not None else "keyring"
+    total, dead = checked.get(service, (0, []))
+    if dead:
+        return _service_cannot_unlock(service, total, dead)
+    return _result(
+        "ok",
+        "Fernet key in keyring matches file (no drift)."
+        if both
+        else "No Fernet key drift (only one source present).",
     )

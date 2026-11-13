@@ -20,7 +20,7 @@ from cryptography.fernet import Fernet
 from hypothesis import HealthCheck, settings
 
 
-from worthless._flags import ipc_mode_active
+from worthless._flags import WORTHLESS_SIDECAR_UID_ENV, ipc_mode_active
 from worthless.cli import console as _cli_console  # used by _isolate_cli_globals
 from worthless.cli import errors as _cli_errors  # used by _isolate_cli_globals
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
@@ -63,12 +63,22 @@ keyring.set_keyring(keyring.backends.null.Keyring())
 # ``monkeypatch.delenv("WORTHLESS_KEYRING_BACKEND")``.
 os.environ.setdefault("WORTHLESS_KEYRING_BACKEND", "null")
 
+# worthless-h4jf: timing is not a property under test. Hypothesis fails any
+# example over 200 ms by default, so on a busy machine a property that holds
+# fails anyway. Every profile below inherits deadline=None from this one; a
+# test that sets its own deadline keeps it.
+settings.register_profile("worthless", deadline=None)
+settings.load_profile("worthless")
+_base = settings.get_profile("worthless")
+
 # Suppress differing_executors health check ONLY when running under mutmut.
 # Mutmut runs tests from its mutants/ directory with a different rootdir,
 # which triggers this check spuriously.  In normal test runs, the check
 # remains active to catch real working-directory issues.
 if os.environ.get("MUTANT_UNDER_TEST"):
-    settings.register_profile("mutmut", suppress_health_check=[HealthCheck.differing_executors])
+    settings.register_profile(
+        "mutmut", parent=_base, suppress_health_check=[HealthCheck.differing_executors]
+    )
     settings.load_profile("mutmut")
 
 # CI profile: cap Hypothesis examples, derandomize for reproducibility,
@@ -76,6 +86,7 @@ if os.environ.get("MUTANT_UNDER_TEST"):
 # Activate with: HYPOTHESIS_PROFILE=ci
 settings.register_profile(
     "ci",
+    parent=_base,
     max_examples=50,
     derandomize=True,
     database=None,
@@ -85,6 +96,7 @@ settings.register_profile(
 # Activate with: HYPOTHESIS_PROFILE=extended
 settings.register_profile(
     "extended",
+    parent=_base,
     max_examples=500,
     database=None,
 )
@@ -105,6 +117,17 @@ def _isolate_fernet_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("WORTHLESS_FERNET_KEY_PATH", raising=False)
     monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
     monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_sidecar_uid_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test expecting a sidecar that runs as this process's uid.
+
+    ``deploy/start.py`` writes ``WORTHLESS_SIDECAR_UID`` straight into
+    ``os.environ`` for the proxy it execs, so one deploy test would otherwise
+    point every later IPC client on its worker at a foreign sidecar uid.
+    """
+    monkeypatch.delenv(WORTHLESS_SIDECAR_UID_ENV, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -210,13 +233,11 @@ def home_with_key(home_dir: WorthlessHome, tmp_path: Path) -> WorthlessHome:
     try:
         alias = "openai-a1b2c3d4"
 
-        # Write the SAME key into the fixture .env so the enrolled shard
-        # and the .env line agree. Using a fresh fake_openai_key() here would
-        # mismatch the enrolled value — fine today since is_orphan() only
-        # checks var-name presence, but fragile if a future check ever cares.
-        # CodeRabbit PR #131.
+        # A healthy lock leaves shard A in the .env, never the key. The key
+        # itself here is a lock cut off by kill -9, which status, scan and
+        # doctor now report (WOR-958). The line must exist for is_orphan().
         env_path = tmp_path / ".env"
-        env_path.write_text(f"OPENAI_API_KEY={key}\n")
+        env_path.write_text(f"OPENAI_API_KEY={sr.shard_a.hex()}\n")
 
         repo = make_repo(home_dir)
         asyncio.run(repo.initialize())

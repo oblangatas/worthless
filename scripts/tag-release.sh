@@ -190,9 +190,9 @@ echo "signature step does not prove the run is yours — it runs the tagged comm
 echo "APPROVAL 4 shows 'main', not the tag — expected, it runs from main. Open its"
 echo "'gate' job instead: the log must show TAG: $tag and a HEAD_SHA starting $tag_commit."
 echo
-echo "The Release page should appear right after approval 4. That step has not run on"
-echo "a real release yet, so check the Releases page. Before approval 4 it will NOT"
-echo "appear — that is the approval step working, not a failure."
+echo "The Release page should appear right after approval 4; check the Releases page."
+echo "Before approval 4 it will NOT appear — that is the approval step working, not a"
+echo "failure."
 echo
 echo "If a publisher fails for a reason outside the tagged code (a token, a setting,"
 echo "a flaky runner), fix that, then re-run THAT RUN: Actions → the failed run →"

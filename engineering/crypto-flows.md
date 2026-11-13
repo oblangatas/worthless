@@ -131,7 +131,7 @@ The invariant **currently relies on code review, not on tests**. A future mainta
 
 [WOR-615](https://linear.app/plumbusai/issue/WOR-615) tracks:
 1. An adversarial regression test that inserts a row with `shard_a_enc = Fernet.encrypt(<real shard-A>)` (bypassing `upsert_locked_shard`), sends a request without `Authorization: Bearer`, and asserts 401 + no upstream call + no reconstruction.
-2. (Stretch) A startup assertion `SELECT COUNT(*) FROM shards WHERE shard_a_enc IS NOT NULL`. Non-zero → proxy refuses to start with a hint to run `worthless relock --all`.
+2. (Stretch) A startup assertion `SELECT COUNT(*) FROM shards WHERE shard_a_enc IS NOT NULL`. Non-zero → proxy refuses to start with a hint to run `worthless unlock` then `worthless lock`.
 
 ## "16x2" — what the name means
 

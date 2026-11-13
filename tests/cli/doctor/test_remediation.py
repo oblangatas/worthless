@@ -94,9 +94,11 @@ def test_each_playbook_leads_with_its_correct_verdict() -> None:
         "orphan_keychain": ("safe",),
         "recovery_import": ("no secret",),
         "stranded_shards": ("nothing at risk",),
+        "dead_proxy_run_dirs": ("at risk",),
         "bind_confirmation": ("locked",),
         "service_health": ("degraded",),
         "unshardable_credentials": ("aren't api keys",),
+        "unlocked_keys": ("exposed",),  # WOR-958: the real key is in plain text
         # worthless-6hu7: the key is present and intact — we just refuse to read
         # or replace it. Reassurance is the CORRECT verdict here; the old path
         # treated this state as unrecoverable and advised uninstall --force.
