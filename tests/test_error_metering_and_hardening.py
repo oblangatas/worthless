@@ -668,10 +668,13 @@ _ERROR_REPLY_USAGES = [
     pytest.param(
         "anthropic", {"input_tokens": None, "output_tokens": 0}, None, id="anthropic-null-input"
     ),
+    pytest.param(
+        "anthropic", {"input_tokens": 5, "output_tokens": -3}, None, id="anthropic-negative-output"
+    ),
 ]
 
 
-def _anthropic_sse(start_usage: dict, delta_usage: dict) -> bytes:
+def _anthropic_sse(start_usage: object, delta_usage: dict) -> bytes:
     """Anthropic SSE body: message_start, message_delta and message_stop."""
     events = [
         ("message_start", {"type": "message_start", "message": {"usage": start_usage}}),
@@ -1006,6 +1009,125 @@ class TestOverCapTokenCounts:
             200, content=_anthropic_json(usage={"input_tokens": 5, "output_tokens": 3})
         )
         assert (await send()).status_code == 200
+
+
+# ------------------------------------------------------------------
+# WOR-1100: an Anthropic stream with an unreadable input count or a negative
+# count is billed like any unreadable reply, never output only
+# ------------------------------------------------------------------
+
+
+class TestNegativeCountsAndBudgets:
+    """A negative count is unreadable, so it never gives a budget key back spent tokens."""
+
+    @pytest.mark.parametrize(
+        ("replies", "statuses"),
+        [
+            pytest.param(
+                [{"input_tokens": 5, "output_tokens": -2000}, {"input_tokens": 1000}],
+                [200, 200, 429],
+                id="negative-count-gives-no-budget-back",
+            ),
+            pytest.param(
+                [{"input_tokens": 5, "output_tokens": -9_000_000_000_000_000_000}] * 2,
+                [200, 200, 200],
+                id="huge-negative-counts-dont-overflow-the-budget-sum",
+            ),
+        ],
+    )
+    @respx.mock
+    async def test_budget_key_is_refused_only_once_spent(
+        self, proxy_client: httpx.AsyncClient, proxy_app, anthropic_alias, replies, statuses
+    ):
+        """Before, the first case recorded -1995 tokens, so the key went past its
+        1000-token daily budget and was still let in. In the second, two -9e18 rows
+        overflowed the budget check's 64-bit sum: the check failed closed, so the key
+        was refused until the rows were 30 days old."""
+        alias, shard_a_utf8 = anthropic_alias
+        await _daily_budget(proxy_app, alias)
+        last = {"input_tokens": 5, "output_tokens": 3}
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            side_effect=[
+                httpx.Response(200, content=_anthropic_json(usage=usage))
+                for usage in [*replies, last]
+            ]
+        )
+
+        got = []
+        for _ in statuses:
+            resp = await proxy_client.post(
+                _proxy_url(alias, "/v1/messages"),
+                headers=_proxy_headers(alias, shard_a_utf8),
+                content=ANTHROPIC_BODY,
+            )
+            got.append(resp.status_code)
+
+        assert got == statuses
+
+
+class TestUnreadableStreamCounts:
+    """A capped key settles its hold at the estimate; an uncapped key records nothing."""
+
+    @pytest.mark.parametrize("capped", [False, True], ids=["uncapped", "capped"])
+    @pytest.mark.parametrize(
+        "headers",
+        # Without the SSE content type the proxy buffers the body and reads it
+        # in _do_record_spend instead of the streaming collector.
+        [{"content-type": "text/event-stream"}, {}],
+        ids=["streamed", "buffered"],
+    )
+    @pytest.mark.parametrize(
+        ("start_usage", "delta_usage", "readable"),
+        [
+            pytest.param({"input_tokens": 5}, {"output_tokens": 3}, True, id="readable"),
+            pytest.param({"input_tokens": None}, {"output_tokens": 3}, False, id="null-input"),
+            pytest.param("x", {"output_tokens": 3}, False, id="non-object-input-usage"),
+            pytest.param({"input_tokens": -5}, {"output_tokens": 3}, False, id="negative-input"),
+            pytest.param({"input_tokens": 5}, {"output_tokens": -3}, False, id="negative-output"),
+        ],
+    )
+    @respx.mock
+    async def test_spend_row_is_the_real_count_or_no_guess(
+        self,
+        proxy_client: httpx.AsyncClient,
+        proxy_app,
+        anthropic_alias,
+        capped,
+        headers,
+        start_usage,
+        delta_usage,
+        readable,
+    ):
+        alias, shard_a_utf8 = anthropic_alias
+        db = proxy_app.state.db
+        if capped:
+            await _cap_spend(db, alias)
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            return_value=httpx.Response(
+                200, headers=headers, content=_anthropic_sse(start_usage, delta_usage)
+            )
+        )
+        engine = proxy_app.state.rules_engine
+
+        with patch.object(
+            engine, "release_spend_reservation", wraps=engine.release_spend_reservation
+        ) as release:
+            resp = await proxy_client.post(
+                _proxy_url(alias, "/v1/messages"),
+                headers=_proxy_headers(alias, shard_a_utf8),
+                content=b'{"model": "claude-3-5-sonnet-20241022",'
+                b' "max_tokens": 10, "messages": []}',
+            )
+
+        assert resp.status_code == 200
+        release.assert_awaited_once()
+        async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
+            rows = await cur.fetchall()
+        if readable:
+            assert rows == [(8,)]
+        else:
+            # max(estimate, ceiling) for a capped key; nothing for an uncapped one.
+            assert rows == ([(GLOBAL_CEILING_TOKENS,)] if capped else [])
 
 
 # ------------------------------------------------------------------

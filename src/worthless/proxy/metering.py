@@ -42,8 +42,8 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
     A total above ``_MAX_REPLY_TOKENS`` (such as 1e300) is the cap. Returns None
     when the usage is unreadable: *usage* isn't an object, or a count is anything
     else (a null required count, a string, a fractional, negative or non-finite
-    float, a bool). The caller then treats it like a reply without usage rather
-    than crashing or billing a bogus number.
+    float, a bool, a negative int). The caller then treats it like a reply
+    without usage rather than crashing or billing a bogus number.
     """
     if not isinstance(usage, dict):
         return None
@@ -54,7 +54,7 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
             continue
         if isinstance(count, float) and count.is_integer() and count >= 0:
             count = int(count)
-        if isinstance(count, bool) or not isinstance(count, int):
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             return None
         total += count
     return min(total, _MAX_REPLY_TOKENS)
@@ -156,8 +156,12 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
     start = _find_sse_event_data(lines, "message_start")
     msg = start.get("message") if start else None
     if isinstance(msg, dict):
-        # An unreadable message_start usage counts like a missing message_start.
-        input_tokens = _sum_counts(msg.get("usage"), *_ANTHROPIC_INPUT_COUNTS) or 0
+        # No input count bills output only; an unreadable one makes the whole
+        # stream unreadable, as the same usage does in a JSON reply.
+        if "usage" in msg:
+            input_tokens = _sum_counts(msg["usage"], *_ANTHROPIC_INPUT_COUNTS)
+            if input_tokens is None:
+                return None
         model = msg.get("model")
 
     delta = _find_sse_event_data(lines, "message_delta", reverse=True)
@@ -181,7 +185,8 @@ class StreamingUsageCollector:
     def __init__(self, provider: str) -> None:
         self.provider = provider
         self._partial_line: str = ""
-        self._input_tokens: int = 0
+        # None once message_start carries an input count that can't be read.
+        self._input_tokens: int | None = 0
         self._output_tokens: int | None = None
         self._total_tokens: int | None = None
         self._model: str | None = None
@@ -234,9 +239,8 @@ class StreamingUsageCollector:
                 msg = parsed.get("message")
                 if not isinstance(msg, dict):
                     return
-                usage = msg.get("usage")
-                if isinstance(usage, dict):
-                    self._input_tokens = _sum_counts(usage, *_ANTHROPIC_INPUT_COUNTS) or 0
+                if "usage" in msg:
+                    self._input_tokens = _sum_counts(msg["usage"], *_ANTHROPIC_INPUT_COUNTS)
                 self._model = msg.get("model", self._model)
             elif self._pending_event == "message_delta":
                 usage = parsed.get("usage")
@@ -267,7 +271,7 @@ class StreamingUsageCollector:
                 return UsageInfo(total_tokens=self._total_tokens, model=self._model)
             return None
         elif self.provider == "anthropic":
-            if self._output_tokens is None:
+            if self._output_tokens is None or self._input_tokens is None:
                 return None
             return _usage_info(self._input_tokens + self._output_tokens, self._model)
         return None
