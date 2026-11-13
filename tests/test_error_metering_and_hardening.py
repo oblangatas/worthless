@@ -1017,6 +1017,54 @@ class TestOverCapTokenCounts:
 # ------------------------------------------------------------------
 
 
+class TestNegativeCountsAndBudgets:
+    """A negative count is unreadable, so it never gives a budget key back spent tokens."""
+
+    @pytest.mark.parametrize(
+        ("replies", "statuses"),
+        [
+            pytest.param(
+                [{"input_tokens": 5, "output_tokens": -2000}, {"input_tokens": 1000}],
+                [200, 200, 429],
+                id="negative-count-gives-no-budget-back",
+            ),
+            pytest.param(
+                [{"input_tokens": 5, "output_tokens": -9_000_000_000_000_000_000}] * 2,
+                [200, 200, 200],
+                id="huge-negative-counts-dont-overflow-the-budget-sum",
+            ),
+        ],
+    )
+    @respx.mock
+    async def test_budget_key_is_refused_only_once_spent(
+        self, proxy_client: httpx.AsyncClient, proxy_app, anthropic_alias, replies, statuses
+    ):
+        """Before, the first case recorded -1995 tokens, so the key went past its
+        1000-token daily budget and was still let in. In the second, two -9e18 rows
+        overflowed the budget check's 64-bit sum: the check failed closed, so the key
+        was refused until the rows were 30 days old."""
+        alias, shard_a_utf8 = anthropic_alias
+        await _daily_budget(proxy_app, alias)
+        last = {"input_tokens": 5, "output_tokens": 3}
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            side_effect=[
+                httpx.Response(200, content=_anthropic_json(usage=usage))
+                for usage in [*replies, last]
+            ]
+        )
+
+        got = []
+        for _ in statuses:
+            resp = await proxy_client.post(
+                _proxy_url(alias, "/v1/messages"),
+                headers=_proxy_headers(alias, shard_a_utf8),
+                content=ANTHROPIC_BODY,
+            )
+            got.append(resp.status_code)
+
+        assert got == statuses
+
+
 class TestUnreadableStreamCounts:
     """A capped key settles its hold at the estimate; an uncapped key records nothing."""
 
