@@ -1213,8 +1213,11 @@ class TestReleaseSyncSendsARealUserAgent:
     serve the genuine script only to it, and this check would pass. Bare curl
     sends its own, so the check looks like any user running `curl | sh`."""
 
-    # Any form: -A 'x', -A"x", --user-agent=x, -H "user-agent: x" (any case).
-    SETS_UA = re.compile(r"(?:^|\s)(?:-A|--user-agent)(?=[\s='\"]|$)|user-agent\s*:", re.I | re.M)
+    # Any form: -A x, -Ax, -fsSLA x (grouped), --user-agent=x, -H "user-agent: x"
+    # (header in any case). -A is case-sensitive: curl's -a is --append.
+    SETS_UA = re.compile(
+        r"(?:^|\s)(?:-[A-Za-z]*A|--user-agent(?=[\s='\"]|$))|(?i:user-agent)\s*:", re.M
+    )
 
     def test_script_fetches_set_no_user_agent(self, release_sync_text: str):
         # A2b sends a browser User-Agent on purpose (it tests the redirect), so
