@@ -233,7 +233,7 @@ markers = [
     "integration: tests requiring live infrastructure or subprocesses",
     "slow: long-running statistical validation tests",
     "quarantine: flaky tests under investigation (non-blocking in CI)",
-    "live: tests hitting real LLM providers (requires API keys, costs money)",
+    "live: tests that need the real network (LLM providers, third-party TLS test sites); some need API keys",
     "adversarial: security-focused tests — race conditions, PID reuse, injection, fuzz",
     "dirty_env: dirty-home adversarial scenarios (WOR-724/725) — opt-in via -m dirty_env",
     "docker: Docker container end-to-end tests (requires running Docker daemon)",

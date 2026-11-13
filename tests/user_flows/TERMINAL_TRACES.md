@@ -32,7 +32,7 @@ phase=before
 Worthless installer (uv-bootstrap)
 
   Platform: macos
-  uv 0.11.7 already installed
+  uv 0.13.7 already installed
   worthless 0.3.0
 
 Done! 'worthless' is installed.
@@ -89,7 +89,7 @@ phase=before
 Worthless installer (uv-bootstrap)
 
   Platform: macos
-  uv 0.11.7 already installed
+  uv 0.13.7 already installed
   worthless 0.3.0
 
 Done! 'worthless' is installed.
@@ -146,7 +146,7 @@ phase=before
 Worthless installer (uv-bootstrap)
 
   Platform: macos
-  uv 0.11.7 already installed
+  uv 0.13.7 already installed
   worthless 0.3.0 already installed
   worthless 0.3.0
 
@@ -200,7 +200,7 @@ phase=before
 Worthless installer (uv-bootstrap)
 
   Platform: macos
-  uv 0.11.7 already installed
+  uv 0.13.7 already installed
   worthless 0.3.0
 
 Done! Worthless is installed at $TRACE_ROOT/install-lifecycle/stale-worthless-on-path/.local/bin/worthless.
@@ -258,7 +258,7 @@ phase=before
 Worthless installer (uv-bootstrap)
 
   Platform: macos
-  uv 0.11.7 already installed
+  uv 0.13.7 already installed
   worthless 0.3.0
 
 Done! 'worthless' is on your PATH.
@@ -354,7 +354,7 @@ phase=before
 Worthless installer (uv-bootstrap)
 
   Platform: macos
-  uv 0.11.7 already installed
+  uv 0.13.7 already installed
 ```
 
 **stderr**

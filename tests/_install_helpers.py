@@ -29,15 +29,22 @@ def write_stub(bin_dir: Path, name: str, body: str) -> Path:
 
 # Pinned uv version must match install.sh UV_VERSION. Kept in sync manually —
 # a mismatch here breaks happy-path tests immediately, which is the signal.
-_UV_VERSION = "0.11.7"
+_UV_VERSION = "0.13.7"
+# Same deal for install.sh TOOL_PYTHON (the --python passed to `uv tool install`).
+_TOOL_PYTHON = ">=3.14.10,<3.15"
+
+
+def read_install_var(name: str) -> str:
+    """Return the ``NAME="..."`` literal install.sh assigns at top level."""
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    match = re.search(rf'^{re.escape(name)}="([^"]*)"', text, re.MULTILINE)
+    assert match, f'install.sh must declare {name}="..."'
+    return match.group(1)
 
 
 def read_install_pin() -> str:
     """Return the WORTHLESS_VERSION_PIN literal baked into install.sh."""
-    text = INSTALL_SH.read_text(encoding="utf-8")
-    match = re.search(r'^WORTHLESS_VERSION_PIN="([^"]*)"', text, re.MULTILINE)
-    assert match, 'install.sh must declare WORTHLESS_VERSION_PIN="..."'
-    return match.group(1)
+    return read_install_var("WORTHLESS_VERSION_PIN")
 
 
 def install_sh_with_pin(dest_dir: Path, pin_value: str) -> Path:
