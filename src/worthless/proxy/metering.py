@@ -23,6 +23,15 @@ _ANTHROPIC_INPUT_COUNTS = (
 )
 # The only counts a provider SDK types as Optional[int]: null means none.
 _NULLABLE_COUNTS = frozenset({"cache_creation_input_tokens", "cache_read_input_tokens"})
+# One reply bills at most this many tokens: far above any real reply, and far enough
+# below the spend log's signed 64-bit sums that it takes millions of capped rows on one
+# key to overflow them.
+_MAX_REPLY_TOKENS = 10**12
+
+
+def _usage_info(total: int, model: str | None) -> UsageInfo:
+    """*total* as usage, capped at ``_MAX_REPLY_TOKENS``."""
+    return UsageInfo(total_tokens=min(total, _MAX_REPLY_TOKENS), model=model)
 
 
 def _sum_counts(usage: object, *keys: str) -> int | None:
@@ -30,11 +39,11 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
 
     An absent count is 0, and so is a null one where the SDK allows null. A
     whole, non-negative float is its int value: JSON can't tell 1234 from 1234.0.
-    Returns None when the usage is unreadable: *usage* isn't an object, or a
-    count is anything else (a null required count, a string, a fractional,
-    negative or non-finite float, a bool, a negative int). The caller then
-    treats it like a reply without usage rather than crashing or billing a
-    bogus number.
+    A total above ``_MAX_REPLY_TOKENS`` (such as 1e300) is the cap. Returns None
+    when the usage is unreadable: *usage* isn't an object, or a count is anything
+    else (a null required count, a string, a fractional, negative or non-finite
+    float, a bool, a negative int). The caller then treats it like a reply
+    without usage rather than crashing or billing a bogus number.
     """
     if not isinstance(usage, dict):
         return None
@@ -48,7 +57,7 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             return None
         total += count
-    return total
+    return min(total, _MAX_REPLY_TOKENS)
 
 
 def extract_usage_openai(data: bytes) -> UsageInfo | None:
@@ -162,7 +171,7 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
     output_tokens = _sum_counts(delta.get("usage"), "output_tokens")
     if output_tokens is None:
         return None
-    return UsageInfo(total_tokens=input_tokens + output_tokens, model=model)
+    return _usage_info(input_tokens + output_tokens, model)
 
 
 class StreamingUsageCollector:
@@ -219,9 +228,10 @@ class StreamingUsageCollector:
 
         if self.provider == "openai":
             usage = parsed.get("usage")
-            if usage and isinstance(usage, dict):
-                # Some upstreams send usage on every chunk: an unreadable latest
-                # total makes the usage unreadable rather than leaving an earlier one.
+            # A null or empty usage carries no new total. Anything else replaces the
+            # earlier one: some upstreams send usage on every chunk, and an unreadable
+            # latest total (or a usage that isn't an object) makes the usage unreadable.
+            if usage is not None and usage != {}:
                 self._total_tokens = _sum_counts(usage, "total_tokens")
                 self._model = parsed.get("model", self._model)
         elif self.provider == "anthropic":
@@ -234,9 +244,7 @@ class StreamingUsageCollector:
                 self._model = msg.get("model", self._model)
             elif self._pending_event == "message_delta":
                 usage = parsed.get("usage")
-                if not isinstance(usage, dict):
-                    return
-                if "output_tokens" in usage:
+                if usage is not None and (not isinstance(usage, dict) or "output_tokens" in usage):
                     # The count is cumulative: an unreadable latest one makes the
                     # usage unreadable rather than leaving an earlier count in place.
                     self._output_tokens = _sum_counts(usage, "output_tokens")
@@ -265,10 +273,7 @@ class StreamingUsageCollector:
         elif self.provider == "anthropic":
             if self._output_tokens is None or self._input_tokens is None:
                 return None
-            return UsageInfo(
-                total_tokens=self._input_tokens + self._output_tokens,
-                model=self._model,
-            )
+            return _usage_info(self._input_tokens + self._output_tokens, self._model)
         return None
 
 
