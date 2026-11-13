@@ -194,14 +194,14 @@ jobs:
           exit "$failed"
 
       # ===== Assertion 2a: worthless.sh content negotiation (curl) ==========
-      - name: A2a — worthless.sh curl-UA serves install.sh @ latest tag
+      - name: A2a — worthless.sh serves install.sh @ latest tag to plain curl
         env:
           LATEST_TAG: ${{ steps.versions.outputs.latest_tag }}
         run: |
           set -euo pipefail
           # Body byte-equality vs install.sh @ tag.
           BODY_TMP=$(mktemp)
-          curl -fsSL -A "curl/8.0" https://worthless.sh -o "$BODY_TMP"
+          curl -fsSL https://worthless.sh -o "$BODY_TMP"
           BODY_SHA=$(sha256sum "$BODY_TMP" | awk '{print $1}')
           REPO_SHA=$(git show "${LATEST_TAG}:install.sh" | sha256sum | awk '{print $1}')
           if [ "$BODY_SHA" != "$REPO_SHA" ]; then
@@ -210,7 +210,7 @@ jobs:
           fi
 
           # X-Worthless-Script-Tag header == latest tag.
-          HDRS=$(curl -fsI -A "curl/8.0" https://worthless.sh)
+          HDRS=$(curl -fsI https://worthless.sh)
           TAG_HEADER=$(printf '%s\n' "$HDRS" | awk -F': ' 'tolower($1)=="x-worthless-script-tag"{print $2}' | tr -d '\r\n ')
           if [ "$TAG_HEADER" != "$LATEST_TAG" ]; then
             echo "::error title=Worker header drift::X-Worthless-Script-Tag = '${TAG_HEADER}', expected '${LATEST_TAG}'"
@@ -229,7 +229,7 @@ jobs:
           # at the shipped tag, and (c) carry no version literal that has
           # drifted into a lie (WOR-558). Symmetric with A2a for install.sh.
           BODY_TMP=$(mktemp)
-          HTTP=$(curl -sSL -A "curl/8.0" -w '%{http_code}' 'https://worthless.sh/?explain=1' -o "$BODY_TMP")
+          HTTP=$(curl -sSL -w '%{http_code}' 'https://worthless.sh/?explain=1' -o "$BODY_TMP")
           if [ "$HTTP" != "200" ]; then
             echo "::error title=explain endpoint down::worthless.sh/?explain=1 → HTTP ${HTTP}, expected 200"
             exit 1

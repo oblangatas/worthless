@@ -1208,6 +1208,32 @@ class TestCrossConfigConsistency:
 # ------------------------------------------------------------------
 
 
+class TestReleaseSyncSendsARealUserAgent:
+    """A fixed curl User-Agent is one no real curl sends: a tampered Worker could
+    serve the genuine script only to it, and this check would pass. Bare curl
+    sends its own, so the check looks like any user running `curl | sh`."""
+
+    # Any form: -A x, -Ax, -fsSLA x (grouped), --user-agent=x, -H "user-agent: x"
+    # (header in any case). -A is case-sensitive: curl's -a is --append.
+    SETS_UA = re.compile(
+        r"(?:^|\s)(?:-[A-Za-z]*A|--user-agent(?=[\s='\"]|$))|(?i:user-agent)\s*:", re.M
+    )
+
+    def test_script_fetches_set_no_user_agent(self, release_sync_text: str):
+        # A2b sends a browser User-Agent on purpose (it tests the redirect), so
+        # scope to the steps that compare served bytes against the tag.
+        steps = [
+            s
+            for job in yaml.safe_load(release_sync_text)["jobs"].values()
+            for s in job.get("steps", [])
+            if s.get("name", "").startswith(("A2a", "A2c"))
+        ]
+        assert len(steps) == 2, [s.get("name") for s in steps]
+        for step in steps:
+            found = self.SETS_UA.findall(step["run"])
+            assert not found, f"{step['name']} must send curl's own User-Agent: {found}"
+
+
 class TestInstallPinDriftCheck:
     """WOR-559 — release-sync-check.yml fails when install.sh's default pin
     falls behind the latest published PyPI release. This deploy-decoupled
