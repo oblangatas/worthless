@@ -659,9 +659,14 @@ def test_lock_surfaces_detection_caveats_on_non_macos(
     assert "could not be checked" in out
     # Plain `worthless doctor` doesn't run this check and can say "No issues
     # found.", so pointing there would turn the caveat back into an all-clear.
-    assert "worthless doctor --json" in " ".join(out.split()), (
-        "the NOTE must point the user at the command that runs the full check"
+    flat = " ".join(out.split())
+    assert "worthless doctor --json" in flat, (
+        "the NOTE must point the user at the command that runs this check"
     )
+    # doctor runs the same probe as lock, so it can't check what lock couldn't:
+    # the NOTE says what doctor lists instead of promising a fuller check.
+    assert "to list the logins it finds and the places it couldn't check" in flat
+    assert "full check" not in flat, "doctor --json repeats this check; it isn't a fuller one"
 
 
 def test_doctor_summary_names_the_credentials_when_found(

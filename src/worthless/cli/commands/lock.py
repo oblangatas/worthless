@@ -2938,7 +2938,10 @@ def _print_unshardable_credentials_warning(console: WorthlessConsole) -> None:
     caveats = detection_caveats() + probe_caveats
     if caveats:
         console.print_hint(
-            "[NOTE] " + "; ".join(caveats) + " — run `worthless doctor --json` for a full check."
+            "[NOTE] "
+            + "; ".join(caveats)
+            + " — run `worthless doctor --json` to list the logins it finds"
+            " and the places it couldn't check."
         )
 
 
