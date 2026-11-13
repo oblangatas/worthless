@@ -5,6 +5,10 @@ Linear: WOR-717 (supervised default start).
 
 from __future__ import annotations
 
+from importlib.metadata import version as pkg_version
+
+import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -49,7 +53,8 @@ class TestStartSupervisedProxyIntegration:
             log_file = home_with_key.base_dir / "proxy.log"
             pid = start_supervised_proxy(home_with_key, 8787, log_file, console)
 
-        assert captured["cmd"] == [str(binary), "up", "--port", "8787"]
+        # worthless-l0s1: this interpreter's worthless, never whichever is on PATH.
+        assert captured["cmd"] == [sys.executable, "-m", "worthless", "up", "--port", "8787"]
         assert captured["kwargs"]["start_new_session"] is True
         assert captured["kwargs"]["env"]["WORTHLESS_HOME"] == str(home_with_key.base_dir)
         assert captured["kwargs"]["env"]["WORTHLESS_PORT"] == "8787"
@@ -241,4 +246,78 @@ class TestSupervisedUpSidecarContract:
                 MagicMock(),
             )
 
-        assert captured["cmd"][1:4] == ["up", "--port", "8787"]
+        assert captured["cmd"][3:6] == ["up", "--port", "8787"]
+
+
+class TestTheDefaultCommandStartsItself:
+    """worthless-l0s1: plain `worthless` spawned whichever `worthless` was first on
+    PATH. A dev run picked up an older install, which answered /healthz 200 on a
+    stale key and turned status green — the new code never ran."""
+
+    def test_never_asks_path_which_worthless_to_run(self, home_with_key, tmp_path) -> None:
+        captured: dict = {}
+
+        def fake_popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return MagicMock(pid=1)
+
+        with (
+            patch("worthless.cli.commands.up.subprocess.Popen", fake_popen),
+            patch(
+                "worthless.cli.commands.service._common.resolve_worthless_binary",
+                side_effect=AssertionError("looked up worthless on PATH"),
+            ),
+            patch("worthless.cli.commands.up.poll_health_pid", return_value=42),
+            patch("worthless.cli.commands.up.os.open", return_value=3),
+            patch("worthless.cli.commands.up.os.close"),
+        ):
+            start_supervised_proxy(
+                home_with_key, 8787, home_with_key.base_dir / "proxy.log", MagicMock()
+            )
+        assert captured["cmd"][:3] == [sys.executable, "-m", "worthless"]
+
+    def test_python_dash_m_worthless_really_runs(self) -> None:
+        """The spawn above is only real if `python -m worthless` is an entry point."""
+        out = subprocess.run(
+            [sys.executable, "-m", "worthless", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.split()[-1] == pkg_version("worthless"), "the child is this install"
+
+    def test_a_worthless_package_in_the_project_cannot_stand_in_for_the_proxy(
+        self, home_with_key, tmp_path, monkeypatch
+    ) -> None:
+        """PR #767 security review: `python -m` puts the cwd first on sys.path, and
+        plain `worthless` runs in the user's project. A cloned repo with its own
+        `worthless/` package would run as the proxy, with WORTHLESS_HOME in hand.
+        Run the exact spawn (argv + cwd) with --version and see who answers."""
+        project = tmp_path / "cloned-repo"
+        (project / "worthless").mkdir(parents=True)
+        (project / "worthless" / "__init__.py").write_text("")
+        (project / "worthless" / "__main__.py").write_text("print('HIJACKED')\n")
+        monkeypatch.chdir(project)
+        captured: dict = {}
+
+        def fake_popen(cmd, **kwargs):
+            captured.update(cmd=cmd, cwd=kwargs.get("cwd"))
+            return MagicMock(pid=1)
+
+        with (
+            patch("worthless.cli.commands.up.subprocess.Popen", fake_popen),
+            patch("worthless.cli.commands.up.poll_health_pid", return_value=42),
+            patch("worthless.cli.commands.up.os.open", return_value=3),
+            patch("worthless.cli.commands.up.os.close"),
+        ):
+            start_supervised_proxy(
+                home_with_key, 8787, home_with_key.base_dir / "proxy.log", MagicMock()
+            )
+        argv = captured["cmd"][: captured["cmd"].index("worthless") + 1] + ["--version"]
+        out = subprocess.run(
+            argv, cwd=captured["cwd"], capture_output=True, text=True, timeout=30, check=False
+        )
+        assert "HIJACKED" not in out.stdout
+        assert out.returncode == 0 and "worthless" in out.stdout.lower(), out.stderr

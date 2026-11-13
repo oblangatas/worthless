@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import secrets
-import socket
 import string
 import subprocess
 import sys
@@ -22,6 +21,8 @@ import time
 from pathlib import Path
 
 import pytest
+
+from tests.user_flows.helpers import free_port, worthless_bin
 
 if sys.platform == "win32":  # pragma: no cover — pty is POSIX-only
     pytest.skip("pty is POSIX-only", allow_module_level=True)
@@ -45,18 +46,6 @@ _STEP_S = 30
 _QUESTION = b"Install the background service on port"
 
 
-def _worthless_bin() -> Path:
-    """The branch build, or WORTHLESS_TEST_BIN to aim at an installed wheel."""
-    override = os.environ.get("WORTHLESS_TEST_BIN")
-    return Path(override) if override else Path(sys.executable).parent / "worthless"
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 def _setup(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     """A throwaway home + project with one real-looking key, and an env with CI
     and AI-agent markers removed: the offer treats them as 'nobody is
@@ -76,7 +65,7 @@ def _setup(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
             "HOME": str(home),
             "WORTHLESS_HOME": str(home / ".worthless"),
             "WORTHLESS_KEYRING_BACKEND": "null",
-            "WORTHLESS_PORT": str(_free_port()),
+            "WORTHLESS_PORT": str(free_port()),
             "NO_COLOR": "1",
         }
     )
@@ -109,7 +98,7 @@ def _run(
     """
     master, slave = pty.openpty()
     proc = subprocess.Popen(  # noqa: S603
-        [str(_worthless_bin()), *args],
+        [str(worthless_bin()), *args],
         stdin=slave,
         stdout=slave,
         stderr=slave,
@@ -139,13 +128,13 @@ def _run(
         # test on the developer's machine or runner (it happened once, during a
         # mutation check of this very file).
         subprocess.run(  # noqa: S603
-            [str(_worthless_bin()), "service", "uninstall", "--yes"],
+            [str(worthless_bin()), "service", "uninstall", "--yes"],
             env=env,
             capture_output=True,
             timeout=60,
         )
         subprocess.run(  # noqa: S603 — stop the proxy plain `worthless` started
-            [str(_worthless_bin()), "down"], env=env, capture_output=True, timeout=30
+            [str(worthless_bin()), "down"], env=env, capture_output=True, timeout=30
         )
     return seen.decode(errors="replace").replace("\r", ""), installed
 

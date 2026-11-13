@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import socket
 import subprocess  # nosec B404 — required for real CLI integration test
 import sys
 from pathlib import Path
@@ -25,18 +24,7 @@ from pathlib import Path
 import pytest
 
 from tests.helpers import fake_openai_key
-from tests.user_flows.helpers import scrubbed_cli_env
-
-
-def _free_port() -> int:
-    """Reserve a free TCP port on 127.0.0.1 and return it.
-
-    The kernel won't reassign for a brief window after we close — good
-    enough for the test, since wrap binds milliseconds after.
-    """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+from tests.user_flows.helpers import free_port, scrubbed_cli_env
 
 
 @pytest.mark.user_flow
@@ -59,7 +47,7 @@ def test_wrap_child_reaches_proxy_via_env_url(tmp_path: Path) -> None:
     if worthless_bin is None:
         pytest.skip("worthless CLI not on PATH (install with `uv sync` first)")
 
-    port = _free_port()
+    port = free_port()
 
     home = tmp_path / ".worthless"
     env_file = tmp_path / ".env"

@@ -18,9 +18,7 @@ import http.server
 import json
 import os
 import signal
-import socket
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -28,6 +26,8 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+
+from tests.user_flows.helpers import free_port, worthless_bin
 from cryptography.fernet import Fernet
 
 from tests.helpers import fake_key, seal_enrolled
@@ -45,12 +45,6 @@ def _real_key(project: str) -> str:
     # which would make every assertion below pass vacuously. One per project, or
     # the second lock is a re-lock of the same key, a different code path.
     return fake_key("sk-live-", seed=f"saaz-live-{project}")
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 class _ExactKeyProvider(http.server.BaseHTTPRequestHandler):
@@ -75,20 +69,15 @@ class _ExactKeyProvider(http.server.BaseHTTPRequestHandler):
         return
 
 
-def _worthless_bin() -> Path:
-    override = os.environ.get("WORTHLESS_TEST_BIN")
-    return Path(override) if override else Path(sys.executable).parent / "worthless"
-
-
 class _World:
     """One sandboxed user: HOME, WORTHLESS_HOME, a fake provider, a proxy port."""
 
     def __init__(self, tmp_path: Path) -> None:
-        self.bin = _worthless_bin()
+        self.bin = worthless_bin()
         if not self.bin.exists():  # pragma: no cover — depends on how the venv was built
             pytest.skip(f"no worthless console script at {self.bin}")
-        self.upstream_port = _free_port()
-        self.port = _free_port()
+        self.upstream_port = free_port()
+        self.port = free_port()
         self.upstream = http.server.HTTPServer(("127.0.0.1", self.upstream_port), _ExactKeyProvider)
         threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
         self.home = tmp_path / "home"
