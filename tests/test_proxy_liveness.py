@@ -34,27 +34,6 @@ def kills(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int]]:
     return calls
 
 
-async def test_proxy_sigterms_itself_when_the_supervisor_closes_the_pipe(
-    monkeypatch: pytest.MonkeyPatch, kills: list[tuple[int, int]]
-) -> None:
-    read_fd, write_fd = os.pipe()
-    monkeypatch.setenv("WORTHLESS_LIVENESS_FD", str(read_fd))
-    fd = proxy_app._watch_liveness_fd()
-    try:
-        assert fd == read_fd
-        await asyncio.sleep(0.05)
-        assert kills == [], "fired while the supervisor still holds the pipe"
-        os.close(write_fd)
-        write_fd = -1
-        assert await _wait_for(lambda: bool(kills)), "no shutdown after the pipe closed"
-        assert kills == [(os.getpid(), signal.SIGTERM)]
-    finally:
-        asyncio.get_running_loop().remove_reader(read_fd)
-        for f in (read_fd, write_fd):
-            if f >= 0:
-                os.close(f)
-
-
 async def test_proxy_ignores_bytes_on_the_pipe(
     monkeypatch: pytest.MonkeyPatch, kills: list[tuple[int, int]]
 ) -> None:
@@ -78,32 +57,6 @@ async def test_proxy_watches_nothing_without_a_liveness_fd(
     """A proxy started by hand or by a service manager has no pipe to watch."""
     monkeypatch.delenv("WORTHLESS_LIVENESS_FD", raising=False)
     assert proxy_app._watch_liveness_fd() is None
-
-
-async def test_the_proxy_lifespan_shuts_down_when_the_supervisor_dies(
-    monkeypatch: pytest.MonkeyPatch,
-    kills: list[tuple[int, int]],
-    tmp_db_path: str,
-    fernet_key: bytes,
-) -> None:
-    """The real lifespan installs the watch; a pipe closed mid-run stops the proxy."""
-    read_fd, write_fd = os.pipe()
-    monkeypatch.setenv("WORTHLESS_LIVENESS_FD", str(read_fd))
-    app = create_app(
-        ProxySettings(db_path=tmp_db_path, fernet_key=bytearray(fernet_key), allow_insecure=True)
-    )
-    try:
-        async with app.router.lifespan_context(app):
-            await asyncio.sleep(0.05)
-            assert kills == []
-            os.close(write_fd)
-            write_fd = -1
-            assert await _wait_for(lambda: bool(kills)), "lifespan never watched the pipe"
-        assert kills == [(os.getpid(), signal.SIGTERM)]
-    finally:
-        for f in (read_fd, write_fd):
-            if f >= 0:
-                os.close(f)
 
 
 @pytest.mark.parametrize("kind", ["regular-file", "closed-fd", "not-a-number"])
@@ -141,20 +94,33 @@ async def test_proxy_ignores_a_liveness_fd_that_is_not_a_pipe(
             os.close(fd)
 
 
-async def test_proxy_stops_at_once_when_the_supervisor_died_before_startup(
+@pytest.mark.parametrize("dies", ["before-startup", "while-serving"])
+async def test_the_proxy_lifespan_shuts_down_when_the_supervisor_dies(
+    dies: str,
     monkeypatch: pytest.MonkeyPatch,
     kills: list[tuple[int, int]],
     tmp_db_path: str,
     fernet_key: bytes,
 ) -> None:
+    """The real lifespan installs the watch; only EOF on the pipe stops the proxy."""
     read_fd, write_fd = os.pipe()
-    os.close(write_fd)  # supervisor already gone
+    if dies == "before-startup":
+        os.close(write_fd)
+        write_fd = -1
     monkeypatch.setenv("WORTHLESS_LIVENESS_FD", str(read_fd))
     app = create_app(
         ProxySettings(db_path=tmp_db_path, fernet_key=bytearray(fernet_key), allow_insecure=True)
     )
     try:
         async with app.router.lifespan_context(app):
+            if write_fd >= 0:
+                await asyncio.sleep(0.05)
+                assert kills == [], "fired while the supervisor still holds the pipe"
+                os.close(write_fd)
+                write_fd = -1
             assert await _wait_for(lambda: bool(kills)), "a dead supervisor went unnoticed"
+        assert kills == [(os.getpid(), signal.SIGTERM)]
     finally:
-        os.close(read_fd)
+        for f in (read_fd, write_fd):
+            if f >= 0:
+                os.close(f)
