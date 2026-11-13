@@ -115,7 +115,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ### Fixed
 - **A crashed `worthless up` or `worthless wrap` no longer leaves the proxy running** (`worthless-yfxm`).
   Before: if `worthless up` or `worthless wrap` was killed with `kill -9` or crashed, the proxy kept running. It kept its port and kept answering requests until you ran `worthless down`.
-  Now: the proxy stops less than 1 second after `worthless up` or `worthless wrap` stops.
+  Now: the proxy stops less than 2 seconds after `worthless up` or `worthless wrap` stops. In our tests it stopped after about 0.2 seconds.
 
   **Limits.**
   - If `worthless up` is frozen (for example with `kill -STOP`) but not stopped, the proxy keeps running.
