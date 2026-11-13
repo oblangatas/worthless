@@ -209,12 +209,39 @@ repos:
       - id: uv-audit
         name: "supply chain: vulnerability scan"
         language: system
-        # Ignore list — each entry MUST cite its tracking ticket.
-        # Re-check quarterly; drop an ID once the upstream fix lands.
-        #   GHSA-58qw-9mgm-455v : pip 26.0.1 tarball handling (dev-only; no fix
-        #                        available as of 2026-04-24). Tracked in beads
-        #                        worthless-lwvs. Drop when pip patches.
-        entry: sh -c 'uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin --ignore-vuln GHSA-58qw-9mgm-455v'
+        # NOTHING is ignored here any more. Both former entries were dropped
+        # 2026-08-02 after verifying pip-audit reports clean without them:
+        #   PYSEC-2026-2132 : click.edit() injection (CVE-2026-7246). semgrep
+        #                     left the lock (now `uvx`-isolated in sast.yml),
+        #                     so click resolves to 8.4.2 >= the 8.3.3 fix.
+        #                     beads worthless-fnvz.
+        #   GHSA-58qw-9mgm-455v : pip tarball handling. pip is still in the
+        #                     exported set, but pip-audit no longer reports it,
+        #                     so the suppression was hiding nothing. A dead
+        #                     ignore is worse than none — it silently absorbs
+        #                     the NEXT finding for that package. beads
+        #                     worthless-lwvs; reopen if it re-fires.
+        # If an ignore is ever needed again it MUST cite its tracking ticket
+        # and be re-checked quarterly.
+        #
+        # `--python 3.13`, not the clone's own Python. pip-audit skips lines whose
+        # markers don't match the Python running it, so plain `uv run` gave a 3.10
+        # clone a different verdict: filelock's fixes need 3.11+, the 3.10 lock
+        # stays on 3.25.2, and every push from 3.10 failed on a dev-only package
+        # (WOR-1006). `--isolated` is what leaves that clone's .venv in place.
+        # What 3.10 users actually install is audited by `audit-py310` in
+        # dependency-audit.yml. Dev tools pinned only for 3.10 are audited nowhere.
+        #
+        # `bash -c`, not `sh -c`, and `set -o pipefail` is why. This is a
+        # PIPELINE: without pipefail the shell reports only pip-audit's exit
+        # code, so a `uv export` that dies partway hands over a truncated-but-
+        # valid stream, pip-audit audits the packages that arrived, and the hook
+        # passes over a fragment. CI got this fix via `shell: bash`
+        # (dependency-audit.yml); the hook was left carrying the defect until
+        # now. pipefail is not POSIX — dash, which /bin/sh often is, does not
+        # support it — so the shell has to be bash explicitly. beads
+        # worthless-mh0r.
+        entry: bash -c 'set -o pipefail; uv export --frozen --no-emit-project | uv run --isolated --python 3.13 pip-audit --disable-pip -r /dev/stdin'
         pass_filenames: false
         stages: [pre-push]
 
