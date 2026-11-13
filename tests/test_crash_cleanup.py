@@ -25,7 +25,8 @@ import pytest
 
 from worthless.cli.process import poll_health
 
-pytestmark = [pytest.mark.real_ipc, pytest.mark.timeout(90)]
+# No reruns: these prove timing claims, and a silent second try would hide a real miss.
+pytestmark = [pytest.mark.real_ipc, pytest.mark.timeout(90), pytest.mark.flaky(reruns=0)]
 
 _CLI = [str(Path(sys.executable).with_name("worthless"))]
 
@@ -104,6 +105,8 @@ def test_kill_9_on_up_takes_the_proxy_sidecar_and_shares_with_it(
         # yfxm: the proxy sees its liveness pipe close and frees the port.
         kids["proxy"].wait(timeout=2)
         assert not poll_health(port, timeout=0.5), "the port still answers after up died"
+        # ...and drops proxy.pid, so `down` can't later kill a reused pid.
+        assert not (home / "w" / "proxy.pid").exists(), "stale proxy.pid left behind"
         kids["sidecar"].wait(timeout=10)
     finally:
         _kill_all(sup, *kids.values())

@@ -175,6 +175,22 @@ def _sanitize_upstream_error(status_code: int, body: bytes, provider: str) -> by
     return _error_body(status_code, "upstream provider error", "api_error", provider)
 
 
+def _forget_pid_file() -> None:
+    """Remove ``proxy.pid`` when it names this proxy and the supervisor is gone.
+
+    The dead supervisor can't clean it up, and a stale pid there could later
+    name an unrelated process: ``worthless down`` kills whatever it names. A
+    file a newer ``up`` already rewrote names another pid and stays.
+    """
+    home = os.environ.get("WORTHLESS_HOME")
+    if not home:
+        return
+    pid_file = Path(home) / "proxy.pid"  # cli.process.pid_path; format "pid\nport"
+    with contextlib.suppress(OSError, ValueError, IndexError):
+        if int(pid_file.read_text().split()[0]) == os.getpid():
+            pid_file.unlink()
+
+
 def _watch_liveness_fd() -> int | None:
     """Shut the proxy down when its supervisor dies (worthless-yfxm).
 
@@ -199,6 +215,7 @@ def _watch_liveness_fd() -> int | None:
             return
         loop.remove_reader(fd)
         logger.warning("supervisor is gone (liveness pipe closed); shutting down")
+        _forget_pid_file()
         os.kill(os.getpid(), signal.SIGTERM)
 
     # A stale or bogus value (a closed fd, a regular file that always reads

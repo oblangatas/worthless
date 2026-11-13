@@ -13,6 +13,7 @@ import signal
 
 import pytest
 
+from worthless.cli.process import write_pid
 from worthless.proxy import app as proxy_app
 from worthless.proxy.app import create_app
 from worthless.proxy.config import ProxySettings
@@ -124,3 +125,28 @@ async def test_the_proxy_lifespan_shuts_down_when_the_supervisor_dies(
         for f in (read_fd, write_fd):
             if f >= 0:
                 os.close(f)
+
+
+@pytest.mark.parametrize("owner", ["this-proxy", "a-newer-up"])
+async def test_proxy_forgets_its_pid_file_when_the_supervisor_dies(
+    owner: str,
+    monkeypatch: pytest.MonkeyPatch,
+    kills: list[tuple[int, int]],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """The dead supervisor can't remove proxy.pid; a stale pid there could later
+    name an unrelated process, and `worthless down` kills whatever it names.
+    A file a newer `up` already rewrote is not ours to remove."""
+    pid = os.getpid() if owner == "this-proxy" else os.getpid() + 1
+    pid_file = tmp_path / "proxy.pid"
+    write_pid(pid_file, pid, 8787)
+    monkeypatch.setenv("WORTHLESS_HOME", str(tmp_path))
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setenv("WORTHLESS_LIVENESS_FD", str(read_fd))
+    proxy_app._watch_liveness_fd()
+    try:
+        os.close(write_fd)
+        assert await _wait_for(lambda: bool(kills))
+        assert pid_file.exists() is (owner == "a-newer-up")
+    finally:
+        os.close(read_fd)
