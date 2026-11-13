@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import signal
+import stat
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -187,7 +188,6 @@ def _watch_liveness_fd() -> int | None:
     raw = os.environ.get("WORTHLESS_LIVENESS_FD")
     if not raw:
         return None
-    fd = int(raw)
     loop = asyncio.get_running_loop()
 
     def _on_readable() -> None:
@@ -201,7 +201,17 @@ def _watch_liveness_fd() -> int | None:
         logger.warning("supervisor is gone (liveness pipe closed); shutting down")
         os.kill(os.getpid(), signal.SIGTERM)
 
-    loop.add_reader(fd, _on_readable)
+    # A stale or bogus value (a closed fd, a regular file that always reads
+    # as EOF on kqueue, a loop without add_reader) must never stop a healthy
+    # proxy or fail its startup: watch nothing and say so.
+    try:
+        fd = int(raw)
+        if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+            raise ValueError("not a pipe")
+        loop.add_reader(fd, _on_readable)
+    except (ValueError, OSError, NotImplementedError) as exc:
+        logger.warning("ignoring WORTHLESS_LIVENESS_FD=%r: %s", raw, exc)
+        return None
     return fd
 
 
