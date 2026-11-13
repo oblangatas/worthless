@@ -152,10 +152,10 @@ installCopy?.addEventListener("click", async () => {
       showCopiedState();
     } else {
       installHelp.hidden = false;
-      installStatus.textContent = "Copy unavailable. Use the install guide below.";
+      installStatus.textContent = "Copy unavailable. Use the install guide above.";
       installCopy.setAttribute(
         "aria-label",
-        "Copy unavailable. Use the install guide below.",
+        "Copy unavailable. Use the install guide above.",
       );
     }
   }
