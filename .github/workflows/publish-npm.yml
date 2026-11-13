@@ -12,10 +12,15 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     # environment gate required — mirrors publish.yml (PyPI) pattern.
-    # NPM_TOKEN (long-lived) is used for the initial package claim on npm.
-    # Once the package exists, migrate to npm provenance (--provenance flag +
-    # id-token: write) and remove NPM_TOKEN. Tracked in WOR-229 follow-up.
+    # npm trusted publishing (OIDC): npm swaps the id-token for a publish
+    # credential and adds provenance. NPM_TOKEN stays as a fallback until one
+    # release shows attestations, then it is removed. WOR-921.
     environment: npm-publish
+    # Job-level permissions replace the workflow-level block, so contents: read
+    # is repeated here.
+    permissions:
+      contents: read
+      id-token: write
     defaults:
       run:
         working-directory: packages/worthless-mcp
@@ -41,7 +46,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          # Node 24 ships npm 11.x; trusted publishing needs npm >= 11.5.1.
+          node-version: "24"
           registry-url: "https://registry.npmjs.org/"
 
       - name: Stamp version from tag
