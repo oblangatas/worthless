@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.user_flows.helpers import worthless_bin
+
 # `pty` is POSIX-only and import-time — on Windows this module would fail to
 # COLLECT, not skip, taking the whole session down with it. Signals work
 # differently there too (no SIGINT to a process group), so the scenario cannot
@@ -51,18 +53,6 @@ pytestmark = [
 ]
 
 _TIMEOUT_S = 60.0
-
-
-def _worthless_bin() -> Path:
-    """The console script under test.
-
-    Defaults to the one beside the interpreter running the tests — the branch
-    build. ``WORTHLESS_TEST_BIN`` aims this at a different binary, so CI can run
-    the same test against an installed wheel: the artifact a user actually gets
-    (worthless-d4h2). Without that, a packaging-only defect passes every test.
-    """
-    override = os.environ.get("WORTHLESS_TEST_BIN")
-    return Path(override) if override else Path(sys.executable).parent / "worthless"
 
 
 def _clean_env(home: Path) -> dict[str, str]:
@@ -140,7 +130,7 @@ def test_real_ctrl_c_at_the_uninstall_prompt_cancels_cleanly(tmp_path: Path) -> 
     Against the pre-fix code this fails with the operator's exact terminal output:
     ``WRTLS-199: an internal error occurred``.
     """
-    binary = _worthless_bin()
+    binary = worthless_bin()
     if not binary.exists():  # pragma: no cover — depends on how the venv was built
         pytest.skip(f"no worthless console script at {binary}")
 
@@ -195,7 +185,7 @@ def test_ctrl_c_is_handled_at_prompts_beyond_uninstall(
     printing ``WRTLS-199``. This proves a *different* command's prompt is covered, so
     a future prompt inherits the behaviour instead of repeating the bug.
     """
-    binary = _worthless_bin()
+    binary = worthless_bin()
     if not binary.exists():  # pragma: no cover
         pytest.skip(f"no worthless console script at {binary}")
 
