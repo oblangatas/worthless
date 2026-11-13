@@ -752,8 +752,10 @@ class TestAnthropicLiveSDK:
 
 @pytest.mark.live
 @pytest.mark.timeout(90)
-def test_kill_9_on_up_takes_the_sidecar_and_its_shares_with_it() -> None:
-    """worthless-dhfn: real ``worthless up``; SIGKILL it; nothing keeps the keys.
+def test_kill_9_on_up_takes_the_proxy_sidecar_and_shares_with_it() -> None:
+    """worthless-dhfn + yfxm: real ``worthless up``; SIGKILL it; nothing survives.
+
+    The sidecar wipes the key shares; the proxy exits and frees its port.
 
     Needs no API key. Sandboxes HOME too: WORTHLESS_HOME alone still lets
     integrations write under the real home.
@@ -777,13 +779,14 @@ def test_kill_9_on_up_takes_the_sidecar_and_its_shares_with_it() -> None:
         stderr=subprocess.DEVNULL,
     )
     sidecar: psutil.Process | None = None
+    proxy: psutil.Process | None = None
     try:
         assert poll_health(port, timeout=30.0), "worthless up never became healthy"
-        sidecar = next(
-            c
+        kids = {
+            ("sidecar" if "worthless.sidecar" in " ".join(c.cmdline()) else "proxy"): c
             for c in psutil.Process(sup.pid).children()
-            if "worthless.sidecar" in " ".join(c.cmdline())
-        )
+        }
+        sidecar, proxy = kids["sidecar"], kids["proxy"]
         run_dir = home / "w" / "run" / str(sup.pid)
         assert (run_dir / "share_a.bin").exists()
 
@@ -794,7 +797,9 @@ def test_kill_9_on_up_takes_the_sidecar_and_its_shares_with_it() -> None:
         while run_dir.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         assert not run_dir.exists(), f"shares left behind: {sorted(run_dir.iterdir())}"
-        # Exits after its drain (the orphaned proxy's connection holds it open).
+        # The proxy sees its liveness pipe close and shuts down (yfxm).
+        proxy.wait(timeout=2)
+        assert not poll_health(port, timeout=0.5), "the port still answers after up died"
         sidecar.wait(timeout=10)
 
         down = subprocess.run([*cli, "down"], env=env, capture_output=True, text=True, timeout=30)
@@ -802,7 +807,8 @@ def test_kill_9_on_up_takes_the_sidecar_and_its_shares_with_it() -> None:
     finally:
         if sup.poll() is None:
             sup.kill()
-        if sidecar is not None and sidecar.is_running():
-            sidecar.kill()
+        for child in (sidecar, proxy):
+            if child is not None and child.is_running():
+                child.kill()
         subprocess.run([*cli, "down"], env=env, capture_output=True, timeout=30)
         shutil.rmtree(home, ignore_errors=True)
