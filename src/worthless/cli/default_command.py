@@ -30,7 +30,7 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.key_patterns import is_oauth_token
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
 from worthless.cli.orphans import UNLOCKED_FIX_PHRASE, find_unlocked
-from worthless.cli.scanner import remedy_for_exposure, token_facts
+from worthless.cli.scanner import _has_git_above, remedy_for_exposure, token_facts
 from worthless.openclaw.audit import sanitise_for_message
 from worthless.storage.repository import ShardRepository
 from worthless.cli.commands.service._common import ServiceState
@@ -230,11 +230,13 @@ def _run_enrollment_if_needed(
         total = len(keys)
         count = _lock_keys(env_path, home, quiet=True)
 
-    _report_lock_and_offer_service(home, console, count=count, total=total, yes=yes)
+    _report_lock_and_offer_service(
+        home, console, count=count, total=total, yes=yes, env_path=env_path
+    )
 
 
 def _report_lock_and_offer_service(
-    home: WorthlessHome, console, *, count: int, total: int, yes: bool
+    home: WorthlessHome, console, *, count: int, total: int, yes: bool, env_path: Path
 ) -> None:
     """Say how the lock went, then ask about the background service."""
     if count < total:
@@ -247,8 +249,13 @@ def _report_lock_and_offer_service(
     # after it would race the detached proxy for the port. --yes never installs
     # a service on this path (see run_default). Same rule as `worthless lock`:
     # offer once anything was locked; real lock failures raise before here.
+    #
+    # worthless-mivd: the question only inside a git repo; a scratch folder gets
+    # the one-line hint instead. `worthless lock` always asks (lock.py).
     if count > 0 and not yes:
-        _offer_service_after_lock(console, home=home, port=resolve_port(None))
+        _offer_service_after_lock(
+            console, home=home, port=resolve_port(None), ask=_has_git_above(env_path)
+        )
 
 
 def _ensure_proxy_running(home: WorthlessHome, console) -> tuple[bool, int | None, int]:
@@ -301,7 +308,8 @@ def run_default(
         Auto-approve lock + proxy start (but never service install).
 
         Without --yes, plain ``worthless`` asks the explicit service question
-        after locking (WOR-859); with --yes it never asks and never installs.
+        after locking inside a git repo (WOR-859, worthless-mivd); outside one
+        it prints a one-line hint. With --yes it never asks and never installs.
         The same holds for ``worthless --yes lock``: only a typed "y" installs
         a service. A piped, CI or AI-agent run is never asked.
     json_mode:

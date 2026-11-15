@@ -3540,12 +3540,15 @@ def _offer_question(port: int, home: WorthlessHome) -> str:
     )
 
 
-def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> bool:
+def _offer_service_after_lock(console, *, home: WorthlessHome, port: int, ask: bool = True) -> bool:
     """Offer to keep the proxy alive after this terminal closes (WOR-853).
 
     ``lock`` is the first moment a Fernet key exists, so it is the earliest
     point the service CAN be installed — ``install.sh`` cannot, because
     ``preflight_service_install`` refuses without a key.
+
+    ``ask=False`` runs every gate below but prints the one-line hint where the
+    question would be: plain ``worthless`` outside a git repo (worthless-mivd).
 
     Returns True only if a service was actually installed.
     """
@@ -3592,7 +3595,7 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
     # the person whose account gets a startup item. Both get the hint; typing
     # `worthless service install` is the explicit way in. Not a security wall
     # (an agent can drop the markers): it stops a question nobody human sees.
-    if console.assume_yes or any(os.environ.get(v) for v in _AGENT_ENV_VARS):
+    if not ask or console.assume_yes or any(os.environ.get(v) for v in _AGENT_ENV_VARS):
         console.print_hint(_offer_declined_hint())
         return False
 
