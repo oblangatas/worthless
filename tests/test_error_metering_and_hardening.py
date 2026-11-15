@@ -1017,8 +1017,8 @@ class TestOverCapTokenCounts:
 # ------------------------------------------------------------------
 
 
-class TestNegativeCountsAndBudgets:
-    """A negative count is unreadable, so it never gives a budget key back spent tokens."""
+class TestBudgetOnlyKeys:
+    """A key with a daily token budget and no spend cap."""
 
     @pytest.mark.parametrize(
         ("replies", "statuses"),
@@ -1063,6 +1063,51 @@ class TestNegativeCountsAndBudgets:
             got.append(resp.status_code)
 
         assert got == statuses
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            pytest.param(
+                httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=_anthropic_sse({"input_tokens": None}, {"output_tokens": 600}),
+                ),
+                id="stream-with-null-input",
+            ),
+            pytest.param(
+                httpx.Response(
+                    200, content=_anthropic_json(usage={"input_tokens": 1200, "output_tokens": -3})
+                ),
+                id="negative-output",
+            ),
+        ],
+    )
+    @respx.mock
+    async def test_unreadable_reply_is_not_counted_wor1031_gap(
+        self, proxy_client: httpx.AsyncClient, proxy_app, anthropic_alias, reply
+    ):
+        """Pins the WOR-1031 gap, which WOR-1100 widens: such a reply isn't counted
+        against the budget, so the key is still let in after spending past it. Before
+        WOR-1100 these counted 600 and 1197. Fixing WOR-1031 turns this red on purpose."""
+        alias, shard_a_utf8 = anthropic_alias
+        await _daily_budget(proxy_app, alias)
+        respx.post(ANTHROPIC_MESSAGES).mock(return_value=reply)
+
+        got = []
+        for _ in range(3):
+            resp = await proxy_client.post(
+                _proxy_url(alias, "/v1/messages"),
+                headers=_proxy_headers(alias, shard_a_utf8),
+                content=ANTHROPIC_BODY,
+            )
+            got.append(resp.status_code)
+
+        assert got == [200, 200, 200]
+        async with proxy_app.state.db.execute(
+            "SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)
+        ) as cur:
+            assert await cur.fetchall() == []
 
 
 class TestUnreadableStreamCounts:

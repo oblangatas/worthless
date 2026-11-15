@@ -574,3 +574,22 @@ def test_anthropic_stream_without_input_usage_counts_output_only(parse, start):
     result = parse(_sse(*events))
     assert result is not None
     assert result.total_tokens == 7
+
+
+@pytest.mark.parametrize(
+    ("messages", "billed"),
+    [
+        ([{"usage": {"input_tokens": None}}, {"usage": {"input_tokens": 5}}], 8),
+        ([{"usage": {"input_tokens": 5}}, {"usage": {"input_tokens": None}}], None),
+        ([{"usage": None}, {"model": "m"}], None),
+        ([{"usage": {"input_tokens": 5}}, "x"], 8),
+    ],
+    ids=["bad-then-good", "good-then-bad", "bad-then-no-usage", "good-then-non-object"],
+)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_last_message_start_with_usage_counts(parse, messages, billed):
+    """Both readers agree when a stream repeats message_start: a later one with a usage
+    replaces the input count, and one without a usage leaves it as it was."""
+    events = [("message_start", {"type": "message_start", "message": m}) for m in messages]
+    result = parse(_sse(*events, _anthropic_delta({"output_tokens": 3})))
+    assert (None if result is None else result.total_tokens) == billed

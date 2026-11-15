@@ -103,25 +103,22 @@ def extract_usage_openai(data: bytes) -> UsageInfo | None:
     return None
 
 
-def _find_sse_event_data(
-    lines: list[str],
-    event_name: str,
-    *,
-    reverse: bool = False,
-) -> dict | None:
-    """Find an SSE event by name and parse its data payload."""
-    indices = range(len(lines) - 1, -1, -1) if reverse else range(len(lines))
-    for i in indices:
-        if lines[i].strip() == f"event: {event_name}":
+def _sse_event_data(lines: list[str], event_name: str) -> list[dict | None]:
+    """Parse the data payload of each SSE event named *event_name*, in order: None
+    for a payload that isn't a JSON object."""
+    found: list[dict | None] = []
+    for i, line in enumerate(lines):
+        if line.strip() == f"event: {event_name}":
             for j in range(i + 1, len(lines)):
                 data_line = lines[j].strip()
                 if data_line.startswith("data: "):
                     try:
                         parsed = json.loads(data_line[6:])
                     except (json.JSONDecodeError, ValueError):
-                        return None
-                    return parsed if isinstance(parsed, dict) else None
-    return None
+                        parsed = None
+                    found.append(parsed if isinstance(parsed, dict) else None)
+                    break
+    return found
 
 
 def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
@@ -150,21 +147,24 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
     except Exception:  # noqa: S110 — best-effort SSE decode; malformed response must not raise
         return None
 
-    input_tokens = 0
+    input_tokens: int | None = 0
     model: str | None = None
 
-    start = _find_sse_event_data(lines, "message_start")
-    msg = start.get("message") if start else None
-    if isinstance(msg, dict):
-        # No input count bills output only; an unreadable one makes the whole
-        # stream unreadable, as the same usage does in a JSON reply.
+    # As in the stream collector, the last message_start with a usage sets the input
+    # count. No input count bills output only; an unreadable one makes the whole
+    # stream unreadable, as the same usage does in a JSON reply.
+    for start in _sse_event_data(lines, "message_start"):
+        msg = start.get("message") if start else None
+        if not isinstance(msg, dict):
+            continue
         if "usage" in msg:
             input_tokens = _sum_counts(msg["usage"], *_ANTHROPIC_INPUT_COUNTS)
-            if input_tokens is None:
-                return None
-        model = msg.get("model")
+        model = msg.get("model", model)
+    if input_tokens is None:
+        return None
 
-    delta = _find_sse_event_data(lines, "message_delta", reverse=True)
+    deltas = _sse_event_data(lines, "message_delta")
+    delta = deltas[-1] if deltas else None
     if delta is None:
         return None
 
