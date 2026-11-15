@@ -1,4 +1,9 @@
 name: Create GitHub Release
+# Display only, but load-bearing: a workflow_run run otherwise reports head_branch
+# "main" and the bare workflow name, so nothing links it to its tag. The release
+# watchdog (release-watchdog.sh) finds this tag's runs by this exact title; the
+# contract test fails if the two drift. WOR-922.
+run-name: Create GitHub Release ${{ github.event.workflow_run.head_branch }} ${{ github.event.workflow_run.head_sha }}
 
 # Auto-creates the GitHub Release once ALL four publishers succeed for a signed
 # v* tag — replacing the manual `gh release create` step (and its unsigned-tag

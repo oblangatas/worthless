@@ -83,13 +83,21 @@ def _async_returns(value):
     return _f
 
 
-def _fake_orphan(i: int = 0):
+def _fake_orphan(env_dir: Path, i: int = 0):
+    """A purgeable orphan: its ``.env`` exists but no longer holds the key line.
+
+    The file must exist. Since WOR-935 a *missing* ``.env`` means a moved
+    project — reported, never purged — so a fake pointing at a made-up path is
+    no longer the orphan these confirm-prompt tests are about.
+    """
     from worthless.storage.repository import EnrollmentRecord
 
+    env = env_dir / f".env-{i}"
+    env.write_text("")
     return EnrollmentRecord(
         key_alias=f"openai-fake-{i}",
         var_name=f"OPENAI_API_KEY_{i}",
-        env_path=f"/tmp/.env-{i}",  # noqa: S108
+        env_path=str(env),
         provider="openai",
         decoy_hash=None,
     )
@@ -708,13 +716,15 @@ class TestDoctorConfirm:
         assert len(prompted) == 0, "typer.confirm must NOT be called when yes=True"
 
     def test_user_decline_returns_false_and_prints_cancelled(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When user answers 'n', returns False and console.print_hint is called."""
         monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
         console = self._make_console()
 
-        result = doctor_module._doctor_confirm([_fake_orphan()], [], yes=False, console=console)
+        result = doctor_module._doctor_confirm(
+            [_fake_orphan(tmp_path)], [], yes=False, console=console
+        )
 
         assert result is False
         console.print_hint.assert_called_once()
@@ -723,16 +733,18 @@ class TestDoctorConfirm:
             f"cancelled message must contain 'cancelled': {hint_text}"
         )
 
-    def test_orphans_only_prompt_mentions_delete(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_orphans_only_prompt_mentions_delete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Orphan-only prompt must mention 'delete' and the count."""
         prompts: list[str] = []
         monkeypatch.setattr(
             "typer.confirm",
-            lambda prompt, **k: (prompts.append(prompt) or False),
+            lambda prompt, **k: prompts.append(prompt) or False,
         )
         console = self._make_console()
 
-        doctor_module._doctor_confirm([_fake_orphan()], [], yes=False, console=console)
+        doctor_module._doctor_confirm([_fake_orphan(tmp_path)], [], yes=False, console=console)
 
         assert prompts, "confirm must have been called"
         prompt = prompts[0]
@@ -746,7 +758,7 @@ class TestDoctorConfirm:
         prompts: list[str] = []
         monkeypatch.setattr(
             "typer.confirm",
-            lambda prompt, **k: (prompts.append(prompt) or False),
+            lambda prompt, **k: prompts.append(prompt) or False,
         )
         console = self._make_console()
 
@@ -764,18 +776,18 @@ class TestDoctorConfirm:
             )
 
     def test_combined_prompt_mentions_both_orphan_and_migrate(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Combined orphan + synced prompt must mention both actions."""
         prompts: list[str] = []
         monkeypatch.setattr(
             "typer.confirm",
-            lambda prompt, **k: (prompts.append(prompt) or False),
+            lambda prompt, **k: prompts.append(prompt) or False,
         )
         console = self._make_console()
 
         doctor_module._doctor_confirm(
-            [_fake_orphan(), _fake_orphan(1)],
+            [_fake_orphan(tmp_path), _fake_orphan(tmp_path, 1)],
             ["fernet-key-X"],
             yes=False,
             console=console,
@@ -785,12 +797,16 @@ class TestDoctorConfirm:
         assert "delete" in prompt.lower()
         assert "migrate" in prompt.lower()
 
-    def test_user_accept_returns_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_user_accept_returns_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """When user answers 'y', returns True."""
         monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
         console = self._make_console()
 
-        result = doctor_module._doctor_confirm([_fake_orphan()], [], yes=False, console=console)
+        result = doctor_module._doctor_confirm(
+            [_fake_orphan(tmp_path)], [], yes=False, console=console
+        )
         assert result is True
 
 

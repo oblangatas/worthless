@@ -125,9 +125,16 @@ worthless service install    # writes ~/.config/systemd/user/worthless-proxy.ser
 worthless service status
 ```
 
-`install` runs `loginctl enable-linger` so the user unit survives
-logout on headless servers. Requires a readable Fernet key at
+`install` tries `loginctl enable-linger` so the user unit survives
+logout and starts at boot. Requires a readable Fernet key at
 `~/.worthless/fernet.key` (default on Linux without DBus).
+
+Over SSH, or anywhere without a local login, the system may refuse
+lingering. The service then still installs and runs while you're
+logged in, and `install` tells you the one command an administrator
+must run for it to start at boot: `sudo loginctl enable-linger <you>`.
+With no login session at all (for example `docker exec`), `install`
+stops and names that same command; use `worthless up` until then.
 
 ```bash
 worthless service stop

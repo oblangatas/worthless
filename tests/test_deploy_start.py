@@ -925,3 +925,32 @@ class TestShareFileOwnership:
         assert max(chown_indices) < spawn_idx, (
             f"WOR-310 C4: every chown must precede spawn_sidecar; got {events}"
         )
+
+
+class TestProxyLearnsTheSidecarUid:
+    """WOR-1078: the exec'd proxy must know which uid the sidecar runs as.
+
+    The proxy refuses a sidecar socket served by any other uid, so a wrong
+    value here is a container whose proxy never reaches its sidecar.
+    """
+
+    def test_the_proxy_expects_the_uid_spawn_sidecar_ran_the_sidecar_as(
+        self, deploy_start_module, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = deploy_start_module
+        TestShareFileOwnership()._wire_minimal_main(mod, monkeypatch)
+        monkeypatch.setattr(mod.os, "chown", lambda *_a, **_kw: None, raising=False)
+        monkeypatch.setattr(
+            mod,
+            "_resolve_service_uids",
+            lambda: ServiceUids(proxy_uid=10001, crypto_uid=10002, worthless_gid=10001),
+        )
+        monkeypatch.setattr(mod, "spawn_sidecar", lambda *_a, **_kw: MagicMock(sidecar_uid=10002))
+        # A stale value from the image or the operator's env must not survive.
+        monkeypatch.setenv("WORTHLESS_SIDECAR_UID", "4242")
+        env: dict[str, str] = {}
+        monkeypatch.setattr(mod.os, "execvp", lambda *_a: env.update(os.environ))
+
+        mod.main()
+
+        assert env.get("WORTHLESS_SIDECAR_UID") == "10002"

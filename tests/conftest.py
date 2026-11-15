@@ -20,7 +20,11 @@ from cryptography.fernet import Fernet
 from hypothesis import HealthCheck, settings
 
 
+from worthless._flags import WORTHLESS_SIDECAR_UID_ENV, ipc_mode_active
+from worthless.cli import console as _cli_console  # used by _isolate_cli_globals
+from worthless.cli import errors as _cli_errors  # used by _isolate_cli_globals
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
+from worthless.cli import sidecar_lifecycle  # used by _no_spinning_stderr_drainer autouse fixture
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.crypto import SplitResult
@@ -59,12 +63,22 @@ keyring.set_keyring(keyring.backends.null.Keyring())
 # ``monkeypatch.delenv("WORTHLESS_KEYRING_BACKEND")``.
 os.environ.setdefault("WORTHLESS_KEYRING_BACKEND", "null")
 
+# worthless-h4jf: timing is not a property under test. Hypothesis fails any
+# example over 200 ms by default, so on a busy machine a property that holds
+# fails anyway. Every profile below inherits deadline=None from this one; a
+# test that sets its own deadline keeps it.
+settings.register_profile("worthless", deadline=None)
+settings.load_profile("worthless")
+_base = settings.get_profile("worthless")
+
 # Suppress differing_executors health check ONLY when running under mutmut.
 # Mutmut runs tests from its mutants/ directory with a different rootdir,
 # which triggers this check spuriously.  In normal test runs, the check
 # remains active to catch real working-directory issues.
 if os.environ.get("MUTANT_UNDER_TEST"):
-    settings.register_profile("mutmut", suppress_health_check=[HealthCheck.differing_executors])
+    settings.register_profile(
+        "mutmut", parent=_base, suppress_health_check=[HealthCheck.differing_executors]
+    )
     settings.load_profile("mutmut")
 
 # CI profile: cap Hypothesis examples, derandomize for reproducibility,
@@ -72,6 +86,7 @@ if os.environ.get("MUTANT_UNDER_TEST"):
 # Activate with: HYPOTHESIS_PROFILE=ci
 settings.register_profile(
     "ci",
+    parent=_base,
     max_examples=50,
     derandomize=True,
     database=None,
@@ -81,6 +96,7 @@ settings.register_profile(
 # Activate with: HYPOTHESIS_PROFILE=extended
 settings.register_profile(
     "extended",
+    parent=_base,
     max_examples=500,
     database=None,
 )
@@ -101,6 +117,86 @@ def _isolate_fernet_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("WORTHLESS_FERNET_KEY_PATH", raising=False)
     monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
     monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_sidecar_uid_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test expecting a sidecar that runs as this process's uid.
+
+    ``deploy/start.py`` writes ``WORTHLESS_SIDECAR_UID`` straight into
+    ``os.environ`` for the proxy it execs, so one deploy test would otherwise
+    point every later IPC client on its worker at a foreign sidecar uid.
+    """
+    monkeypatch.delenv(WORTHLESS_SIDECAR_UID_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cli_globals() -> None:
+    """Start every test with the CLI's console and debug flag at their defaults.
+
+    ``--quiet``/``--json``/``--debug`` set process-globals; one test left
+    quiet or in debug mode changes the output of every later test on its
+    worker. Plain assignment, not ``monkeypatch``, so a test calling
+    ``monkeypatch.undo()`` can't hand the leaked value back mid-test.
+    """
+    _cli_console._console = None
+    _cli_errors.set_debug(False)
+
+
+@pytest.fixture(autouse=True)
+def _no_spinning_stderr_drainer(monkeypatch: pytest.MonkeyPatch):
+    """Fail a test whose fake stderr pipe would spin spawn_sidecar's drainer.
+
+    ``_collect_stderr`` reads until ``b""``; a MagicMock's ``read()`` returns a
+    falsy-length-but-truthy Mock, never ``b""``, so the daemon thread spins
+    forever and starves the xdist worker until an unrelated test hits the 30s
+    timeout (PR #593 crash). A post-test thread check is too late — the spin
+    stalls the test itself — so stop the drainer on the first non-bytes read
+    and fail at teardown. Real pipes and finite fakes (bytes, then ``b""``)
+    pass straight through.
+    """
+    bad_reads: list[object] = []
+    real = sidecar_lifecycle._collect_stderr
+
+    class _Pipe:
+        def __init__(self, pipe):
+            self._pipe = pipe
+
+        def read(self, n):
+            chunk = self._pipe.read(n)
+            if isinstance(chunk, bytes):
+                return chunk
+            bad_reads.append(chunk)
+            return b""
+
+    monkeypatch.setattr(
+        sidecar_lifecycle, "_collect_stderr", lambda pipe, buf: real(_Pipe(pipe), buf)
+    )
+    yield
+    if bad_reads:
+        pytest.fail(
+            f"fake stderr pipe returned {type(bad_reads[0]).__name__} from read(), not bytes; "
+            "spawn_sidecar's drainer would spin forever — set fake_proc.stderr = None"
+        )
+
+
+@pytest.fixture()
+def ipc_proxy_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run as the non-root proxy uid with ``WORTHLESS_FERNET_IPC_ONLY=1``.
+
+    ``ipc_mode_active()`` is flag-on AND euid != 0: root reads fernet.key
+    directly and never consults the sidecar. Tests that only set the flag
+    silently test the root bypass when the suite runs as root (Docker, some
+    CI) — bad-evidence rejection then "DID NOT RAISE" (worthless-x9z1).
+
+    Flag and uid are set together so "uid pinned, flag off" can't happen:
+    the patch is process-global (``worthless._flags.os`` IS ``os``), and with
+    the flag off a fake uid would feed keystore ownership checks. The root
+    side is pinned in tests/test_flags.py and test_bootstrap_ipc.py root tests.
+    """
+    monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+    monkeypatch.setattr("worthless._flags.os.geteuid", lambda: 1001)
+    assert ipc_mode_active(), "ipc_proxy_mode must put the process in IPC mode"
 
 
 def make_repo(home: WorthlessHome) -> ShardRepository:
@@ -137,13 +233,11 @@ def home_with_key(home_dir: WorthlessHome, tmp_path: Path) -> WorthlessHome:
     try:
         alias = "openai-a1b2c3d4"
 
-        # Write the SAME key into the fixture .env so the enrolled shard
-        # and the .env line agree. Using a fresh fake_openai_key() here would
-        # mismatch the enrolled value — fine today since is_orphan() only
-        # checks var-name presence, but fragile if a future check ever cares.
-        # CodeRabbit PR #131.
+        # A healthy lock leaves shard A in the .env, never the key. The key
+        # itself here is a lock cut off by kill -9, which status, scan and
+        # doctor now report (WOR-958). The line must exist for is_orphan().
         env_path = tmp_path / ".env"
-        env_path.write_text(f"OPENAI_API_KEY={key}\n")
+        env_path.write_text(f"OPENAI_API_KEY={sr.shard_a.hex()}\n")
 
         repo = make_repo(home_dir)
         asyncio.run(repo.initialize())

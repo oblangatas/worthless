@@ -26,6 +26,8 @@ class AnthropicAdapter:
         base_url: str,
     ) -> AdapterRequest:
         out_headers = strip_internal_headers(headers)
+        # WOR-979: a client may also send shard-A as Authorization; forward only ours.
+        out_headers.pop("authorization", None)
         out_headers["x-api-key"] = api_key.decode()
 
         if "anthropic-version" not in out_headers:

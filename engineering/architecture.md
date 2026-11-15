@@ -79,6 +79,16 @@ They own:
 
 It is not the core protection path, but it matters for trust boundaries because it can surface operational controls around the same underlying proxy/runtime state.
 
+### Service supervision boundary
+
+`worthless service install` installs a **user-scoped** background service: a systemd user unit on Linux (`~/.config/systemd/user/worthless-proxy.service`, `WantedBy=default.target`, managed with `systemctl --user` and `loginctl enable-linger` so it survives logout), and a per-user LaunchAgent on macOS. Never a system unit, never a LaunchDaemon (WOR-175).
+
+A system-scoped service was rejected because it needs root at install time, which is fatal for `curl worthless.sh | sh`. Root also has no session bus, so the keyring becomes unreachable and the Fernet key falls back to a file root can read. It inverts the blast radius too: a writable *user* unit executes as the user who already owns the keys, while a writable *system* unit is root escalation. Unit identity is the home path itself (`unit_file_matches_home` in `cli/commands/service/_common.py`), so switching scope would be a rewrite, not a flag.
+
+Not proven here: that linger actually delivers survives-logout or survives-reboot. Both are unverified, owned by WOR-725; true reboot behaviour is not provable in CI at all. Do not quote either as a user-facing guarantee.
+
+On WSL the default persona runs with systemd disabled, where no unit type of any kind works, and the proxy is started lazily by `worthless lock` instead. That is a systemd-detection problem (WOR-857), not a unit-type question — this boundary governs server and desktop Linux.
+
 ## Current implementation shape
 
 The current implementation is intentionally Python-first and local-first:

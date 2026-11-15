@@ -80,7 +80,6 @@ check_404 "/ARCHITECTURE.md"
 check_404 "/security-model.md"
 check_404 "/risk-key-material-in-python-memory.md"
 check_404 "/PROTOCOL.md"
-check_404 "/install-openclaw.md"
 check_404 "/news-feed.md"
 
 echo "Checking core public pages on ${BASE}"

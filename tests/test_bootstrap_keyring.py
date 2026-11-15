@@ -319,7 +319,7 @@ class TestFernetKeyMemoization:
         threads can both observe ``_cached_fernet_key is None`` and both
         call ``read_fernet_key``, firing duplicate macOS Keychain prompts
         and discarding one bytearray without ``zero_buf``. Real call site:
-        ``src/worthless/mcp/server.py`` runs FastMCP's asyncio loop on the
+        ``src/worthless/mcp/server.py`` runs MCPServer's asyncio loop on the
         main thread but dispatches blocking work (``_do_lock``) via
         ``loop.run_in_executor`` to the default thread pool — main +
         executor can both touch ``home.fernet_key``.
@@ -547,6 +547,8 @@ class TestStaleFernetFileCacheSeed:
         canonical = b"canonical-keyring-value-padded-to-44b!!"
         stale = b"stale-file-key-value-padded-to-44-bytes!!"
         (base / "fernet.key").write_bytes(stale + b"\n")
+        # Match the mode the product writes; 0644 is refused (worthless-6hu7).
+        (base / "fernet.key").chmod(0o600)
 
         with (
             patch("worthless.cli.bootstrap.keyring_available", return_value=True),

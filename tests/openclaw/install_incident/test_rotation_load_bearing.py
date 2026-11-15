@@ -33,7 +33,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests._docker_helpers import docker_available
+from tests._docker_helpers import docker_available, image_present
 from tests.helpers import fake_key
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -43,16 +43,12 @@ _MOCK_PORT = 9999
 _MODEL = "openai/gpt-4o"
 
 
-def _image_present(ref: str) -> bool:
-    return subprocess.run(["docker", "image", "inspect", ref], capture_output=True).returncode == 0
-
-
 pytestmark = [
     pytest.mark.openclaw,
     pytest.mark.docker,
     pytest.mark.skipif(not docker_available(), reason="Docker not available"),
     pytest.mark.skipif(
-        not _image_present(OC_WORTHLESS_IMAGE),
+        not image_present(OC_WORTHLESS_IMAGE),
         reason=f"{OC_WORTHLESS_IMAGE} not built (see module docstring)",
     ),
     pytest.mark.timeout(900),

@@ -54,6 +54,7 @@ def _stub_sidecar_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
             socket_path=socket_path,
             shares=shares,
             allowed_uid=allowed_uid,
+            sidecar_uid=allowed_uid,
             drain_timeout=5.0,
             stderr_buf=collections.deque(),
         )

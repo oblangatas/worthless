@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import subprocess  # noqa: S404
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -54,7 +55,8 @@ def test_header_documents_exit_integrity(install_text: str) -> None:
 
 def test_exit_internal_die_site_count(install_text: str) -> None:
     """A8 promises to flip ONLY the Astral SHA-mismatch die-site to
-    EXIT_INTEGRITY. The 5 other EXIT_INTERNAL sites (missing hash tool,
+    EXIT_INTEGRITY. The 7 other EXIT_INTERNAL sites (missing hash tool, unpinned uv after bootstrap,
+    installed worthless not the pinned version,
     uv-not-on-PATH after install, install crash branches, smoke-test
     failure) must stay at EXIT_INTERNAL — they're genuine transient
     failures where retry is sane. If a future refactor silently flips
@@ -62,10 +64,12 @@ def test_exit_internal_die_site_count(install_text: str) -> None:
     and "stop-50" rots and the exit-code contract is meaningless.
     """
     die_sites = re.findall(r'\bdie\s+"\$EXIT_INTERNAL"', install_text)
-    assert len(die_sites) == 5, (
-        f'install.sh must have exactly 5 `die "$EXIT_INTERNAL"` sites '
+    assert len(die_sites) == 7, (
+        f'install.sh must have exactly 7 `die "$EXIT_INTERNAL"` sites '
         f"after A8 (missing hash tool, uv-not-on-PATH, two install crash "
-        f"branches, smoke-test failure). Got {len(die_sites)}. "
+        f"branches, smoke-test failure, unpinned uv after bootstrap, installed "
+        f"worthless not the pinned version). "
+        f"Got {len(die_sites)}. "
         f"If you intentionally moved one to EXIT_INTEGRITY or EXIT_NETWORK, "
         f"update this count and document the boundary change."
     )
@@ -845,10 +849,10 @@ def test_install_smoke_uploads_terminal_artifacts() -> None:
     )
     assert "install-smoke-traces-${{ matrix.os }}-${{ github.run_id }}" in text, (
         "live matrix artifact names must use matrix.os, not runner.os, so "
-        "macos-14/macos-15 and ubuntu-22.04/ubuntu-24.04 uploads do not collide."
+        "ubuntu-22.04/ubuntu-24.04 uploads do not collide."
     )
     assert "install-smoke-traces-${{ runner.os }}-${{ github.run_id }}" not in text, (
-        "runner.os collapses macos-14/macos-15 and ubuntu-22.04/ubuntu-24.04 "
+        "runner.os collapses ubuntu-22.04/ubuntu-24.04 "
         "into duplicate artifact names under upload-artifact@v4."
     )
     assert "install-smoke-traces-proxy-${{ github.run_id }}" in text, (
@@ -1062,57 +1066,41 @@ class TestPathLockdownIsActuallyTested:
                 )
 
     def test_bootstrapped_uv_must_outrank_a_stale_system_uv(self) -> None:
-        """The one deliberate exception to the lockdown — do not "fix" it.
+        """The pinned uv we just bootstrapped must win over a stale system uv.
 
-        ``ensure_uv`` ends by prepending ``~/.local/bin`` and ``~/.cargo/bin``
-        AHEAD of the system dirs the lockdown installed. It is the only place in
-        install.sh that puts user-writable dirs first, and it reads like a bug.
-        It is load-bearing.
+        ``ensure_uv`` reaches its bootstrap only when uv was absent or at the
+        WRONG version, so a pre-existing ``/usr/bin/uv`` is by definition not the
+        one we pinned and SHA-verified. If it performed ``uv tool install`` the
+        version pin would be silently defeated.
 
-        We only reach that line when uv was absent or at the WRONG version, so a
-        pre-existing ``/usr/bin/uv`` is by definition not the one we just pinned
-        and SHA-verified. The lockdown's own ``~/.local/bin`` entry sits AFTER
-        the system dirs, so without the prepend the stale system uv wins
-        ``command -v`` and every subsequent ``uv tool install`` runs from it —
-        silently defeating the version pin ensure_uv exists to establish:
+        History: this used to be guaranteed by prepending ``~/.local/bin`` and
+        ``~/.cargo/bin`` AHEAD of /usr/bin after the bootstrap, so a bare ``uv``
+        resolved to the new one. worthless-52lm removed every bare ``uv`` — calls
+        go through ``"$UV"``, captured from ``resolve_uv`` — and the prepend then
+        did nothing but let planted ``awk``/``tr``/``mktemp`` in ~/.cargo/bin run
+        (7 hits in bare Debian; see
+        test_tools_planted_in_cargo_bin_never_run_during_a_fresh_install, which
+        also plants a stale /usr/local/bin/uv and proves it never installs).
 
-            PATH=/usr/bin:...:$HOME/.local/bin  -> resolves the SYSTEM uv
-            PATH=$HOME/.local/bin:...:/usr/bin  -> resolves the BOOTSTRAPPED uv
-
-        The accepted cost is that two user-writable dirs outrank /usr/bin for the
-        rest of the run. They are exactly where we just installed uv, and an
-        attacker able to write them could equally have poisoned the tool we are
-        about to execute. Nothing else moves; the lockdown still governs every
-        command before this point.
-
-        The rationale lives here rather than in install.sh because the served
-        script is held under a 24.5 KB injection-guard ceiling
-        (workers/worthless-sh/test/headers-and-integrity.test.ts) with 15 bytes of
-        slack (24485 of 24500; the assertion counts UTF-16 units, 24419). A
-        comment explaining this would not fit, and that ceiling is deliberately
-        not a ratchet.
+        The guarantee now lives in ``resolve_uv``'s search ORDER: uv's install
+        dirs first, via the HOME=/ guard, before any system dir. Pinned exactly.
         """
         text = INSTALL_SH.read_text()
-        start = text.index("    uvh=")
-        block = text[start : text.index("export PATH", start)]
-
-        # EXACT literal, not startswith/endswith. The loose form let three
-        # verified mutations through (security-engineer + brutus review of
-        # PR #573): an attacker dir injected mid-PATH, the HOME guard defeated
-        # for the second entry, and a reordered trusted set. Any of those keeps
-        # the prefix and suffix intact while changing what actually resolves.
-        expected = 'PATH="$uvh/.local/bin:$uvh/.cargo/bin:$PATH"'
-        path_line = next(ln for ln in block.splitlines() if ln.strip().startswith("PATH="))
-        assert path_line.strip() == expected, (
-            "ensure_uv's PATH line changed. It is load-bearing: uv's install dir "
-            "must lead, both entries must use the guarded $uvh (not bare $HOME), "
-            "nothing may be injected between them, and the inherited PATH must "
-            f"stay last.\n  expected: {expected}\n  got:      {path_line.strip()}"
+        body = text[text.index("resolve_uv() {") :]
+        body = body[: body.index("\n}\n")]
+        assert '_h="${HOME:-/root}"; [ "$_h" = / ] && _h=/root' in body, (
+            "resolve_uv's HOME guard is gone — HOME=/ or HOME= would yield '//.local/bin'"
         )
-        assert 'uvh="${HOME:-/root}"' in block, (
-            "the HOME guard is gone — HOME=/ or HOME= would yield '//.local/bin'"
+        loop = re.search(r"for d in ([^;]+);", body)
+        assert loop, "could not find resolve_uv's directory list"
+        expected = (
+            '"$_h/.local/bin" "$_h/.cargo/bin" /usr/bin /bin /usr/local/bin /opt/homebrew/bin'
         )
-        assert '[ "$uvh" = / ]' in block, "the HOME=/ guard is gone"
+        assert loop.group(1).strip() == expected, (
+            "resolve_uv's search order changed. uv's install dirs must lead, or a "
+            "stale system uv is captured into $UV after a bootstrap and performs "
+            f"the install.\n  expected: {expected}\n  got:      {loop.group(1).strip()}"
+        )
 
     def test_the_trusted_set_itself_is_pinned(self) -> None:
         """The set of trusted dirs, and their order, must not drift.
@@ -1141,7 +1129,10 @@ class TestPathLockdownIsActuallyTested:
         text = INSTALL_SH.read_text()
         block = text[text.index('if [ "${WORTHLESS_TRUST_PATH:-}" != "1" ]; then') :]
         line = next(ln for ln in block.splitlines() if ln.strip().startswith("PATH="))
-        expected = 'PATH="/usr/bin:/bin:/usr/local/bin:${home_for_path}/.local/bin:${PATH:-}"'
+        expected = (
+            'PATH="/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin:/opt/homebrew/bin:'
+            '${home_for_path}/.local/bin:${PATH:-}"'
+        )
         assert line.strip() == expected, (
             "the lockdown's trusted set changed. System dirs must lead and the "
             "inherited PATH must stay last; a user-writable dir moved ahead of "
@@ -1313,4 +1304,217 @@ class TestPlantedBinariesCannotWin:
             "an early exit rm -rf's an inherited value under that name.\n"
             f"  cleanup uses: {sorted(used)}\n  init owns:    {sorted(owned)}\n"
             f"  unowned:      {sorted(used - owned)}"
+        )
+
+
+def test_children_inherit_a_path_that_prefers_every_trusted_dir() -> None:
+    """worthless-2qfm: what install.sh trusts, the programs it launches must too.
+
+    ``trusted_tool`` searches a fixed list of directories so install.sh's OWN
+    lookups ignore anything planted on the caller's PATH. But install.sh then runs
+    other programs — Astral's uv installer above all — and those inherit PATH,
+    which the lockdown builds from a DIFFERENT, shorter list.
+
+    On macOS ``sha256sum`` exists only in /sbin. ``trusted_tool`` searches /sbin,
+    so install.sh's own hash check was safe. The lockdown did not prepend /sbin, so
+    when Astral's installer looked up ``sha256sum`` to verify the uv tarball, it
+    fell through to the caller's PATH and a planted one executed. Observed on a
+    real Mac, no escape hatch::
+
+        planted sha256sum invoked
+        args:   -b .../input.tar.gz
+        parent: sh .../uv-installer.sh
+
+    Spies on all 297 sbin-only tools during a real install showed sha256sum was
+    the only one reached — but the rule below closes the whole class rather than
+    that one name: any directory install.sh trusts must also sit in the lockdown's
+    prefix, ahead of the caller's PATH.
+    """
+    text = INSTALL_SH.read_text()
+
+    tt = text[text.index("trusted_tool() {") :]
+    tt = tt[: tt.index("\n}\n")]
+    loop = re.search(r"for d in ([^;]+);", tt)
+    assert loop, "could not find trusted_tool's directory list"
+    trusted = loop.group(1).split()
+
+    lock = re.search(r'^\s*PATH="([^"]*)\$\{PATH:-\}"', text, re.MULTILINE)
+    assert lock, "could not find the PATH lockdown literal"
+    prefix = [d for d in lock.group(1).split(":") if d]
+
+    missing = [d for d in trusted if d not in prefix]
+    assert not missing, (
+        "install.sh trusts these directories for its own lookups but does not put "
+        "them in the PATH it hands to child processes, so a launched program (e.g. "
+        f"Astral's uv installer) can be fooled where install.sh was not: {missing}\n"
+        f"  trusted_tool: {trusted}\n  lockdown:     {prefix}"
+    )
+
+
+def test_no_path_assignment_puts_a_user_dir_ahead_of_the_system_dirs() -> None:
+    """worthless-52lm follow-up: after bootstrapping uv, install.sh used to run
+    ``PATH="$uvh/.local/bin:$uvh/.cargo/bin:$PATH"`` — ahead of /usr/bin. Every
+    later bare ``awk``/``tr``/``mktemp``/``head``/``basename`` then resolved to a
+    planted copy in ~/.cargo/bin. Observed in bare Debian: 7 spy hits before,
+    0 after removing the line (uv is called by absolute path, nothing needs it).
+
+    Only two kinds of PATH assignment are allowed: the lockdown (system dirs
+    first) and ``command_in_original_path``'s save/restore swap.
+    """
+    allowed = {
+        'PATH="/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin:/opt/homebrew/bin:'
+        '${home_for_path}/.local/bin:${PATH:-}"',
+        'PATH="$ORIGINAL_PATH"',
+        'PATH="$current_path"',
+    }
+    found = [ln.strip() for ln in INSTALL_SH.read_text().splitlines() if re.match(r"\s*PATH=", ln)]
+    unexpected = [a for a in found if a not in allowed]
+    assert not unexpected, (
+        "a new PATH assignment in install.sh — anything placing a user-writable dir "
+        f"ahead of /usr/bin lets planted tools run during install: {unexpected}"
+    )
+
+
+def test_pipx_list_never_sees_the_callers_path() -> None:
+    """worthless-52lm: pipx >=1.7 runs ``uv --version`` through PATH on ``pipx list``.
+
+    The conflict check ran it under the lockdown PATH, whose tail is still the
+    caller's PATH, so a planted uv executed (caught on ubuntu CI runners with a
+    modern pipx; reproduced with pipx 1.17.2). A runtime test can't see this on a
+    host whose trusted dirs already hold pipx or uv (Homebrew answers first), so
+    the trim itself is pinned here.
+    """
+    lines = [ln.strip() for ln in INSTALL_SH.read_text().splitlines() if "pipx list" in ln]
+    calls = [ln for ln in lines if not ln.startswith("#") and "|" in ln]
+    assert calls, "could not find install.sh's `pipx list` call"
+    for ln in calls:
+        assert ln.startswith('if PATH="${PATH%":$ORIGINAL_PATH"}" pipx list'), (
+            f"`pipx list` must run with the caller's PATH trimmed off: {ln}"
+        )
+
+
+class TestWslDetectionActuallyRuns:
+    """worthless-oi9b: the WSL branch had never been executed by anything.
+
+    ``detect_linux_subenv`` is the code path for this project's stated primary
+    user — a Windows developer working in WSL. Its only coverage was
+    ``test_wsl_allowed_not_rejected``, which greps the function body for the word
+    "microsoft". That pins the shape, not the behaviour: reverse the condition,
+    drop the ``/mnt`` case, or change the warning to a ``die``, and the grep is
+    still satisfied.
+
+    Nothing else reaches it either. The seven-distro Docker matrix runs real Linux
+    images whose ``/proc/version`` reads "Debian", so the branch is skipped in
+    every one. Bind-mounting a fake over ``/proc/version`` is not an option —
+    runc refuses any mount inside ``/proc`` ("cannot be mounted because it is
+    inside /proc"), verified.
+
+    So the function is extracted from install.sh and run for real with the one
+    absolute path substituted — the same approach the PATH-lockdown tests use, and
+    for the same reason: the path is baked in, so it cannot be reached by stubbing
+    PATH. Everything else about the function is genuinely executed.
+    """
+
+    def _run(
+        self,
+        install_text: str,
+        *,
+        proc_contents: str | None,
+        cwd: Path,
+        reported_cwd: str | None = None,
+    ) -> str:
+        """Run the real detect_linux_subenv with /proc/version substituted.
+
+        ``reported_cwd`` shadows the ``pwd`` builtin with a shell function, which is
+        what ``case "$(pwd)" in /mnt/*)`` actually consults. Creating a real
+        /mnt path needs root, so the earlier version of the /mnt test skipped
+        everywhere — including CI — while reading as coverage (karen on #589).
+        """
+        body = _extract_shell_function(install_text, "detect_linux_subenv")
+        with tempfile.TemporaryDirectory() as td:
+            proc = Path(td) / "version"
+            if proc_contents is not None:
+                proc.write_text(proc_contents)
+            script = (
+                (f"pwd() {{ printf '%s\\n' '{reported_cwd}'; }}\n" if reported_cwd else "")
+                + "warn() { printf 'WARN: %s\\n' \"$1\" >&2; }\n"
+                "IS_WSL=''\n"
+                f"detect_linux_subenv() {{{body.replace('/proc/version', str(proc))}}}\n"
+                "detect_linux_subenv\n"
+                'printf "IS_WSL=%s\\n" "${IS_WSL:-}"\n'
+            )
+            out = subprocess.run(  # noqa: S603
+                ["/bin/sh", "-c", script],
+                capture_output=True,
+                text=True,
+                cwd=str(cwd),
+                check=False,
+            )
+            return out.stdout + out.stderr
+
+    def test_wsl_on_a_windows_mounted_path_warns_about_speed(
+        self, install_text: str, tmp_path: Path
+    ) -> None:
+        """The case that exists to be helpful: WSL + /mnt = slow, say so."""
+        out = self._run(
+            install_text,
+            proc_contents="Linux version 5.15-microsoft-standard-WSL2\n",
+            cwd=tmp_path,
+            reported_cwd="/mnt/c/proj",
+        )
+        assert "IS_WSL=1" in out, f"WSL was not detected from /proc/version:\n{out}"
+        assert "WARN" in out and "slow" in out.lower(), (
+            f"a WSL user under /mnt got no warning that uv will be slow there:\n{out}"
+        )
+
+    def test_wsl_from_the_linux_home_is_silent(self, install_text: str, tmp_path: Path) -> None:
+        """WSL is fully supported — detected, but no nagging outside /mnt."""
+        out = self._run(
+            install_text,
+            proc_contents="Linux version 5.15-microsoft-standard-WSL2\n",
+            cwd=tmp_path,
+        )
+        assert "IS_WSL=1" in out, f"WSL not detected:\n{out}"
+        assert "WARN" not in out, (
+            f"a WSL user in their Linux home was warned anyway — the /mnt case is "
+            f"the only one that should warn:\n{out}"
+        )
+
+    @pytest.mark.parametrize(
+        "proc_line",
+        [
+            # WSL2 reports lowercase; WSL1 capitalises it. Both are real kernel
+            # strings, which is why the grep is `-i`. A mutation dropping the -i
+            # survived until this case existed.
+            "Linux version 5.15.90.1-microsoft-standard-WSL2 (oe-user@oe-host)\n",
+            "Linux version 4.4.0-19041-Microsoft (Microsoft@Microsoft.com)\n",
+        ],
+        ids=["wsl2-lowercase", "wsl1-capitalised"],
+    )
+    def test_both_real_wsl_kernel_spellings_are_detected(
+        self, install_text: str, tmp_path: Path, proc_line: str
+    ) -> None:
+        """WSL1 and WSL2 spell it differently — the case-insensitive grep matters."""
+        out = self._run(install_text, proc_contents=proc_line, cwd=tmp_path)
+        assert "IS_WSL=1" in out, (
+            f"this kernel string was not recognised as WSL:\n  {proc_line.strip()}\n{out}"
+        )
+
+    def test_ordinary_linux_is_not_flagged_as_wsl(self, install_text: str, tmp_path: Path) -> None:
+        """A real Linux box must not take the WSL branch."""
+        out = self._run(
+            install_text,
+            proc_contents="Linux version 6.1.0-13-amd64 (debian-kernel@lists.debian.org)\n",
+            cwd=tmp_path,
+        )
+        assert "IS_WSL=" in out and "IS_WSL=1" not in out, (
+            f"ordinary Linux was misdetected as WSL:\n{out}"
+        )
+        assert "WARN" not in out, f"unexpected warning on ordinary Linux:\n{out}"
+
+    def test_a_missing_proc_version_is_handled(self, install_text: str, tmp_path: Path) -> None:
+        """macOS and any kernel without /proc must not error under `set -eu`."""
+        out = self._run(install_text, proc_contents=None, cwd=tmp_path)
+        assert "IS_WSL=" in out and "IS_WSL=1" not in out, (
+            f"no /proc/version should mean 'not WSL', quietly:\n{out}"
         )

@@ -24,7 +24,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tests._install_helpers import run_install, write_happy_path_stubs, write_stub  # noqa: E402
+from tests._install_helpers import (  # noqa: E402
+    read_install_pin,
+    run_install,
+    write_happy_path_stubs,
+    write_stub,
+)
 
 
 TRACE_ROOT = Path(tempfile.gettempdir()) / "worthless-terminal-traces"
@@ -181,6 +186,15 @@ esac""",
             entry.parent.mkdir(parents=True, exist_ok=True)
             entry.write_text("#!/bin/sh\necho 'worthless 0.3.0'\n")
             entry.chmod(0o755)
+            # WOR-597: write_happy_path_stubs also drops a `worthless` in bin_dir
+            # so PATH resolves one. With the entry point above, that is two
+            # DIFFERENT files -- which is precisely a shadowed install, and the
+            # installer now says so. A real reinstall is not shadowed: what PATH
+            # finds IS the uv entry point. Point the PATH copy at it so this
+            # journey describes a healthy machine rather than a broken one.
+            path_copy = bin_dir / "worthless"
+            path_copy.unlink(missing_ok=True)
+            path_copy.symlink_to(entry)
             result = run_install(bin_dir, env_extra={"WORTHLESS_VERSION": "0.3.0"})
             command = ["WORTHLESS_VERSION=0.3.0", "sh", "./install.sh"]
         elif name == "pipx conflict shows uninstall guidance":
@@ -221,6 +235,54 @@ exit 0""",
   *) echo "uv: unhandled: $*" >&2; exit 1 ;;
 esac""",
             )
+            result = run_install(bin_dir)
+            command = ["sh", "./install.sh"]
+        elif name == "stale worthless on PATH":
+            # An older copy sitting ahead of the fresh install on PATH. The
+            # installer used to announce "Done! 'worthless' is on your PATH."
+            # here — true of the shadow, false of what it just installed — and
+            # then hand over `worthless lock`, which ran the wrong binary
+            # (WOR-597). This trace is the record of what the user now sees
+            # instead. The stub deliberately reports a LOWER version than the
+            # install so the transcript reads unambiguously.
+            write_happy_path_stubs(bin_dir, with_worthless=False)
+            write_stub(bin_dir, "worthless", 'echo "worthless 0.1.0"')
+            entry_point = bin_dir.parent / ".local" / "bin"
+            entry_point.mkdir(parents=True, exist_ok=True)
+            write_stub(entry_point, "worthless", f'echo "worthless {read_install_pin()}"')
+            result = run_install(bin_dir)
+            command = ["sh", "./install.sh"]
+        elif name == "upgrade older uv tool install":
+            # `uv tool list` already reports worthless, so install.sh must take
+            # the upgrade path rather than a fresh install. The uv stub fails
+            # loudly on `upgrade` being skipped, so a regression that silently
+            # reinstalls shows up in the transcript rather than passing quietly.
+            write_happy_path_stubs(bin_dir)
+            write_stub(
+                bin_dir,
+                "uv",
+                """case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) shift; case "$1" in
+    list) echo "worthless v0.2.0" ;;
+    install) echo "installed $3" ;;
+    upgrade) echo "upgraded $3" ;;
+    dir) echo "${UV_TOOL_BIN_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}" ;;
+    *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
+  esac ;;
+  run) echo "worthless 0.3.0" ;;
+  *) echo "uv: unhandled: $*" >&2; exit 1 ;;
+esac""",
+            )
+            # Like real uv, the upgraded entry point lives in uv's tool bin dir;
+            # smoke_test runs it from there, never from PATH (worthless-alx3).
+            entry_point = bin_dir.parent / ".local" / "bin"
+            entry_point.mkdir(parents=True, exist_ok=True)
+            write_stub(entry_point, "worthless", f'echo "worthless {read_install_pin()}"')
+            # A healthy upgrade: the `worthless` on PATH IS that entry point,
+            # not a second copy (which install.sh would report as a shadow).
+            (bin_dir / "worthless").unlink()
+            (bin_dir / "worthless").symlink_to(entry_point / "worthless")
             result = run_install(bin_dir)
             command = ["sh", "./install.sh"]
         elif name == "manual uninstall current limitation":
@@ -343,7 +405,9 @@ def build_install_lifecycle() -> Journey:
         title="Install, Reinstall, Manual Uninstall Guidance",
         summary=(
             "The installer succeeds with and without persistent PATH setup, re-running a "
-            "pinned install is a no-op, failure paths keep actionable diagnostics visible, "
+            "pinned install is a no-op, an older copy shadowing the install is named "
+            "rather than silently overridden, failure paths keep actionable diagnostics "
+            "visible, "
             "and uninstall is currently documented as the manual `uv tool uninstall worthless` "
             "command plus platform cleanup notes until WOR-435 ships a first-class command."
         ),
@@ -351,6 +415,8 @@ def build_install_lifecycle() -> Journey:
     runner.run_install_case("fresh install with persistent PATH")
     runner.run_install_case("fresh install without persistent PATH")
     runner.run_install_case("reinstall pinned version already installed")
+    runner.run_install_case("stale worthless on PATH")
+    runner.run_install_case("upgrade older uv tool install")
     runner.run_install_case(
         "pipx conflict shows uninstall guidance",
         expect_exit=lambda code: code == 30,

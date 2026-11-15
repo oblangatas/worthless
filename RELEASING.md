@@ -5,24 +5,127 @@ because that sentence was not enforced, and the same bug shipped twice.
 
 ## Cut a release
 
-```
-./scripts/bump-version.sh <version>      # bump, commit, PR
-#   ... merge the PR to main ...
-./scripts/tag-release.sh <version> "<headline>"
-```
+> **Never create the GitHub Release by hand** — not in the GitHub UI, not with `gh release create`.
+> The automation creates it. A hand-made Release makes the automation skip, and can bless a release
+> whose publisher failed. Creating one *before* the tag is pushed is worse: GitHub mints an unsigned
+> tag and permanently burns the version name. `v0.3.8` was lost that way and shipped as `v0.3.8.0`.
 
-`tag-release.sh` runs eight preflight checks, signs the tag with OpenPGP using an explicit
-per-invocation `gpg.format` override, verifies it locally, pushes it, and then prints the
-`gh release create` command to run **after** CI is green.
+1. **Bump the version on a branch** — commits to `main` are blocked.
+   ```
+   git switch -c chore/release-v<version> origin/main
+   ./scripts/bump-version.sh <version>
+   ```
+   It updates the version everywhere and prints the remaining steps. Write the `## [<version>]`
+   section of `CHANGELOG.md` it asks for: the Release notes come from it, and without it GitHub's
+   auto-generated notes are used instead, with no warning. Commit, push, open a PR, merge it.
 
-**Never run `gh release create` before the tag is pushed.** It creates the git tag itself,
-unsigned, and permanently tombstones the name on GitHub — the name cannot be reused even
-after deleting both the release and the tag. `v0.3.8` was burned this way and shipped as
-`v0.3.8.0`.
+2. **Tag it — in the checkout that has `main`, on the maintainer's machine.** The signing key never
+   leaves that machine. If `git switch main` fails, `main` is checked out in another folder
+   (`git worktree list`); run this there.
+   ```
+   git switch main && git pull --ff-only && ./scripts/tag-release.sh <version> "<headline>"
+   ```
+   `tag-release.sh` runs eight preflight checks, signs the tag with OpenPGP using an explicit
+   per-invocation `gpg.format` override, verifies it locally, and pushes it. That starts the four
+   publishers, and the script prints the exact commit to check before approving.
+
+   A fix that merges between step 1 and this tag ships in this tag, so its note goes in the new
+   version's section. After the tag, notes go in `[Unreleased]`: the `Changelog placement` check
+   fails lines added under a tagged version, unless the PR has the `changelog-released-edit` label.
+
+3. **Approve three publishers.** In Actions, open each waiting run → **Review deployments**:
+
+   | Run in Actions | Environment |
+   | --- | --- |
+   | Publish to PyPI | `pypi` |
+   | Publish worthless-mcp to npm | `npm-publish` |
+   | Deploy Worker (worthless-sh) | `worthless-sh-production` |
+
+   **Before each of these approvals, check the run shows your tag, at the commit
+   `git rev-parse --short v<version>^{commit}` prints.** Reject anything else, including re-runs of
+   older tags you didn't start yourself (a rollback, say). A green signature step does not prove the run is yours — see
+   [What a signed tag does NOT stop](#what-a-signed-tag-does-not-stop). The GHCR image
+   (Publish Docker image to GHCR) publishes without an approval.
+
+4. **Approve the Release.** Once all four publishers are green, **Create GitHub Release** waits on
+   the `release` environment. Its run shows `main`, not your tag — expected, because it runs from
+   `main`. Check its **gate** job instead: the log must show `TAG: v<version>` and a `HEAD_SHA`
+   starting with that same commit. Then approve. It re-binds the tag to that commit, re-verifies the
+   signature, and creates the Release.
+
+> **First proven on v0.3.13 (2026-10-13).** The Release step ran once per finished publisher and
+> skipped while any was still pending. After all four were green it waited for the `release`
+> approval, re-verified the tag, and created the Release from the CHANGELOG section. Still check the
+> Releases page after each release: one real run proves the path works, not that it always will.
+
+### If something fails
+
+- **A publisher failed for a reason outside the tagged code** — a token, a setting, a flaky runner.
+  Fix that, then open that run → **Re-run failed jobs**. It asks for approval again. Never use
+  **Run workflow**: a manual dispatch is a different event, and the Release step will not count it.
+- **The code itself must change** — a CVE, a bug. A re-run replays the tagged commit, so it cannot
+  pick up a fix. If neither PyPI nor npm has published this version yet, follow [Recovery](#recovery).
+  If either has — neither ever accepts the same version twice — release a new version instead.
+  Never move or delete a tag that shipped.
+
+### No Release appeared
+
+1. Open Actions → **Create GitHub Release**. Its runs all show `main`; open the latest one whose
+   **gate** job log shows `TAG: v<version>`.
+   - Failed at **Re-verify the tag GPG signature**? Stop: that tag is not yours. Create nothing.
+   - Red for another reason? Read its warning, fix that, and re-run it. Don't create a draft.
+2. Only if there is no such run at all, with every publisher green and nothing waiting for approval,
+   did the automation genuinely not fire. Then create a draft, and find out why before publishing it:
+   ```
+   gh release create v<version> --draft --title "v<version>: <headline>" --verify-tag --generate-notes
+   ```
+
+**You are told about this.** `release-watchdog.yml` checks every tag from the last 14 days, every
+6 hours, and opens ONE issue assigned to the maintainer (label `release-watchdog`) when a tag has no
+Release: after 24h if a publisher failed, never finished, or the automation never ran, and after 72h
+if a run is still waiting for approval — naming the commit to check before approving, or the stale
+approval to reject after a re-tag. It stays quiet during the normal approval pause. A draft does not
+silence it; only the automation's **Create the GitHub Release** step succeeding does. Closing an
+issue silences that commit only; a re-tag that is still unreleased reopens it (WOR-922).
+
+**The watchdog finds a tag's release runs by their title (WOR-922, `worthless-d2q6`).** On v0.3.13
+the title rendered for real as `Create GitHub Release v0.3.13 67eeeabf…`. The watchdog itself had
+not judged that tag yet when this was written: it skips any tag younger than 24 hours, and its only
+run since then logged "too early to judge". So the title lookup is still unproven end to end, and
+the 72-hour "still waiting" path was not exercised either (the approval wait was 11 minutes). If a
+run ever shows the bare workflow name instead, disable **Release watchdog** in Actions and reopen
+WOR-922: every tag would read as "the automation never ran" and it would file a false alarm a day
+later.
+
+**What the watchdog does NOT catch.** A watchdog that never runs — GitHub starts cron jobs up to
+about a day late and disables them after 60 days without repo activity, and nothing alarms on that.
+A tag is timed from its signing date, so one pushed more than 14 days after signing is never
+watched. Removing the `release-watchdog` label from an open alarm makes the next check file a
+duplicate. It reports a missing Release; it does not check that an existing Release is correct, or
+notice one deleted afterwards.
 
 > **"Preflight check", not "gate".** In this repo `release gate` means a product go/no-go
 > item — see `engineering/release-gates.md`. The automated checks inside `tag-release.sh`
 > are preflight checks. Keep the two words apart.
+
+## What a signed tag does NOT stop
+
+A signed tag proves the maintainer's key signed it. It does not stop someone holding the
+maintainer's GitHub access — a stolen token, or an automation acting as the maintainer — from
+publishing without that key:
+
+- **Editing what does the checking.** Each publisher runs the copy of `verify-tag.sh`, and of its
+  own workflow file, from inside the tagged commit. A tag pointing at a commit that changes them
+  skips the check.
+- **Swapping the trusted key.** The fingerprint and public key the check trusts are two repository
+  Variables (`MAINTAINER_GPG_FINGERPRINT`, `MAINTAINER_GPG_PUBKEY`). Changing them needs no commit.
+- **Replaying an old release.** Re-running an old signed tag's publish run redeploys that old code,
+  and moves the GHCR `:latest` image back with no approval.
+
+What still stands in the way: PyPI, npm and the Worker publish through environments that need the
+maintainer's approval, and removing the environment from a workflow also removes access to that
+registry's credentials. But a token with enough access can give the approval too, and the GHCR
+image has no approval at all. Moving the check onto code a tag cannot change is WOR-928.
 
 ## The tag guard
 
@@ -62,7 +165,8 @@ So the hook does a plain text check on the tag object and never invokes gpg.
 
 ### Recovery
 
-A failed cut is recovered by deleting the tag and re-running the script:
+A cut that failed before PyPI or npm published the version is recovered by deleting the tag and
+re-running the script. If either already has it, release a new version instead:
 
 ```
 git tag -d v0.4.0 && git push --delete origin v0.4.0
@@ -91,9 +195,10 @@ The override is honored by the hook and **logged** to
 - **A tag whose message contains a correctly-formatted PGP armor line.** The check is
   textual.
 - **Contributors, CI, and any clone that never ran the installer.**
-- **Wrong-key, wrong-commit, or wrong-name tags.** Only `.github/scripts/verify-tag.sh`
-  decides what actually ships. It is fingerprint-pinned, fail-closed, and enforced on all
-  four publishers by `tests/test_tag_publishers_gated.py`.
+- **Wrong-key, wrong-commit, or wrong-name tags.** `.github/scripts/verify-tag.sh` is the
+  check for those. It is fingerprint-pinned, fail-closed, and enforced on all four publishers
+  by `tests/test_tag_publishers_gated.py` — within the limits in
+  [What a signed tag does NOT stop](#what-a-signed-tag-does-not-stop).
 
 ## Placements that do not work
 

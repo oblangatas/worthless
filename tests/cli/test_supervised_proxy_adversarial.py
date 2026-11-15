@@ -381,3 +381,25 @@ class TestDefaultCommandStress:
             assert port == 8787
 
         assert spawn_count == 0
+
+
+def test_default_command_says_which_proxy_settings_the_proxy_ignores(
+    home: WorthlessHome, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bare ``worthless`` starts the proxy in the background, so the proxy's own
+    warning lands in proxy.log; the terminal gets it too (WOR-1071). Names only."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp-user:hunter2@egress.corp.example:3128")
+    monkeypatch.delenv("WORTHLESS_UPSTREAM_PROXY", raising=False)
+    console = MagicMock()
+    stopped = ProxyRuntimeState(running=False, pid=None, port=8787, source="none")
+    with (
+        patch("worthless.cli.default_command.detect_proxy_runtime", return_value=stopped),
+        patch("worthless.cli.default_command._raise_if_service_requires_start"),
+        patch("worthless.cli.default_command.start_supervised_proxy"),
+        patch("worthless.cli.default_command.poll_health", return_value=True),
+    ):
+        _ensure_proxy_running(home, console)
+
+    warned = " ".join(str(c.args[0]) for c in console.print_warning.call_args_list)
+    assert "HTTPS_PROXY" in warned and "WORTHLESS_UPSTREAM_PROXY" in warned
+    assert "hunter2" not in warned and "egress.corp.example" not in warned

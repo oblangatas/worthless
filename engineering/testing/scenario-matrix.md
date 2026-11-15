@@ -11,7 +11,7 @@
 | SQLite DB | `~/.worthless/worthless.db` | shards table (shard_b_enc, commitment, nonce), enrollments table (alias->var_name->env_path) |
 | Fernet key | `~/.worthless/fernet.key` | Encrypts shard_b at rest in SQLite |
 | .env files | project dirs | Rewritten with decoys after lock |
-| Lock file | `~/.worthless/.lock-in-progress` | Mutual exclusion for lock command (5min stale timeout) |
+| Lock file | `~/.worthless/.lock-in-progress` | Mutual exclusion for writing commands. Held under `flock`: a lock left by a killed holder is reclaimed at once; a live holder is never stolen. Empty legacy file: 5min stale timeout (WOR-962) |
 | PID file | `~/.worthless/proxy.pid` | Tracks daemon proxy (pid\nport format) |
 
 ## Consistency Invariants
@@ -310,6 +310,38 @@ These must always hold. Any scenario that breaks them is a bug:
 - **Risk**: MEDIUM
 - **Test status**: Partial (provider gating in lock prevents this for lock flow, but direct enroll bypasses)
 
+#### U-37: User unlocks a key whose var is not named after its protocol (`OPENROUTER_API_KEY`, `GROQ_API_KEY`)
+
+- **Precondition**: Lock wrote `OPENROUTER_BASE_URL` for `OPENROUTER_API_KEY`; the DB stores the wire protocol (`openai`)
+- **Expected**: Unlock removes exactly the `*_BASE_URL` line lock wrote for that key; the `.env` is byte-identical to before lock. A still-locked key's line (e.g. `OPENAI_BASE_URL`) and a user's own line under `--keys-only` are kept. A line the user had before lock gets its value back (U-38).
+- **Current behavior**: FIXED -- unlock looked up `OPENAI_BASE_URL` from the protocol, so the OpenRouter proxy line survived and a partial unlock deleted the OpenAI key's line. Unlock now derives the name as lock does and drops a line only while it routes the alias being unlocked.
+- **Risk**: HIGH (was broken, now fixed)
+- **Test status**: Tested (TestUnlockRemovesTheBaseUrlLockWrote)
+
+#### U-38: User locks a `.env` that already sets the `*_BASE_URL` line lock writes
+
+- **Precondition**: `.env` has `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1` next to `OPENROUTER_API_KEY`, or a registered gateway in `OPENAI_BASE_URL` next to `OPENAI_API_KEY`
+- **Expected**: Lock records on each key's enrollment the line it writes and the value it replaces, as written (`${GATEWAY}/v1` is not expanded), MAC-tagged with the Fernet-derived key. Unlock and uninstall put that value back while the line still routes that key's alias; the `.env` is byte-identical to before lock. A line lock added is removed. Enrollments from before WOR-1013 (no record) get `shards.base_url` written back only when it is registered, public https and `$`-free, not an Anthropic-protocol address, the line isn't `ANTHROPIC_BASE_URL`, no other key in the `.env` reads the line, the address's protocol matches a protocol-named line, and (for a bundled address) it is the registry entry of the vendor the key's own prefix names and not OpenAI; a record that fails its MAC check (bound to its row and the lock's shard-A: a record from an earlier lock with a fresh split fails, but one from a re-lock that re-derived the same shard-A still verifies, WOR-1023) always removes; otherwise U-37's removal; unlock says which, even under `--quiet` (WOR-1042). Every row of the key a line routes carries the record (one key under two vars). A value the rewriter can't write back, or one holding a key (typed in or expanded), is not saved (lock warns, even under `--quiet`), and the record marks it unsaved, so unlock removes the line and says so (WOR-1042; a record without the mark reads as a line lock added); a value referring to another rewritten line (`${OPENAI_BASE_URL}`, directly or through another variable) is saved as its value at lock; unlock judges a line as written, so a user's `${...}` line that only expands to a proxy URL is never touched; lock aborts if the `.env` changed since it validated it, or if a record row vanished (WOR-1017).
+- **Current behavior**: FIXED (WOR-1013) -- lock overwrote the value without keeping it and unlock then deleted the line, so an app reading `OPENROUTER_BASE_URL` with no default sent the OpenRouter key to `api.openai.com`.
+- **Risk**: HIGH (was broken, now fixed)
+- **Test status**: Tested (TestUnlockPutsBackTheBaseUrlYouHad, `tests/test_e2e.py::TestQuietUnlockStillSaysWhatItDidToYourLine`, `tests/dotenv_rewriter/test_read_env_snapshot.py`, the `base_url_restore` tests in `tests/test_storage.py`)
+
+#### U-39: User locks a `.env` whose `*_BASE_URL` line has no `=`
+
+- **Precondition**: `.env` has a bare `OPENROUTER_BASE_URL` (or `export OPENROUTER_BASE_URL`) line, before or after `OPENROUTER_API_KEY`, or a quoted `'OPENROUTER_BASE_URL'=...` line
+- **Expected**: Lock leaves that line, appends its proxy line (stderr says the line "had no value", or that lock "can't edit the line you have for it"), and records that it added the line; unlock removes only that line, so the `.env` is byte-identical to before lock. A slot counts as present only with a `NAME=...` line the rewriter parses (`EnvSnapshot.assigned`). After the write, lock re-reads the `.env` as python-dotenv does and warns for each line it wrote that doesn't read back as its proxy URL: a value line followed by a bare or quoted line for the same name, or a line inside another variable's multi-line quoted value (lock exits 0; WOR-1045 tracks refusing).
+- **Current behavior**: FIXED (WOR-1041) -- python-dotenv parsed the bare or quoted name as present, so lock asked the rewriter to update a line it couldn't find and exited 1 with WRTLS-199, leaving the `.env` and DB unchanged.
+- **Risk**: LOW (was broken, now fixed)
+- **Test status**: Tested (TestLockBareBaseUrlLine, including the two documented limits; TestLockSaysWhatItAdded; `tests/test_e2e.py::TestBareBaseUrlLineStillRoutesTheKey`)
+
+#### U-40: User locks a `.env` that holds a second copy of a key on a line lock can't edit
+
+- **Precondition**: `.env` has `OPENROUTER_API_KEY=<key>` and also `'OPENROUTER_API_KEY'=<key>` (quoted name) or `# OPENROUTER_API_KEY=<key>` (comment), with or without a bare/quoted `*_BASE_URL` line
+- **Expected**: Before pass-1 (no DB write), `copies_left_behind` finds the key's text off the lines lock replaces and lock stops with WRTLS-112 naming the variable (never the value): `.env` byte-identical, no new rows, a re-lock keeps its existing enrollment, no "You're protected". `rewrite_env_keys(must_remove=...)` repeats the check on the exact bytes it would write (`KeyWouldSurvive`) as a backstop.
+- **Current behavior**: FIXED (WOR-1048) -- lock said "You're protected" with the real key still readable (python-dotenv reads the later quoted line). With a bare/quoted `*_BASE_URL` line, main stopped with WRTLS-199, and WOR-1041 alone would have turned that into the same false "protected".
+- **Risk**: HIGH (was broken, now fixed)
+- **Test status**: Tested (TestLockNeverLeavesAKeyBehind, including a refused re-lock that keeps the earlier lock)
+
 ---
 
 ## 2. Attacker Scenarios
@@ -488,7 +520,7 @@ These must always hold. Any scenario that breaks them is a bug:
 #### S-10: Two terminals run `lock` simultaneously
 
 - **Precondition**: Two shells, both run `worthless lock`
-- **Expected**: First acquires `.lock-in-progress` via `O_CREAT|O_EXCL`. Second gets `WRTLS-105: Another worthless operation is in progress.`
+- **Expected**: First acquires `.lock-in-progress` via `O_CREAT|O_EXCL`. Second gets `WRTLS-105: Another worthless command is running. Wait for it to finish, then try again.`
 - **Risk**: Low (correctly handled)
 - **Test status**: Tested (`test_bootstrap.py`)
 

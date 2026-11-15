@@ -150,8 +150,8 @@ the turn result (`test_proxy_load_bearing.py:86-89`).
   succeeds + mock receives the request.
 
 Marks: `pytest.mark.openclaw`, `pytest.mark.docker`, skipped when Docker absent
-(`test_proxy_load_bearing.py:57-59`). Runner entrypoint exists:
-`pyproject.toml:46` `test-openclaw = "worthless.testing.runners:openclaw"`.
+(`test_proxy_load_bearing.py:57-59`). Run it with the openclaw lane in `engineering/tooling.md` (the
+`test-openclaw` entrypoint was removed in worthless-nd65: it shipped onto users' PATH).
 
 ### Gaps to close to make it the real-journey test (proposed = WOR-732's 3 lanes)
 

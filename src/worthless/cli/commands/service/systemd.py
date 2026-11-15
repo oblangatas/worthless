@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import os
+import shlex
 import subprocess
 from pathlib import Path
+
+try:
+    import pwd
+except ImportError:  # pragma: no cover — Windows has no pwd; systemd never runs there
+    pwd = None  # type: ignore[assignment]
 
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.service import templates
@@ -20,26 +28,38 @@ from worthless.cli.commands.service._common import (
     report_proxy_health,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.cli.platform import is_wsl, systemd_is_running
 from worthless.cli.process import poll_health, resolve_port
 
 SYSTEMD_UNIT = templates.SYSTEMD_UNIT_NAME
 
 
 def _session_user() -> str:
-    """Resolve login name without eager ``os.getlogin()`` (CI has no tty)."""
-    for key in ("USER", "LOGNAME"):
-        value = os.environ.get(key, "").strip()
-        if value:
-            return value
-    try:
-        return os.getlogin()
-    except OSError:
-        import pwd
+    """The real account (euid) — never ``USER``/``LOGNAME``, never ``getlogin()``.
 
-        try:
-            return pwd.getpwuid(os.getuid()).pw_name
-        except KeyError:
-            return str(os.getuid())
+    Linger is checked, turned on and advised for the account that owns the
+    unit; after ``su``, ``sudo -u`` or in a container the env can name someone
+    else (security review + Bugbot, PR #734). ``getlogin()`` needs a tty CI
+    doesn't have.
+    """
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name if pwd is not None else str(os.geteuid())
+    except KeyError:
+        return str(os.geteuid())
+
+
+def _account_name() -> str:
+    """:func:`_session_user`, shell-quoted, for commands we ask an admin to run."""
+    return shlex.quote(_session_user())
+
+
+def _user_manager_socket() -> Path:
+    """systemd's own socket for this account's user manager; present only when it is up.
+
+    Not the D-Bus ``bus`` socket beside it: a user D-Bus is optional, the
+    manager's private socket is not (Bugbot, PR #734).
+    """
+    return Path(f"/run/user/{os.geteuid()}/systemd/private")
 
 
 def unit_path() -> Path:
@@ -61,17 +81,22 @@ def _linger_enabled() -> bool:
     return "Linger=yes" in (result.stdout or "")
 
 
-def _ensure_linger() -> None:
+def _ensure_linger() -> bool:
+    """Turn lingering on if the system lets us; return whether it is on.
+
+    worthless-8kn5: with no local login session (SSH, a container) polkit
+    refuses, and the old error told the user to run the command that had just
+    been refused. The unit still runs while they are logged in, so install
+    anyway and let the banner say what an administrator must run for boot.
+    ``--no-ask-password``: over SSH nobody is there to answer a polkit prompt.
+    """
     if _linger_enabled():
-        return
+        return True
     try:
-        run_cmd(["loginctl", "enable-linger", _session_user()])
-    except subprocess.CalledProcessError as exc:
-        raise WorthlessError(
-            ErrorCode.SERVICE_INSTALL_FAILED,
-            "Failed to enable systemd linger — the service won't survive logout. "
-            f"Run `loginctl enable-linger {_session_user()}` manually, then retry.",
-        ) from exc
+        run_cmd(["loginctl", "--no-ask-password", "enable-linger", _session_user()])
+    except subprocess.CalledProcessError:
+        return False
+    return True
 
 
 def installed_port() -> int | None:
@@ -130,7 +155,62 @@ def detect_status(home: WorthlessHome, port: int) -> ServiceStatus:
     )
 
 
-def install(home: WorthlessHome, *, port: int | None = None) -> None:
+def _preflight_systemd_available() -> None:
+    """Refuse before writing anything when systemd cannot accept a unit.
+
+    Runs ahead of the unit write so a refusal leaves no orphan file behind.
+    Probing PID 1 rather than ``loginctl`` matters: on a systemd-less box
+    ``loginctl`` answers "Failed to connect to bus: Host is down", which is
+    what made the old linger error point users at a dead end (WOR-857).
+    """
+    if systemd_is_running():
+        return
+    if is_wsl():
+        # `wsl --terminate <distro>`, never `wsl --shutdown` for step 2: shutdown
+        # stops every distro, Docker Desktop included. Step 3 is proven on real
+        # WSL by the idle control/fix legs in .github/workflows/wsl.yml (WOR-853).
+        # WSL_DISTRO_NAME is unset under a login shell (`runuser -l`, `sudo -i`),
+        # which is the very case this message exists for — a real WSL2 run printed
+        # the raw placeholder. When the name is unknown, give an instruction the
+        # user can follow instead of a token they have to decode.
+        distro = os.environ.get("WSL_DISTRO_NAME", "")
+        terminate = (
+            f"`wsl --terminate {distro}`"
+            if distro
+            else "`wsl -l -v` to find your distro name, then `wsl --terminate <that name>`"
+        )
+        raise WorthlessError(
+            ErrorCode.SERVICE_INSTALL_FAILED,
+            "systemd is not running in this WSL distro, so a background "
+            "service cannot be installed.\n\n"
+            "Fix:\n"
+            "  1. In /etc/wsl.conf, under [boot], set systemd=true. If the file "
+            "already has a systemd= line, change that line: WSL uses the first "
+            "one it reads.\n"
+            f"  2. From PowerShell, run {terminate}, then reopen "
+            "your terminal. Needs WSL 0.67.6 or newer: if `wsl --version` fails "
+            "or shows an older version, run `wsl --update` first.\n"
+            "  3. WSL stops this distro about 15 seconds after your last WSL "
+            "terminal closes, and the proxy stops with it. To keep it running, "
+            "add this to %USERPROFILE%\\.wslconfig on Windows (WSL 2.5.4 or "
+            "newer):\n"
+            "       [general]\n"
+            "       instanceIdleTimeout=-1\n"
+            "     It takes effect once WSL fully restarts: restart Windows, or run "
+            "`wsl --shutdown` (this also stops Docker Desktop and other distros).\n\n"
+            "Until then, start the proxy yourself with `worthless up`.",
+        )
+    raise WorthlessError(
+        ErrorCode.SERVICE_INSTALL_FAILED,
+        "systemd is not running (PID 1 is not systemd), so a background "
+        "service cannot be installed. Start the proxy yourself with "
+        "`worthless up`.",
+    )
+
+
+def install(home: WorthlessHome, *, port: int | None = None) -> bool:
+    """Install and start the unit. Returns whether lingering is on (see 8kn5)."""
+    _preflight_systemd_available()
     path = unit_path()
     refuse_foreign_unit(path, home)
     binary = resolve_worthless_binary()
@@ -141,11 +221,70 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
         worthless_home=worthless_home,
         port=actual_port if port is not None or os.environ.get("WORTHLESS_PORT") else None,
     )
+    created_here = not path.is_file()
     atomic_write_text(path, content, mode=0o600)
-    _ensure_linger()
-    _systemctl("daemon-reload")
-    _systemctl("enable", "--now", SYSTEMD_UNIT)
+
+    # Activation can fail after the file is on disk. Leaving it there means the
+    # user is told the install failed while a unit waits to start at next
+    # login, and detect_status reports STOPPED instead of NOT_INSTALLED.
+    # Removed only when THIS call created it, so a failed re-install never
+    # deletes a unit that was already working.
+    try:
+        lingering = _ensure_linger()
+        try:
+            _systemctl("daemon-reload")
+        except subprocess.CalledProcessError as exc:
+            if lingering:
+                raise
+            account = _account_name()
+            if _user_manager_socket().exists():
+                # `su - user` / `sudo -u user`: the manager IS running, this
+                # shell just can't reach it — linger would not help.
+                why = (
+                    "This shell can't reach your user services — usually because it "
+                    "came from `su` or `sudo -u`. Log in directly instead (SSH, or "
+                    f"`machinectl shell {account}@`), then run `worthless service "
+                    "install` again. With no login session at all, an administrator "
+                    f"must run `sudo loginctl enable-linger {account}`."
+                )
+            else:
+                # 8kn5: no login session (docker exec, cron) AND linger refused —
+                # there is no user manager to host the unit at all.
+                why = (
+                    "This account has no running user service manager (no login "
+                    "session, and lingering needs an administrator here). Ask one to "
+                    f"run `sudo loginctl enable-linger {account}`, then run "
+                    "`worthless service install` again."
+                )
+            raise WorthlessError(
+                ErrorCode.SERVICE_INSTALL_FAILED,
+                f"{why} Until then, start the proxy yourself with `worthless up`.",
+            ) from exc
+        _systemctl("enable", "--now", SYSTEMD_UNIT)
+    except BaseException:
+        if created_here:
+            # `enable --now` can enable the unit and THEN fail to start it, so
+            # removing only the file would leave a wants-symlink behind and a
+            # unit the manager still knows about, while detect_status reports
+            # NOT_INSTALLED. Tear the manager state down too, best-effort.
+            # Best-effort, and deliberately not allowed to skip the unlink:
+            # if systemctl itself is what blew up, the file must still go.
+            # try/finally, not just suppress(Exception): the outer handler
+            # catches BaseException, so a Ctrl-C during activation lands here,
+            # and a second one inside this subprocess is a KeyboardInterrupt
+            # that suppress(Exception) does not catch. Once rollback starts the
+            # unlink is unconditional — a leftover unit file would make every
+            # later lock treat the service as installed and never offer again.
+            try:
+                with contextlib.suppress(Exception):
+                    _systemctl("disable", "--now", SYSTEMD_UNIT, check=False)
+            finally:
+                path.unlink(missing_ok=True)
+            with contextlib.suppress(Exception):
+                _systemctl("daemon-reload", check=False)
+        raise
     report_proxy_health(actual_port)
+    return lingering
 
 
 def uninstall(home: WorthlessHome) -> None:

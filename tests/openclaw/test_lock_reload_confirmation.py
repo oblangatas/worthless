@@ -318,7 +318,6 @@ def _finalise(console, monkeypatch, tmp_path, *, sentinel_sink=None):  # noqa: A
         console,
         False,
         SimpleNamespace(base_dir=tmp_path),
-        proxy_host="127.0.0.1",
         reload_since_ts=datetime.now(UTC),
     )
 

@@ -12,7 +12,7 @@ MAJOR.MINOR.PATCH
 - **MINOR** — backwards-compatible new features
 - **MAJOR** — breaking changes to CLI, config, or proxy protocol
 
-Git tags `vMAJOR.MINOR.PATCH` trigger `.github/workflows/publish.yml`, which publishes the matching release to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/).
+Git tags `vMAJOR.MINOR.PATCH` trigger the four publishers — PyPI (`.github/workflows/publish.yml`, via [trusted publishing](https://docs.pypi.org/trusted-publishers/)), npm, the GHCR image and the worthless.sh Worker — and then the GitHub Release. How to cut one: [RELEASING.md](RELEASING.md).
 
 ## Current Version
 
@@ -40,6 +40,6 @@ Tags `v0.1.0`, `v0.2.0`, `v0.3.0` (legacy), `v0.3.1`, `v1.0` were created during
 ## For Agents
 
 - **Check `Current Version` above** to know what ships on PyPI.
-- **Do not tag releases without confirmation.** Tagging `vX.Y.Z` on `main` fires the publish workflow and burns that version on PyPI forever (PyPI rejects re-uploads of the same version).
-- **Pre-release dry runs**: push `vX.Y.Zrc1` to test the publish pipeline without burning the final version number.
+- **Do not tag releases without confirmation.** Tagging `vX.Y.Z` on `main` fires all four publishers and burns that version on PyPI and npm forever (neither accepts a re-upload of the same version).
+- **Pre-release dry runs**: push `vX.Y.Zrc1` to test the publish pipeline without burning the final version number. It still runs all four publishers and asks for the same approvals — including deploying the Worker to production.
 - **Update this file** and `pyproject.toml` in the same commit as any version bump — a CI drift test compares them.

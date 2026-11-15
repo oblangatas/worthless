@@ -25,7 +25,7 @@ from worthless.cli.commands.doctor.registry import (
     ensure_registered,
 )
 from worthless.cli.commands.doctor.schema import SCHEMA_VERSION
-from worthless.cli.errors import WorthlessError
+from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.keystore import read_fernet_key
 from worthless.crypto.types import zero_buf
 from worthless.storage.repository import ShardRepository
@@ -45,6 +45,45 @@ def _count_enrollments(home) -> int:  # noqa: ANN001 — WorthlessHome opaque he
             con.close()
     except Exception:  # noqa: BLE001 — diagnosis must never crash
         return -1  # count unavailable (e.g. corrupt DB) — distinct from a real "none"
+
+
+def _emit_if_refused(exc: WorthlessError) -> bool:
+    """Emit the refused-key JSON and return True if ``exc`` is a refusal.
+
+    Two independent sites can surface a refusal (home resolution, key read);
+    one helper keeps them from drifting apart.
+    """
+    if exc.code is not ErrorCode.KEY_REFUSED:
+        return False
+    typer.echo(json.dumps(_aggregate([_key_refused_result(exc.message)])))
+    return True
+
+
+def _key_refused_result(message: str) -> CheckResult:
+    """The key is present but unusable — recoverable, NOT a broken install.
+
+    worthless-6hu7: wrong mode, a foreign owner or a symlink makes us refuse to
+    read the key. The install is intact and the fix is a chmod, so this must not
+    be reported as the unrecoverable ``uninstall --force`` case.
+    """
+    return CheckResult(
+        check_id="fernet_key_refused",
+        status="error",
+        findings=[
+            {
+                "issue": "fernet_key_refused",
+                "message": message,
+                "recommendation": (
+                    "follow the fix in the message (chmod, chown, or move a symlink "
+                    "aside), then re-run doctor"
+                ),
+            }
+        ],
+        summary="Fernet key present but refused; install intact and recoverable.",
+        fixable=False,
+        fixed=[],
+        skipped_reason=None,
+    )
 
 
 def _fernet_missing_result(home) -> CheckResult:  # noqa: ANN001
@@ -165,8 +204,9 @@ def _explain_verdict(play: str) -> str:
 def _doctor_explain_catalog(*, err: bool = False) -> None:
     """List every check id with its one-line verdict (the `--explain list` view)."""
     typer.echo("Worthless doctor checks — `--explain <id>` shows the full fix:", err=err)
+    width = max(len(c) for c in PLAYBOOKS)  # new ids must not break alignment
     for cid in sorted(PLAYBOOKS):
-        typer.echo(f"  {cid:<17} {_explain_verdict(PLAYBOOKS[cid])}", err=err)
+        typer.echo(f"  {cid:<{width}} {_explain_verdict(PLAYBOOKS[cid])}", err=err)
 
 
 def _doctor_explain(check_id: str) -> None:
@@ -197,7 +237,9 @@ def _doctor_run_json(*, fix: bool, dry_run: bool) -> None:
     """
     try:
         home = get_home()
-    except WorthlessError:
+    except WorthlessError as exc:
+        if _emit_if_refused(exc):
+            return
         # BUG-1: the install itself can't be opened (corrupt DB / unreadable
         # bootstrap) — get_home() runs DB init and raises WRTLS-103 before any
         # check can run. Mirror the text path: emit valid JSON pointing at the
@@ -206,7 +248,9 @@ def _doctor_run_json(*, fix: bool, dry_run: bool) -> None:
         return
     try:
         fernet_key = bytearray(read_fernet_key(home.base_dir))  # SR-01: mutable for zeroing
-    except WorthlessError:
+    except WorthlessError as exc:
+        if _emit_if_refused(exc):
+            return
         # BUG-1: the fernet key is unreadable (missing / corrupt) — a broken
         # install whose locked keys can't be reconstructed. Don't crash the
         # diagnostic; emit a single finding that points at the fix.

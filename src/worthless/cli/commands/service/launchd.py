@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import os
 from pathlib import Path
 
@@ -131,13 +133,39 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
         port=actual_port if port is not None or os.environ.get("WORTHLESS_PORT") else None,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
+    created_here = not path.is_file()
     atomic_write_text(path, content, mode=0o600)
 
-    if _is_loaded():
-        run_cmd(["launchctl", "bootout", _launchctl_domain(), str(path)], check=False)
+    # Activation can fail after the file is on disk. Leaving it there means the
+    # user is told the install failed while a unit waits to start at next
+    # login, and detect_status reports STOPPED instead of NOT_INSTALLED.
+    # Removed only when THIS call created it, so a failed re-install never
+    # deletes a unit that was already working.
+    try:
+        if _is_loaded():
+            run_cmd(["launchctl", "bootout", _launchctl_domain(), str(path)], check=False)
 
-    run_cmd(["launchctl", "bootstrap", _launchctl_domain(), str(path)])
-    run_cmd(["launchctl", "kickstart", "-k", _service_target()])
+        run_cmd(["launchctl", "bootstrap", _launchctl_domain(), str(path)])
+        run_cmd(["launchctl", "kickstart", "-k", _service_target()])
+    except BaseException:
+        if created_here:
+            # A successful `bootstrap` followed by a failed `kickstart` leaves
+            # the job loaded. Removing only the plist would leave a loaded job
+            # with nothing behind it, while detect_status reports NOT_INSTALLED.
+            # Best-effort, and deliberately not allowed to skip the unlink:
+            # if launchctl itself is what blew up, the plist must still go.
+            # try/finally, not just suppress(Exception): the outer handler
+            # catches BaseException, so a Ctrl-C during activation lands here,
+            # and a second one inside this subprocess is a KeyboardInterrupt
+            # that suppress(Exception) does not catch. Once rollback starts the
+            # unlink is unconditional — a leftover plist would make every later
+            # lock treat the service as installed and never offer again.
+            try:
+                with contextlib.suppress(Exception):
+                    run_cmd(["launchctl", "bootout", _launchctl_domain(), str(path)], check=False)
+            finally:
+                path.unlink(missing_ok=True)
+        raise
     report_proxy_health(actual_port)
 
 

@@ -18,7 +18,7 @@ from worthless.cli.commands.service._common import (
 from worthless.cli.commands.service.proxy_state import detect_proxy_runtime
 from worthless.cli.console import get_console
 from worthless.cli.errors import error_boundary
-from worthless.cli.platform import fail_if_windows
+from worthless.cli.platform import fail_if_windows, is_wsl
 from worthless.cli.process import disable_core_dumps, resolve_port
 
 
@@ -29,7 +29,9 @@ def _backend():
     return systemd
 
 
-def _print_service_banner(console, *, platform: str, port: int) -> None:
+def _print_service_banner(
+    console, *, platform: str, port: int, after_install: bool = False, lingering: bool = True
+) -> None:
     """Confirm the persistence guarantee a first-run service user needs.
 
     ``worthless up`` dies on Ctrl+C; a service-managed proxy does not. Say so
@@ -39,7 +41,51 @@ def _print_service_banner(console, *, platform: str, port: int) -> None:
     if console.json_mode:
         return
     console.print_success(f"Worthless proxy running as a {platform} service on 127.0.0.1:{port}.")
-    console.print_hint("Auto-restarts on crash and survives reboot — no `worthless up` needed.")
+    # No "survives reboot": WOR-725 has never verified it on any platform.
+    console.print_hint("Auto-restarts on crash — no `worthless up` needed.")
+    if is_wsl():
+        # Proven on real WSL (WOR-853, .github/workflows/wsl.yml idle legs):
+        # with the default config the distro, and this service, stop ~15 s
+        # after the last WSL terminal closes. Same fix text as systemd.py.
+        console.print_warning(
+            "On WSL the proxy stops about 15 seconds after your last WSL terminal "
+            "closes, because WSL shuts the distro down. To keep it running, add "
+            "this to %USERPROFILE%\\.wslconfig on Windows (WSL 2.5.4 or newer):\n"
+            "  [general]\n"
+            "  instanceIdleTimeout=-1\n"
+            "It takes effect once WSL fully restarts: restart Windows, or run "
+            "`wsl --shutdown` (this also stops Docker Desktop and other distros)."
+        )
+    if after_install and platform == "systemd" and not is_wsl():
+        # Only after an INSTALL, the one path that calls _ensure_linger.
+        # `service start` shares this banner and enables nothing, so claiming
+        # "lingering is now on" there credits this command with something it
+        # did not do.
+        #
+        # And never on WSL. WSL runs the systemd backend, so those users would
+        # read "survives logout" directly beneath the warning that the proxy
+        # dies ~15 s after their last terminal closes. Linger does not outlive
+        # WSL's idle shutdown; the warning above is the true story for them.
+        #
+        # `worthless service uninstall` does NOT turn lingering back off.
+        # Deliberately: linger is account-wide, other user services may rely on
+        # it, and switching off state we may not have created is the mistake the
+        # install rollback exists to avoid. Say so instead. (worthless-fzas)
+        if lingering:
+            console.print_hint(
+                "Lingering is now on for this account, so the service survives logout. "
+                "`worthless service uninstall` leaves it on — turn it off yourself with "
+                "`loginctl disable-linger` if nothing else needs it."
+            )
+        else:
+            # worthless-8kn5: no local login (SSH, a container) — polkit said no.
+            console.print_warning(
+                "Lingering couldn't be turned on for this account (usually: no local "
+                "login session), so the service runs while you're logged in but stops "
+                "when you log out and won't start at boot. An administrator can fix "
+                f"that with `sudo loginctl enable-linger {systemd._account_name()}` — "
+                "it lets every user service for this account keep running after logout."
+            )
     console.print_hint("Status: `worthless service status` · Stop: `worthless service stop`")
 
 
@@ -92,7 +138,7 @@ def register_service_commands(app: typer.Typer) -> None:
                 raise typer.Exit(code=0)
 
         preflight_service_install(home)
-        backend.install(home, port=port)
+        lingering = backend.install(home, port=port)
         if console.json_mode:
             if backend is launchd:
                 unit = str(launchd.plist_path())
@@ -106,6 +152,9 @@ def register_service_commands(app: typer.Typer) -> None:
                         "binary": str(binary),
                         "port": actual_port,
                         "unit_path": unit,
+                        # 8kn5: false = stops at logout, won't start at boot.
+                        # null on launchd, which has no such concept.
+                        "lingering": lingering if isinstance(lingering, bool) else None,
                     }
                 )
                 + "\n"
@@ -115,6 +164,8 @@ def register_service_commands(app: typer.Typer) -> None:
                 console,
                 platform=current_platform_backend_name(),
                 port=actual_port,
+                after_install=True,
+                lingering=lingering is not False,  # launchd returns None
             )
 
     @service_group.command("uninstall")

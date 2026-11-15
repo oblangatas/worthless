@@ -206,11 +206,11 @@
 
         <h2>What if a copied .env value could not call the provider alone?</h2>
         <p>That's the question I couldn't stop thinking about. Not "how do we prevent leaks" but "how do we change what a copied .env value can do."</p>
-        <p>The answer turned out to be simple: split the key material. Your .env gets a shard. The local proxy keeps the matching material behind a separate boundary. Neither side works alone. When your app makes a legitimate API call, the proxy handles reconstruction for that request.</p>
-        <p>If someone copies your .env, they get one half of an XOR split. The copied .env value alone cannot call the provider because it is missing the matching local material. This boundary does not protect a compromised machine or attacker-controlled local code.</p>
+        <p>The answer turned out to be simple: split the key material. Your .env gets a shard. Your machine keeps the matching shard behind a separate boundary. Neither side works alone. When your app makes a legitimate API call, the proxy handles reconstruction for that request.</p>
+        <p>If someone copies your .env, they get one shard of a split key. The copied .env value alone cannot call the provider because it is missing the matching local material. This boundary does not protect a compromised machine or attacker-controlled local code.</p>
 
         <h2>That's Worthless</h2>
-        <p>Two commands. Your key is split. Your .env now contains a shard that is not enough to call the provider by itself. The proxy handles reconstruction and local usage checks.</p>
+        <p>Install, then run <code>worthless lock</code>. Your key is split. Your .env now contains a shard that is not enough to call the provider by itself. The proxy handles reconstruction and local usage checks.</p>
         <p>No vault. No complex infrastructure. No key rotation dance. Just a copied .env value that is not a provider credential on its own.</p>
         <p><code>curl -sSL https://worthless.sh | sh</code></p>
       </div>
@@ -256,12 +256,13 @@
 
         <h2>So where does Worthless fit?</h2>
         <p>All of the above protect the key before it leaks. Worthless reduces what a copied local AI-key value can do after it leaks.</p>
-        <p>Your key gets split. Your .env has one half. Your local proxy has the other. Neither works alone. The reconstructed key lives only for the upstream call, then drops. (Python PoC: memory-zeroing has known limits, see <a href="https://docs.wless.io/security/">security model</a>.)</p>
+        <p>Your key gets split. Your .env has one shard. The other stays on your machine, outside the .env. Neither works alone. The reconstructed key lives only for the upstream call, then drops. (Python PoC: memory-zeroing has known limits, see <a href="https://docs.wless.io/security/">security model</a>.)</p>
         <p>Use a vault AND Worthless. Use GitGuardian AND Worthless. Complementary, not competing. Vaults guard at rest. Worthless makes copied .env key material less useful after one slips through.</p>
-        <p>Two commands:</p>
-        <pre><code>curl -sSL https://worthless.sh | sh
-worthless lock</code></pre>
-        <p>That's the setup path. No cloud account is required. Your .env gets a key-looking shard, and you get back to shipping.</p>
+        <p>Three steps:</p>
+        <pre><code>curl -sSL https://worthless.sh | sh   # then open a new terminal
+worthless lock
+worthless wrap &lt;your command&gt;</code></pre>
+        <p>That's the setup path. No cloud account is required. Your .env gets a key-looking shard, and <code>wrap</code> runs your app through the local proxy.</p>
       </div>
     </div>
   </div>
@@ -291,15 +292,16 @@ worthless lock</code></pre>
         </ol>
         <p>What's missing is the middle: <strong>what if the copied .env value is not enough to call the provider?</strong></p>
         <h2>How Worthless works</h2>
-        <p>Worthless splits your API key into two cryptographic shares. Neither share reveals anything about the original, you need both. Reconstruction happens in memory, scoped to one call.</p>
+        <p>Worthless splits your API key into two shards. The shard left in your .env keeps the provider prefix and length but none of the secret; you need both to rebuild the key. Reconstruction happens in memory, scoped to one call.</p>
         <pre><code>$ worthless lock
-1 key(s) protected.
+…
+Next: run `worthless wrap &lt;command&gt;`, or `worthless up` to keep a proxy running in this terminal.
 
 $ worthless wrap python app.py
 # your code is unchanged
 
 $ worthless unlock
-1 key(s) restored.</code></pre>
+[OK] 1 key(s) restored.</code></pre>
         <p>There is also a local usage gate: if the request violates your token or usage rule, Worthless can deny it before key material is reconstructed for that request.</p>
         <blockquote>"Worthless changes what a copied protected .env value can do. It does not protect a compromised host or attacker-controlled local code."</blockquote>
         <h2>Get started</h2>
@@ -329,18 +331,18 @@ worthless wrap python app.py</code></pre>
         <p>When we say a copied protected value cannot call the provider alone, we mean it in a precise, narrow sense. This post explains the cryptographic boundary without requiring a cryptography background.</p>
         <h2>The intuition: a lock with two keys</h2>
         <p>Imagine a padlock that requires two keys simultaneously to open. If someone copies one, that piece cannot open the lock by itself. Secret sharing uses the same basic boundary.</p>
-        <h2>The XOR method (2-of-2 sharing)</h2>
+        <h2>The split (2-of-2, format-preserving)</h2>
         <ol>
-          <li>Generate a truly random string <strong>A</strong> the same length as your secret <strong>S</strong></li>
-          <li>Compute <strong>B = S XOR A</strong></li>
-          <li>Store A locally, B in your local proxy</li>
+          <li>Generate a random shard <strong>B</strong>: one random shift for each character of your secret <strong>S</strong>, within the key's own alphabet</li>
+          <li>Compute <strong>A = (S − B) mod N</strong> for each character, where N is the size of that alphabet</li>
+          <li>Put A in your .env in place of the key; store B on your machine</li>
         </ol>
-        <p>Reconstruction: <code>S = A XOR B</code>.</p>
+        <p>Reconstruction: <code>S = (A + B) mod N</code>, character by character.</p>
         <h3>What does A reveal on its own?</h3>
-        <p>Because A is purely random. An attacker with only A sees that every possible value of S produces a valid B, the share A is statistically independent of S. It could have come from any secret equally well.</p>
-        <div class="info-box"><strong>Information-theoretic security.</strong> Given only A, every possible value of S remains consistent with some B. This statement is about the stored half's information content, not the safety of your machine or local proxy. See the <a href="https://docs.wless.io/security/">security model</a>.</div>
+        <p>B is uniformly random, so for every possible secret there is a B that produces the same A. On its own, A is statistically independent of the secret part of S. What A does show is the provider prefix and the key's length, which are kept so the value still looks like a key.</p>
+        <div class="info-box"><strong>Information-theoretic security.</strong> Given only A, every possible secret part of S remains consistent with some B. This statement is about what the stored shard contains, not the safety of your machine or local proxy. See the <a href="https://docs.wless.io/security/">security model</a>.</div>
         <h2>What Worthless does in practice</h2>
-        <p>When you run <code>worthless lock</code>: your key is read, Share A is generated randomly, Share B is derived so A XOR B = key. A goes to local encrypted storage; B lives in your local proxy's memory. Your <code>.env</code> is updated to point at the proxy. The reconstructed key lives only for the upstream call, then drops. (Python PoC: memory-zeroing has known limits, see <a href="https://docs.wless.io/security/">security model</a>.)</p>
+        <p>When you run <code>worthless lock</code>: your key is read, shard B is generated randomly and shard A is derived from it. Shard A replaces the key in your <code>.env</code>. Shard B is stored in your system keystore, or in a local key file under <code>~/.worthless</code> where there is no keystore. Your <code>.env</code> also gets a base URL that points at the local proxy. The reconstructed key lives only for the upstream call, then drops. (Python PoC: memory-zeroing has known limits, see <a href="https://docs.wless.io/security/">security model</a>.)</p>
         <div class="info-box success"><strong>Two independent protections:</strong><br/>1. Cryptographic split, so a copied protected value alone cannot call the provider.<br/>2. Local usage guardrail, so requests can be denied before reconstruction.</div>
       </div>
     </div>

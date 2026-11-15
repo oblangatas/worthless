@@ -10,11 +10,13 @@ Run with: uv run pytest tests/test_deploy_static.py -v
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -29,6 +31,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEPLOY_DIR = REPO_ROOT / "deploy"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
+SIDECAR_DOCKERFILE = REPO_ROOT / "docker" / "sidecar" / "Dockerfile"
 COMPOSE_FILE = DEPLOY_DIR / "docker-compose.yml"
 ENV_EXAMPLE = DEPLOY_DIR / "docker-compose.env.example"
 ENTRYPOINT = DEPLOY_DIR / "entrypoint.sh"
@@ -40,6 +43,8 @@ DOCKER_SECURITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "docker-securit
 RELEASE_NOTES_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-notes.yml"
 RELEASE_FANIN_SCRIPT = REPO_ROOT / ".github" / "scripts" / "release-fanin.sh"
 EXTRACT_CHANGELOG_SCRIPT = REPO_ROOT / ".github" / "scripts" / "extract_changelog.py"
+RELEASE_WATCHDOG_SCRIPT = REPO_ROOT / ".github" / "scripts" / "release-watchdog.sh"
+RELEASE_WATCHDOG_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-watchdog.yml"
 # The four independent publishers the auto-Release job fans in over.
 PUBLISHER_WORKFLOWS = ["publish.yml", "publish-npm.yml", "publish-docker.yml", "deploy-worker.yml"]
 
@@ -140,6 +145,49 @@ def dockerfile_final_stage(dockerfile_text: str) -> str:
     if not from_indices:
         return dockerfile_text
     return dockerfile_text[from_indices[-1] :]
+
+
+# WOR-1077: every command in the Dockerfile that installs Python packages, in
+# order. See TestDockerfile.test_builder_installs_exactly_the_audited_lock.
+_LOCKED_INSTALL = [
+    "uv export --quiet --locked --no-dev --no-emit-project --format requirements-txt"
+    " -o /tmp/requirements.lock.txt",
+    "pip install --no-cache-dir --require-hashes --only-binary :all: -r /tmp/requirements.lock.txt",
+    "pip install --no-cache-dir --no-deps .",
+    "pip check",
+]
+# A command that can put Python packages on disk: pip in any spelling
+# (pip3, pip3.13, `python -m pip`, ensurepip), uv/uvx, easy_install, setup.py.
+_INSTALLER = re.compile(r"\b(?:pip[\d.]*|ensurepip|uvx?|easy_install|setup\.py)\b")
+
+
+def _instructions(dockerfile_text: str) -> str:
+    """The Dockerfile as Docker parses it: one instruction per line.
+
+    Comment lines go first, as Docker drops them: one inside a continued
+    instruction would otherwise end the join and hide everything after it. Then
+    continuations are joined and leading whitespace dropped, so an indented or
+    wrapped instruction can't slip past a `^INSTRUCTION` match. Match with re.I:
+    Docker reads `run` as RUN.
+    """
+    text = re.sub(r"^\s*#.*\n", "", dockerfile_text, flags=re.MULTILINE)
+    text = re.sub(r"\\\n", " ", text)
+    return re.sub(r"^[ \t]+", "", text, flags=re.MULTILINE)
+
+
+def _run_commands(dockerfile_text: str) -> list[str]:
+    """Each `&&`-joined shell command the Dockerfile's RUN instructions execute.
+
+    Exec-form RUN, and a heredoc anywhere in a RUN (`RUN sh <<EOF` too), can't
+    be split this way, so they are refused, not skipped.
+    """
+    text = _instructions(dockerfile_text)
+    hidden = re.findall(r"^RUN\s+(?:--\S+\s+)*\[|^RUN\s[^\n]*<<", text, re.M | re.I)
+    assert not hidden, "exec-form or heredoc RUN hides its commands from this parser"
+    commands: list[str] = []
+    for match in re.finditer(r"^RUN\s+(.*)$", text, re.M | re.I):
+        commands += [" ".join(part.split()) for part in match.group(1).split("&&")]
+    return commands
 
 
 def _split_image_ref(image: str) -> tuple[str, str, str, str]:
@@ -783,14 +831,6 @@ class TestDockerfile:
             "Debian 12 is end-of-life — its CVEs have no fix. Use slim-trixie."
         )
 
-    def test_pinned_digest(self, dockerfile_text: str):
-        """Base image must be pinned by SHA256 digest for reproducibility.
-
-        Tag-only references (python:3.13-slim) can silently change content.
-        Pinning the digest ensures identical builds.
-        """
-        assert "@sha256:" in dockerfile_text
-
     def test_multi_stage_build(self, dockerfile_text: str):
         """Must use multi-stage build to minimize final image size."""
         from_count = len(re.findall(r"^FROM\s", dockerfile_text, re.MULTILINE))
@@ -1062,15 +1102,128 @@ class TestDockerfile:
         if user_lines:
             assert user_lines[-1] != "root", "Final USER must not be root"
 
-    def test_no_cache_pip_install(self, dockerfile_text: str):
-        """pip install must use --no-cache-dir to minimize image size."""
-        pip_lines = re.findall(r"pip install.*", dockerfile_text)
-        for line in pip_lines:
-            assert "--no-cache-dir" in line, f"pip install missing --no-cache-dir: {line}"
+    def test_builder_installs_exactly_the_audited_lock(self, dockerfile_text: str):
+        """Every package in the image comes from uv.lock, hash-checked (WOR-1077).
+
+        The commands that install Python packages are pinned exactly, because
+        an allowlist of flags let `pip3`, `uv pip sync`, `--index-url=` and a
+        dropped `--only-binary` through. scripts/check_image_matches_lock.py
+        checks what the built image holds; this checks what the text can't show
+        there: the hashes, `--locked` and wheels-only.
+        """
+        text = _instructions(dockerfile_text)
+        assert re.search(r"^COPY\s[^\n]*\buv\.lock\b", text, re.M | re.I), (
+            "WOR-1077: the build must COPY uv.lock, the file the audit gate audits"
+        )
+        installs = [c for c in _run_commands(dockerfile_text) if _INSTALLER.search(c)]
+        assert installs == _LOCKED_INSTALL, (
+            "WOR-1077: the image must install only uv.lock's hashed export.\n"
+            f"  expected: {_LOCKED_INSTALL}\n  found:    {installs}\n"
+            "If this change is deliberate, update _LOCKED_INSTALL and the claims it backs."
+        )
+
+    def test_external_images_are_digest_pinned(self, dockerfile_text: str):
+        """Every image the build pulls, `COPY --from` sources included, pins a digest.
+
+        A tag can be repointed at different content; the digest can't.
+        Read through _instructions, so case, indenting, wrapping and flags before
+        an image (`FROM --platform=…`, `COPY --chown=… --from=…`) don't hide one.
+        """
+        text = _instructions(dockerfile_text)
+        image = r"^FROM\s+(?:--\S+\s+)*(\S+)"
+        stages = {alias for _, alias in re.findall(image + r"\s+AS\s+(\S+)", text, re.M | re.I)}
+        refs = re.findall(image, text, re.M | re.I)
+        refs += re.findall(r"^COPY\s[^\n]*--from=(\S+)", text, re.M | re.I)
+        for run in re.findall(r"^RUN\s([^\n]*)", text, re.M | re.I):
+            refs += re.findall(r"--mount=\S*?\bfrom=([^,\s]+)", run, re.I)
+        external = [r for r in refs if r not in stages]
+        assert external, "no external images found; did the parsing break?"
+        for ref in external:
+            assert re.search(r"@sha256:[0-9a-f]{64}$", ref), f"image not pinned by digest: {ref}"
+        assert not re.search(r"^ADD\s[^\n]*https?://", text, re.M | re.I), (
+            "ADD <url> fetches with no digest; COPY it from a digest-pinned image instead"
+        )
 
     def test_pythondontwritebytecode(self, dockerfile_text: str):
         """PYTHONDONTWRITEBYTECODE must be set to avoid .pyc files on read-only fs."""
         assert "PYTHONDONTWRITEBYTECODE=1" in dockerfile_text
+
+    @pytest.mark.parametrize(
+        "dockerfile", [DOCKERFILE, SIDECAR_DOCKERFILE], ids=["proxy-image", "sidecar-prototype"]
+    )
+    def test_sidecar_uid_env_is_the_crypto_users_uid(self, dockerfile: Path):
+        """WOR-1078: clients refuse a sidecar socket served by any uid but this one.
+
+        The HEALTHCHECK, ``docker exec`` CLI calls and the smoke client never
+        pass through ``deploy/start.py``, so the image ENV is how they learn
+        the sidecar's uid. It must be the uid ``useradd`` gives worthless-crypto,
+        the user the sidecar runs as.
+        """
+        text = dockerfile.read_text()
+        crypto = re.search(
+            r"useradd [^\n]*-u (\d+) [^\n]* worthless-crypto \\?$", text, re.MULTILINE
+        )
+        assert crypto, f"no useradd line for worthless-crypto in {dockerfile}"
+        env = re.search(r"^\s*(?:ENV\s+)?WORTHLESS_SIDECAR_UID=(\d+)\b", text, re.MULTILINE)
+        assert env, f"{dockerfile} must set WORTHLESS_SIDECAR_UID in its ENV"
+        assert env.group(1) == crypto.group(1), (
+            f"WORTHLESS_SIDECAR_UID={env.group(1)} but worthless-crypto is uid {crypto.group(1)}"
+        )
+
+
+_LOCK_CHECK_RUN = 'uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"'
+
+
+def _pushes(step: dict) -> bool:
+    """*step* pushes an image, going by what it does as well as by its name."""
+    opts = step.get("with") or {}
+    outputs = str(opts.get("outputs", "")).replace(" ", "")
+    # publish-docker.yml's real push sets `push: false` and pushes via `outputs`;
+    # a `type=registry` exporter pushes whatever `push:` says.
+    return (
+        str(step.get("name", "")).startswith("Push")
+        or opts.get("push") not in (None, False, "false")
+        or "push=true" in outputs
+        or "type=registry" in outputs
+    )
+
+
+def _lock_check_step(workflow: str, job: str, image: str) -> None:
+    """*job* checks the *image* it built against uv.lock, before anything scans or pushes it."""
+    wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / workflow).read_text())
+    steps = wf["jobs"][job]["steps"]
+    found = [i for i, s in enumerate(steps) if "check_image_matches_lock.py" in str(s.get("run"))]
+    assert len(found) == 1, f"{workflow} {job}: expected one lock-check step, found {len(found)}"
+    step = steps[found[0]]
+    assert "if" not in step and "continue-on-error" not in step, (
+        "a skipped or soft-failing lock check passes on any image"
+    )
+    assert step.get("env", {}).get("IMAGE") == image, (
+        f"the lock check must run on the image this job built, {image}"
+    )
+    # Exact, so `|| true` or `; exit 0` can't turn a failing check into a pass.
+    assert step["run"].strip() == _LOCK_CHECK_RUN, f"the step must run exactly: {_LOCK_CHECK_RUN}"
+    built = next(i for i, s in enumerate(steps) if image in str(s))
+    assert built < found[0], "the lock check runs before the image is built"
+    for s in steps[: found[0]]:
+        assert "anchore/scan-action" not in str(s.get("uses")), (
+            "a failing scan step before it would skip the lock check"
+        )
+        assert not _pushes(s), "the image is pushed unchecked"
+
+
+class TestImageLockCheck:
+    """The built image is checked against uv.lock before anything relies on it (WOR-1077)."""
+
+    def test_pr_scan_checks_the_image_against_the_lock(self):
+        """`scan` is required on every PR; docker-e2e, which also runs the check, is not."""
+        _lock_check_step("docker-security.yml", "scan", "worthless-proxy:${{ github.sha }}")
+
+    def test_release_checks_the_image_before_pushing_it(self):
+        """The publish smoke checks the pulled image too, but only after it is public."""
+        _lock_check_step(
+            "publish-docker.yml", "build-push", "worthless-proxy:scan-${{ github.sha }}"
+        )
 
 
 # ------------------------------------------------------------------
@@ -1179,6 +1332,32 @@ class TestCrossConfigConsistency:
 # ------------------------------------------------------------------
 # Failure/edge case awareness tests
 # ------------------------------------------------------------------
+
+
+class TestReleaseSyncSendsARealUserAgent:
+    """A fixed curl User-Agent is one no real curl sends: a tampered Worker could
+    serve the genuine script only to it, and this check would pass. Bare curl
+    sends its own, so the check looks like any user running `curl | sh`."""
+
+    # Any form: -A x, -Ax, -fsSLA x (grouped), --user-agent=x, -H "user-agent: x"
+    # (header in any case). -A is case-sensitive: curl's -a is --append.
+    SETS_UA = re.compile(
+        r"(?:^|\s)(?:-[A-Za-z]*A|--user-agent(?=[\s='\"]|$))|(?i:user-agent)\s*:", re.M
+    )
+
+    def test_script_fetches_set_no_user_agent(self, release_sync_text: str):
+        # A2b sends a browser User-Agent on purpose (it tests the redirect), so
+        # scope to the steps that compare served bytes against the tag.
+        steps = [
+            s
+            for job in yaml.safe_load(release_sync_text)["jobs"].values()
+            for s in job.get("steps", [])
+            if s.get("name", "").startswith(("A2a", "A2c"))
+        ]
+        assert len(steps) == 2, [s.get("name") for s in steps]
+        for step in steps:
+            found = self.SETS_UA.findall(step["run"])
+            assert not found, f"{step['name']} must send curl's own User-Agent: {found}"
 
 
 class TestInstallPinDriftCheck:
@@ -2540,6 +2719,387 @@ GUARD_MUTATIONS = [
         "          persist-credentials: false",
         "test_runs_no_untrusted_tag_content",
     ),
+    # --- release watchdog (WOR-922) -----------------------------------------
+    (
+        # WOR-922's done-when: removing the watchdog must turn something red.
+        "stop running the watchdog",
+        ".github/workflows/release-watchdog.yml",
+        "run: timeout 600 bash .github/scripts/release-watchdog.sh",
+        'run: "true"',
+        "test_a_missing_release_is_watched_on_a_schedule",
+    ),
+    (
+        "let a hung watchdog end as 'cancelled'",
+        ".github/workflows/release-watchdog.yml",
+        "run: timeout 600 bash",
+        "run: bash",
+        "test_a_missing_release_is_watched_on_a_schedule",
+    ),
+    (
+        "file the alarm without permission to file issues",
+        ".github/workflows/release-watchdog.yml",
+        "      issues: write # the alarm itself\n",
+        "",
+        "test_a_missing_release_is_watched_on_a_schedule",
+    ),
+    (
+        "let a Release object decide 'released'",
+        ".github/scripts/release-watchdog.sh",
+        "  released=false\n",
+        '  released=false\n  gh release view "$tag" >/dev/null 2>&1 && released=true\n',
+        "test_watchdog_never_trusts_release_objects",
+    ),
+    (
+        "retitle release runs so the watchdog cannot find them",
+        ".github/workflows/release-notes.yml",
+        "head_branch }} ${{ github.event.workflow_run.head_sha }}",
+        "head_branch }}@${{ github.event.workflow_run.head_sha }}",
+        "test_run_title_contract_matches_release_notes",
+    ),
+    (
+        "rename the create step out from under the watchdog",
+        ".github/workflows/release-notes.yml",
+        "      - name: Create the GitHub Release",
+        "      - name: Create GitHub Release",
+        "test_create_step_contract_matches_release_notes",
+    ),
+    (
+        "count a green job as released even when the create step was skipped",
+        ".github/scripts/release-watchdog.sh",
+        'and any(.steps[]?; .name == $s and .conclusion == "success")',
+        'and .conclusion == "success"',
+        "test_green_job_with_skipped_create_step_still_alarms",
+    ),
+    (
+        "alarm on the normal approval pause",
+        ".github/scripts/release-watchdog.sh",
+        'if [ "$age_h" -lt "$APPROVAL_GRACE_H" ]; then',
+        "if false; then",
+        "test_quiet_while_approval_is_fresh",
+    ),
+    (
+        "never alarm on a forgotten approval",
+        ".github/scripts/release-watchdog.sh",
+        'if [ "$age_h" -lt "$APPROVAL_GRACE_H" ]; then',
+        "if true; then",
+        "test_forgotten_approval_files_one_assigned_issue",
+    ),
+    (
+        "file the alarm unassigned",
+        ".github/scripts/release-watchdog.sh",
+        ' -f "assignees[]=${GH_REPO%%/*}"',
+        "",
+        "test_forgotten_approval_files_one_assigned_issue",
+    ),
+    (
+        "stop naming an approval held for an old commit",
+        ".github/scripts/release-watchdog.sh",
+        'if [ "$waiting" = "${RUN_TITLE_PREFIX} ${tag} ${sha}" ]; then',
+        "if true; then",
+        "test_stale_approval_for_a_moved_tag_is_named",
+    ),
+    (
+        "read only the first page of release runs",
+        ".github/scripts/release-watchdog.sh",
+        '-f created=">=${since}" -f per_page=100 --paginate',
+        '-f created=">=${since}" -f per_page=100',
+        "test_release_found_on_a_later_page_stays_quiet",
+    ),
+    (
+        "judge a release while its run is still going",
+        ".github/scripts/release-watchdog.sh",
+        'if jq -se \'any(.[]; .status != "completed")\' <<<"$mine" >/dev/null; then',
+        "if false; then",
+        "test_run_in_flight_is_left_alone",
+    ),
+    (
+        "judge a tag before the publishers had time",
+        ".github/scripts/release-watchdog.sh",
+        'if [ "$age_h" -lt "$MIN_AGE_H" ]; then',
+        "if false; then",
+        "test_brand_new_tag_is_left_alone",
+    ),
+    (
+        "watch every tag ever pushed",
+        ".github/scripts/release-watchdog.sh",
+        "if [ $((now - created)) -gt $((MAX_AGE_H * 3600)) ]; then",
+        "if false; then",
+        "test_tags_past_the_window_are_ignored",
+    ),
+    (
+        "judge the window in whole hours",
+        ".github/scripts/release-watchdog.sh",
+        "if [ $((now - created)) -gt $((MAX_AGE_H * 3600)) ]; then",
+        "if [ $(((now - created) / 3600)) -gt $MAX_AGE_H ]; then",
+        "test_tag_minutes_past_the_window_is_ignored",
+    ),
+    (
+        "leave an open issue pointing at the old commit",
+        ".github/scripts/release-watchdog.sh",
+        'if [ "$same_commit" = "false" ]; then',
+        "if false; then",
+        "test_open_issue_follows_a_moved_tag",
+    ),
+    (
+        "blame the create step when the automation never ran",
+        ".github/scripts/release-watchdog.sh",
+        'if [ -n "$mine" ]; then',
+        "if true; then",
+        "test_automation_that_never_ran_files_an_issue",
+    ),
+    (
+        "trust fan-in's exit code instead of its verdict",
+        ".github/scripts/release-watchdog.sh",
+        '>"$log" 2>&1 || true',
+        '>"$log" 2>&1',
+        "test_blocked_publisher_files_an_issue_not_a_crash",
+    ),
+    (
+        "treat a crashed fan-in as a publisher failure",
+        ".github/scripts/release-watchdog.sh",
+        "ready=$(sed -n 's/^ready=//p' \"$out\" | tail -n 1)",
+        "ready=$(sed -n 's/^ready=//p' \"$out\" | tail -n 1); ready=${ready:-false}",
+        "test_unreachable_api_fails_the_watchdog_run",
+    ),
+    (
+        "open a new issue on every tick",
+        ".github/scripts/release-watchdog.sh",
+        'if [ -z "$existing" ]; then',
+        "if true; then",
+        "test_open_issue_is_not_duplicated",
+    ),
+    (
+        "reopen an issue closed for this exact commit",
+        ".github/scripts/release-watchdog.sh",
+        'if jq -e --arg s "$sha_marker" \'.body | contains($s)\' <<<"$existing" >/dev/null; then',
+        "if false; then",
+        "test_issue_closed_for_this_commit_stays_closed",
+    ),
+    (
+        "never reopen when the tag moves",
+        ".github/scripts/release-watchdog.sh",
+        # Anchored on state=open: the first PATCH in the file is the open-issue
+        # body update, and mutating that one would leave the reopen untouched.
+        "-X PATCH -f state=open",
+        "-X GET -f state=open",
+        "test_issue_reopens_when_the_tag_moves",
+    ),
+    (
+        # The guide half of this guard cannot be mutated here — the harness copies
+        "alarm while the publishers await their own approvals",
+        ".github/scripts/release-watchdog.sh",
+        "if ! grep -q 'Release held\\|Release blocked' \"$log\" && "
+        '[ "$age_h" -lt "$APPROVAL_GRACE_H" ]; then',
+        "if false; then",
+        "test_publishers_waiting_on_their_own_approvals_stay_quiet",
+    ),
+    (
+        "never alarm on publishers stuck for days",
+        ".github/scripts/release-watchdog.sh",
+        "if ! grep -q 'Release held\\|Release blocked' \"$log\" && "
+        '[ "$age_h" -lt "$APPROVAL_GRACE_H" ]; then',
+        "if true; then",
+        "test_publisher_still_waiting_after_three_days_is_named",
+    ),
+    (
+        "let a wedged release run sit unreported",
+        ".github/scripts/release-watchdog.sh",
+        'if [ -n "$waiting" ] || [ "$unfinished" = "true" ]; then',
+        'if [ -n "$waiting" ]; then',
+        "test_stuck_release_run_alarms_after_three_days",
+    ),
+    (
+        "judge tags older than the run labels",
+        ".github/scripts/release-watchdog.sh",
+        'if [ -n "$run_labels_since" ] && [ "$created" -lt "$run_labels_since" ]; then',
+        "if false; then",
+        "test_tag_from_before_the_run_labels_is_ignored",
+    ),
+    (
+        # The guide half of this guard cannot be mutated here — the harness copies
+        # .github/, scripts/ and this file, not RELEASING.md — so mutate the script
+        # half back to the line PR #628 shipped before the watchdog existed.
+        "leave the release script saying nobody is watching",
+        "scripts/tag-release.sh",
+        'echo "The release watchdog tells you (WOR-922): it opens ONE issue, assigned to you,"',
+        'echo "NOTHING WILL TELL YOU THIS HAPPENED — there is no watchdog yet, so a silent"',
+        "test_the_release_guide_matches_the_watchdog",
+    ),
+    (
+        "count a pull request's forged release run",
+        ".github/scripts/release-watchdog.sh",
+        "-f event=workflow_run ",
+        "",
+        "test_forged_pull_request_run_cannot_silence_the_alarm",
+    ),
+    (
+        "match a longer tag name as this tag",
+        ".github/scripts/release-watchdog.sh",
+        '--arg p "${RUN_TITLE_PREFIX} ${tag} "',
+        '--arg p "${RUN_TITLE_PREFIX} ${tag}"',
+        "test_run_for_a_lookalike_tag_does_not_count",
+    ),
+    (
+        "look only at a run's latest attempt",
+        ".github/scripts/release-watchdog.sh",
+        "jobs?filter=all&per_page=100",
+        "jobs?per_page=100",
+        "test_release_created_on_an_earlier_attempt_stays_quiet",
+    ),
+    (
+        "trust any issue that carries the markers",
+        ".github/scripts/release-watchdog.sh",
+        ".author == $bot and ",
+        "",
+        "test_planted_closed_issue_cannot_silence_the_alarm",
+    ),
+    (
+        "drop the verify-the-commit advice",
+        ".github/scripts/release-watchdog.sh",
+        'if [ "$waiting" = "${RUN_TITLE_PREFIX} ${tag} ${sha}" ]; then',
+        "if false; then",
+        "test_forgotten_approval_files_one_assigned_issue",
+    ),
+    (
+        "stop naming the failed publisher",
+        ".github/scripts/release-watchdog.sh",
+        "grep -E '^::(warning|notice)' \"$log\"",
+        "true",
+        "test_blocked_publisher_files_an_issue_not_a_crash",
+    ),
+    (
+        "stop naming the unfinished publisher",
+        ".github/scripts/release-watchdog.sh",
+        "grep -E '^::(warning|notice)' \"$log\"",
+        "true",
+        "test_publisher_still_waiting_after_three_days_is_named",
+    ),
+    # WOR-1077: the image installs only uv.lock's hashed export.
+    (
+        "drop --require-hashes (image installs unchecked files)",
+        "Dockerfile",
+        # Anchor on the command, not the comment above it that also names the flag.
+        "pip install --no-cache-dir --require-hashes ",
+        "pip install --no-cache-dir ",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "an extra pip3 install the audit never saw",
+        "Dockerfile",
+        "    && pip check\n",
+        "    && pip check \\\n    && pip3 install --no-cache-dir requests\n",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "copy uv from a tag instead of a digest",
+        "Dockerfile",
+        "COPY --from=ghcr.io/astral-sh/uv:",
+        "COPY --from=ghcr.io/astral-sh/uv:latest #",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "a lowercase run that installs a file the lock never hashed",
+        "Dockerfile",
+        "    && pip check\n",
+        "    && pip check\n"
+        "run pip3 install --no-cache-dir --force-reinstall --no-deps msgpack==1.2.4\n",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "copy uv from a tag, with another flag before --from",
+        "Dockerfile",
+        "COPY --from=ghcr.io/astral-sh/uv:",
+        "COPY --chown=0:0 --from=ghcr.io/astral-sh/uv:latest #",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "an indented run the lock never hashed",
+        "Dockerfile",
+        "    && pip check\n",
+        "    && pip check\n  run pip3 install --no-cache-dir requests\n",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "copy uv from a tag, with --from wrapped onto the next line",
+        "Dockerfile",
+        "COPY --from=ghcr.io/astral-sh/uv:",
+        "COPY --chown=0:0 \\\n    --from=ghcr.io/astral-sh/uv:latest #",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "a heredoc after a command runs an install the parser can't see",
+        "Dockerfile",
+        "    && pip check\n",
+        "    && pip check\nRUN /bin/sh <<EOF\npip3 install --no-cache-dir requests\nEOF\n",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "an unpinned image in the first of two RUN mounts",
+        "Dockerfile",
+        "RUN pip install --no-cache-dir --no-deps .",
+        "RUN --mount=type=bind,from=alpine:latest,target=/x"
+        " --mount=type=cache,from=builder,target=/y pip install --no-cache-dir --no-deps .",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "an unpinned RUN mount image under an uppercase FROM= key, which BuildKit accepts",
+        "Dockerfile",
+        "RUN pip install --no-cache-dir --no-deps .",
+        "RUN --mount=type=bind,FROM=alpine:latest,target=/x pip install --no-cache-dir --no-deps .",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "the required scan lets a failing lock check through",
+        ".github/workflows/docker-security.yml",
+        "      - name: Image holds exactly the locked dependency set\n",
+        "      - name: Image holds exactly the locked dependency set\n"
+        "        continue-on-error: true\n",
+        "test_pr_scan_checks_the_image_against_the_lock",
+    ),
+    (
+        "the required scan's lock check can fail without failing the job",
+        ".github/workflows/docker-security.yml",
+        'run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"',
+        'run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE" || true',
+        "test_pr_scan_checks_the_image_against_the_lock",
+    ),
+    (
+        "a release pushes an image nobody checked against the lock",
+        ".github/workflows/publish-docker.yml",
+        'run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"',
+        'run: "true"',
+        "test_release_checks_the_image_before_pushing_it",
+    ),
+    (
+        # The real push step pushes through `outputs`, with `push: false`, so
+        # only its name said it pushed.
+        "a release pushes, under another step name, before the lock check",
+        ".github/workflows/publish-docker.yml",
+        "      - name: Image holds exactly the locked dependency set\n",
+        "      - name: Publish to GHCR\n"
+        "        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6\n"
+        "        with:\n"
+        "          push: false\n"
+        "          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}"
+        "/worthless-proxy,push=true\n"
+        "      - name: Image holds exactly the locked dependency set\n",
+        "test_release_checks_the_image_before_pushing_it",
+    ),
+    (
+        # `type=registry` is the exporter `push: true` stands for: it pushes
+        # whatever `push:` says.
+        "a release pushes via a registry exporter, under another step name, before the lock check",
+        ".github/workflows/publish-docker.yml",
+        "      - name: Image holds exactly the locked dependency set\n",
+        "      - name: Export the image\n"
+        "        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6\n"
+        "        with:\n"
+        "          push: false\n"
+        "          outputs: type=registry,name=ghcr.io/${{ github.repository_owner }}"
+        "/worthless-proxy\n"
+        "      - name: Image holds exactly the locked dependency set\n",
+        "test_release_checks_the_image_before_pushing_it",
+    ),
 ]
 
 
@@ -2556,6 +3116,12 @@ class TestGuardsCanActuallyFail:
     A guard that survives its own mutation is not protecting anything.
     """
 
+    # Two nested pytest runs per case: 13s measured on a loaded host, so the
+    # repo-global 30s budget killed the xdist worker at load avg 143. Same
+    # headroom as the real-process families in conftest.py. Each nested run
+    # gets 50s (2 x 50 < 120) so a genuine hang fails as TimeoutExpired here
+    # instead of the thread-method timeout killing the worker.
+    @pytest.mark.timeout(120)
     @pytest.mark.parametrize(
         ("label", "rel_path", "find", "replace", "guard_test"),
         [pytest.param(*m, id=m[4]) for m in GUARD_MUTATIONS],
@@ -2568,6 +3134,11 @@ class TestGuardsCanActuallyFail:
         # scripts/ too: tag-release.sh guards live there, and without this their
         # mutations silently target a file the copy does not contain.
         shutil.copytree(REPO_ROOT / "scripts", tmp_path / "scripts")
+        # RELEASING.md: the release-guide guard reads it, and without a copy that
+        # guard errors in the control run instead of proving anything.
+        shutil.copy(REPO_ROOT / "RELEASING.md", tmp_path / "RELEASING.md")
+        # Dockerfile: the WOR-1077 guards read it.
+        shutil.copy(REPO_ROOT / "Dockerfile", tmp_path / "Dockerfile")
         (tmp_path / "tests").mkdir()
         shutil.copy(Path(__file__), tmp_path / "tests" / Path(__file__).name)
 
@@ -2605,7 +3176,7 @@ class TestGuardsCanActuallyFail:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=50,
                 check=False,
             )
 
@@ -2756,4 +3327,634 @@ class TestManualFallbackCannotRatifyABrokenRelease:
             "on a protected environment, so no Release after 15 minutes is the normal "
             "state, not evidence the automation failed — and acting on it is what "
             "triggers the race this class guards."
+        )
+
+
+# ------------------------------------------------------------------
+# Release watchdog: a Release that never appears files an issue (WOR-922)
+# ------------------------------------------------------------------
+
+
+def _watchdog_const(name: str) -> str:
+    """Read a `readonly NAME="value"` from release-watchdog.sh.
+
+    Fixtures and contract tests take the run title / job / step names from the
+    script itself, never a hand-typed copy — a copy would agree with a fake gh
+    that agrees with it, and stay green while the real names drift apart.
+    """
+    m = re.search(rf'^readonly {name}="([^"]*)"', RELEASE_WATCHDOG_SCRIPT.read_text(), re.M)
+    assert m, f'release-watchdog.sh no longer declares readonly {name}="..."'
+    return m.group(1)
+
+
+def _hours_ago(hours: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+
+# Fake `gh` for the watchdog. Serves release-notes.yml runs (as PAGES, so a
+# --paginate regression is visible), their jobs, and issues; records every
+# write. Anything else falls through to the fan-in shim, so the REAL
+# release-fanin.sh runs unmodified against RUNS/JOBS.
+#   RN_PAGES  JSON array of pages, each a list of runs {id,status,display_title,event?}
+#             (event defaults to workflow_run; `-f event=X` filters like the real API)
+#   RN_JOBS   JSON object run-id -> jobs list of the LATEST attempt (ids start "rn")
+#   RN_JOBS_OLDER  run-id -> jobs of earlier attempts, served only for ?filter=all
+#   ISSUES    JSON list of issues {number,state,body,user:{login}}
+#   API_DOWN  non-empty => publisher run queries fail like a 502
+#   GH_CALLS  file; each write call appended as args joined by \x1f, ended by \x1e
+_WATCHDOG_GH_SHIM = r"""#!/usr/bin/env bash
+wd_path=""; wd_method=GET; wd_jq=""; wd_pag=no; wd_prev=""; wd_event=""
+for a in "$@"; do
+  case "$wd_prev" in -X) wd_method="$a";; --jq) wd_jq="$a";; esac
+  case "$a" in
+    /repos/*) [ -z "$wd_path" ] && wd_path="$a";;
+    --paginate) wd_pag=yes;;
+    event=*) wd_event="${a#event=}";;
+  esac
+  wd_prev="$a"
+done
+wd_emit() {
+  if [ -n "$wd_jq" ]; then printf '%s' "$1" | jq -c "$wd_jq"; else printf '%s\n' "$1"; fi
+}
+wd_log() { printf '%s\x1f' "$@" >>"$GH_CALLS"; printf '\x1e' >>"$GH_CALLS"; }
+if [ "${1:-}" = "label" ]; then wd_log "$@"; exit 0; fi
+case "$wd_method $wd_path" in
+  POST\ *|PATCH\ *) wd_log "$@"; echo '{}'; exit 0 ;;
+  GET\ */actions/workflows/release-notes.yml/runs*)
+    pages=$RN_PAGES
+    n=$(printf '%s' "$pages" | jq length)
+    for ((p = 0; p < n; p++)); do
+      [ "$p" -gt 0 ] && [ "$wd_pag" = no ] && break
+      wd_emit "$(printf '%s' "$pages" | jq -c --argjson p "$p" --arg ev "$wd_event" \
+        '{workflow_runs: [.[$p][] | select($ev == "" or ((.event // "workflow_run") == $ev))]}')"
+    done
+    exit 0 ;;
+  GET\ */actions/runs/rn*/jobs*)
+    rid=$(printf '%s' "$wd_path" | sed -E 's#.*/actions/runs/([^/?]+)/jobs.*#\1#')
+    rj=$RN_JOBS
+    ro='{}'
+    case "$wd_path" in *filter=all*) ro=$RN_JOBS_OLDER;; esac
+    wd_emit "$(jq -cn --arg r "$rid" --argjson l "$rj" --argjson o "$ro" \
+      '{jobs: (($o[$r] // []) + ($l[$r] // []))}')"
+    exit 0 ;;
+  GET\ */issues*)
+    wd_emit "$ISSUES"
+    exit 0 ;;
+  GET\ */actions/workflows/*/runs*)
+    if [ -n "${API_DOWN:-}" ]; then echo "gh: HTTP 502 Bad Gateway" >&2; exit 1; fi ;;
+esac
+""" + _FANIN_GH_SHIM.split("\n", 1)[1]
+
+
+class TestReleaseWatchdogWiring:
+    """The watchdog exists, runs on its own clock, and agrees with release-notes.yml
+    on the names it links by. WOR-922: deleting it must turn this red."""
+
+    def test_a_missing_release_is_watched_on_a_schedule(self):
+        assert RELEASE_WATCHDOG_WORKFLOW.exists() and RELEASE_WATCHDOG_SCRIPT.exists(), (
+            "no release watchdog: a tag whose Release never appears reaches nobody. "
+            "An orphaned workflow_run listener produces no failed run to notice."
+        )
+        doc = yaml.safe_load(RELEASE_WATCHDOG_WORKFLOW.read_text())
+        triggers = doc.get(True) or doc.get("on") or {}
+        # Its own clock, not workflow_run: the failure being watched for includes
+        # release-notes.yml never firing at all.
+        assert "schedule" in triggers, (
+            "the watchdog must run on a cron, independent of any release run"
+        )
+        assert "workflow_run" not in triggers
+        (job,) = doc["jobs"].values()
+        perms = job.get("permissions", {})
+        assert perms.get("issues") == "write", (
+            "without issues: write the alarm 403s and the job still goes green"
+        )
+        assert perms.get("actions") == "read", "the watchdog reads run and job status"
+        assert perms.get("contents", "read") == "read"
+        runs = [s.get("run", "") for s in job["steps"]]
+        (step,) = [r for r in runs if "bash .github/scripts/release-watchdog.sh" in r]
+        assert step.startswith("timeout "), (
+            "without `timeout`, a hung gh call is killed by timeout-minutes and may conclude "
+            "'cancelled' — which scheduled-failure-alarm ignores, so a stuck watchdog is silent"
+        )
+
+    def test_watchdog_never_trusts_release_objects(self):
+        """Release objects are mutable and ruleset-ungated (TestReleaseSyncTrustAnchor).
+
+        Keying "was it released" on one lets a hand-made Release or a draft silence
+        the alarm — the exact poison path tag-release.sh warns about. The watchdog
+        decides from signed git tags and Actions run data only.
+        """
+        for path in (RELEASE_WATCHDOG_SCRIPT, RELEASE_WATCHDOG_WORKFLOW):
+            code = "\n".join(
+                ln for ln in path.read_text().splitlines() if not ln.lstrip().startswith("#")
+            )
+            hit = re.search(r"\bgh\s+release\b|/releases\b", code)
+            assert hit is None, (
+                f"{path.name} reads GitHub Release objects ({hit.group(0)!r}). They are "
+                "spoofable and ungated; decide from git tags and run data (WOR-922)."
+            )
+
+    def test_the_release_guide_matches_the_watchdog(self):
+        """The guide and the release script told the maintainer nobody was watching.
+
+        That was true until this workflow existed, and it is the kind of line that
+        rots silently: PR #628 rewrote both while this branch was open. While the
+        watchdog ships, saying otherwise sends the maintainer to the manual fallback
+        on a release the automation is already reporting.
+        """
+        guide = (REPO_ROOT / "RELEASING.md").read_text()
+        script = (REPO_ROOT / "scripts" / "tag-release.sh").read_text()
+        for name, text in (("RELEASING.md", guide), ("tag-release.sh", script)):
+            stale = re.search(
+                r"no watchdog yet|nothing alerts you|nothing will tell you", text, re.I
+            )
+            assert stale is None, (
+                f"{name} still says {stale.group(0)!r} while release-watchdog.yml ships — "
+                "the release instructions contradict the automation (WOR-922)."
+            )
+        assert "release-watchdog" in guide, (
+            "RELEASING.md's 'No Release appeared' section must say the watchdog files an issue, "
+            "and what it does not catch — otherwise the maintainer still assumes silence"
+        )
+
+    def test_run_title_contract_matches_release_notes(self, release_notes_data: dict):
+        """workflow_run runs report head_branch=main and the workflow name as their
+        title (measured), so run-name is the ONLY link from a run to its tag."""
+        run_name = release_notes_data.get("run-name")
+        assert run_name, (
+            "release-notes.yml has no run-name; the watchdog cannot tell runs apart by tag"
+        )
+        rendered = run_name.replace(
+            "${{ github.event.workflow_run.head_branch }}", "v1.2.3"
+        ).replace("${{ github.event.workflow_run.head_sha }}", "0123abcd")
+        expected = f"{_watchdog_const('RUN_TITLE_PREFIX')} v1.2.3 0123abcd"
+        assert rendered == expected, (
+            f"release-notes.yml titles a run {rendered!r} but the watchdog looks for "
+            f"{expected!r}. Every release would read as 'never ran' and false-alarm."
+        )
+
+    def test_create_step_contract_matches_release_notes(self, release_notes_data: dict):
+        job_id = _watchdog_const("CREATE_JOB")
+        job = release_notes_data["jobs"].get(job_id)
+        assert job is not None, f"release-notes.yml has no job {job_id!r}"
+        # The jobs API reports a job by its `name:` when set, else its id.
+        assert "name" not in job, (
+            f"{job_id} gained a name:, so the API no longer reports it as {job_id!r}"
+        )
+        step = _watchdog_const("CREATE_STEP")
+        assert step in [s.get("name") for s in job["steps"]], (
+            f"no step named {step!r} in {job_id}. The watchdog counts a tag as released "
+            "only when that step succeeded, so a rename false-alarms every release."
+        )
+
+
+class TestReleaseWatchdogBehaviour:
+    """Run the REAL release-watchdog.sh (and the real release-fanin.sh under it)
+    against real git tags and a fake `gh`. One test per case the prototype and
+    premortem found hard to reason about on paper. WOR-922."""
+
+    ALL_GREEN = TestReleaseFaninBehaviour.ALL_GREEN
+    # A full-length commit id the tag no longer points at.
+    OLD_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+    @staticmethod
+    def _run_title(tag: str, sha: str) -> str:
+        return f"{_watchdog_const('RUN_TITLE_PREFIX')} {tag} {sha}"
+
+    @staticmethod
+    def _one_run(status: str, title: str = "TITLE", **extra) -> list[list[dict]]:
+        """RN_PAGES holding a single release run with id rn1."""
+        return [[{"id": "rn1", "status": status, "display_title": title, **extra}]]
+
+    @staticmethod
+    def _jobs(create_step: str | None) -> list[dict]:
+        steps = (
+            []
+            if create_step is None
+            else [{"name": _watchdog_const("CREATE_STEP"), "conclusion": create_step}]
+        )
+        return [
+            {"name": "gate", "conclusion": "success", "steps": []},
+            {
+                "name": _watchdog_const("CREATE_JOB"),
+                "conclusion": "success" if steps else "skipped",
+                "steps": steps,
+            },
+        ]
+
+    @staticmethod
+    def _issue(state: str, sha: str, author: str | None = None) -> dict:
+        return {
+            "number": 7,
+            "state": state,
+            "body": f"<!-- release-watchdog:v9.9.9 -->\n<!-- release-watchdog-sha:{sha} -->",
+            "user": {"login": author or _watchdog_const("ALARM_AUTHOR")},
+        }
+
+    def _run(
+        self,
+        tmp_path: Path,
+        hours_ago: float,
+        *,
+        runs: str | None = None,
+        rn_pages=None,
+        rn_jobs=None,
+        rn_jobs_older=None,
+        issues=None,
+        run_name_landed_hours_ago: float | None = None,
+        env_extra: dict | None = None,
+    ):
+        """Tag v9.9.9 `hours_ago`; placeholders SHA/TITLE in fixtures resolve to it."""
+        repo = _seed_repo(tmp_path)
+        if run_name_landed_hours_ago is not None:
+            # The commit that gave release-notes.yml its run-name: tags older than
+            # this have runs the watchdog cannot recognise.
+            wf = repo / ".github" / "workflows"
+            wf.mkdir(parents=True)
+            (wf / "release-notes.yml").write_text("run-name: Create GitHub Release x y\n")
+            _git(repo, "add", ".github/workflows/release-notes.yml")
+            _git(repo, "commit", "-q", "-m", "run-name", when=_hours_ago(run_name_landed_hours_ago))
+        _git(repo, "tag", "-a", "v9.9.9", "-m", "v9.9.9", when=_hours_ago(hours_ago))
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        title = self._run_title("v9.9.9", sha)
+
+        def resolve(obj) -> str:
+            return json.dumps(obj).replace("TITLE", title).replace("SHA", sha)
+
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        gh = bindir / "gh"
+        gh.write_text(_WATCHDOG_GH_SHIM)
+        gh.chmod(0o755)
+        calls = tmp_path / "gh_calls"
+        calls.touch()
+        env = {
+            **os.environ,
+            "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+            "GH_REPO": "o/w",
+            "GH_CALLS": str(calls),
+            "RUNS": self.ALL_GREEN if runs is None else runs,
+            "RN_PAGES": resolve(rn_pages if rn_pages is not None else [[]]),
+            "RN_JOBS": resolve(rn_jobs or {}),
+            "RN_JOBS_OLDER": resolve(rn_jobs_older or {}),
+            "ISSUES": resolve(issues or []),
+            **(env_extra or {}),
+        }
+        proc = subprocess.run(
+            ["bash", str(RELEASE_WATCHDOG_SCRIPT)],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        writes = [rec.split("\x1f")[:-1] for rec in calls.read_text().split("\x1e") if rec]
+        return proc, writes, sha
+
+    @staticmethod
+    def _field(call: list[str], key: str) -> str | None:
+        return next((a.split("=", 1)[1] for a in call if a.startswith(f"{key}=")), None)
+
+    @staticmethod
+    def _created(writes: list[list[str]]) -> list[list[str]]:
+        return [c for c in writes if "POST" in c and any(a.endswith("/issues") for a in c)]
+
+    # --- when to stay quiet ------------------------------------------------
+
+    def test_quiet_while_approval_is_fresh(self, tmp_path):
+        proc, writes, _ = self._run(tmp_path, 30, rn_pages=self._one_run("waiting"))
+        assert proc.returncode == 0, proc.stderr
+        assert writes == [], (
+            "a release waiting on its approval click is NORMAL; "
+            "alarming here fires on every correct release"
+        )
+
+    def test_release_found_on_a_later_page_stays_quiet(self, tmp_path):
+        filler = [
+            {
+                "id": f"rnx{i}",
+                "status": "completed",
+                "display_title": "Create GitHub Release main x",
+            }
+            for i in range(3)
+        ]
+        proc, writes, _ = self._run(
+            tmp_path,
+            30,
+            rn_pages=[filler, *self._one_run("completed")],
+            rn_jobs={"rn1": self._jobs("success")},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert writes == [], (
+            "the successful release run was on page 2; without --paginate it is invisible"
+        )
+
+    def test_run_in_flight_is_left_alone(self, tmp_path):
+        proc, writes, _ = self._run(
+            tmp_path,
+            30,
+            rn_pages=self._one_run("in_progress"),
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert writes == []
+
+    def test_brand_new_tag_is_left_alone(self, tmp_path):
+        proc, writes, _ = self._run(tmp_path, 5)
+        assert proc.returncode == 0, proc.stderr
+        assert writes == [], "publishers and the release run need time; a 5h-old tag is not late"
+
+    def test_tags_past_the_window_are_ignored(self, tmp_path):
+        # v0.3.10-12 were released by hand before the automation existed; without a
+        # window the first watchdog run files an issue for each (measured).
+        proc, writes, _ = self._run(tmp_path, 400)
+        assert proc.returncode == 0, proc.stderr
+        assert writes == []
+
+    def test_tag_minutes_past_the_window_is_ignored(self, tmp_path):
+        """The run query starts exactly 14 days back. A tag judged by whole hours
+        stays watched for an extra hour whose release runs the query cannot see,
+        so a normally-released tag reads as 'never ran'."""
+        proc, writes, _ = self._run(tmp_path, 336.5)
+        assert proc.returncode == 0, proc.stderr
+        assert writes == []
+
+    # --- when to alarm ------------------------------------------------------
+
+    def test_forgotten_approval_files_one_assigned_issue(self, tmp_path):
+        proc, writes, sha = self._run(tmp_path, 80, rn_pages=self._one_run("waiting"))
+        assert proc.returncode == 0, proc.stderr
+        created = self._created(writes)
+        assert len(created) == 1, f"expected exactly one issue, got {writes}"
+        body = self._field(created[0], "body") or ""
+        assert "<!-- release-watchdog:v9.9.9 -->" in body
+        assert f"<!-- release-watchdog-sha:{sha} -->" in body
+        assert f"check it was built from commit {sha}" in body, (
+            "a days-old approval request is the one clicked without thinking; the issue must "
+            "say to verify the commit first"
+        )
+        assert self._field(created[0], "assignees[]") == "o", (
+            "an unassigned alarm is the same silence as none"
+        )
+        assert self._field(created[0], "labels[]") == _watchdog_const("LABEL")
+
+    def test_stale_approval_for_a_moved_tag_is_named(self, tmp_path):
+        proc, writes, _ = self._run(
+            tmp_path,
+            80,
+            rn_pages=self._one_run("waiting", self._run_title("v9.9.9", self.OLD_SHA)),
+        )
+        assert proc.returncode == 0, proc.stderr
+        (created,) = self._created(writes)
+        body = self._field(created, "body") or ""
+        assert self.OLD_SHA in body and "reject" in body.lower(), (
+            "the pending approval is for a commit the tag no longer points at; approving it "
+            "fails the re-bind, so the issue must say to reject it"
+        )
+
+    def test_automation_that_never_ran_files_an_issue(self, tmp_path):
+        proc, writes, _ = self._run(tmp_path, 30)
+        assert proc.returncode == 0, proc.stderr
+        (created,) = self._created(writes)
+        assert "never ran" in (self._field(created, "body") or "")
+
+    def test_green_job_with_skipped_create_step_still_alarms(self, tmp_path):
+        """A draft or hand-made Release makes release-notes skip its create step and
+        go green anyway. Job success is not "released"; the step is."""
+        proc, writes, _ = self._run(
+            tmp_path,
+            30,
+            rn_pages=self._one_run("completed"),
+            rn_jobs={"rn1": self._jobs("skipped")},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert len(self._created(writes)) == 1
+
+    def test_blocked_publisher_files_an_issue_not_a_crash(self, tmp_path):
+        """release-fanin.sh exits 1 on a blocked leg AND on a crash; only its ready=
+        line tells them apart. A blocked leg is an alarm, not a broken watchdog."""
+        runs = self.ALL_GREEN.replace(
+            "publish-docker.yml=completed:success", "publish-docker.yml=completed:failure"
+        )
+        proc, writes, _ = self._run(tmp_path, 30, runs=runs)
+        assert proc.returncode == 0, (
+            f"a blocked publisher crashed the watchdog:\n{proc.stdout}\n{proc.stderr}"
+        )
+        (created,) = self._created(writes)
+        assert "publish-docker.yml" in (self._field(created, "body") or "")
+
+    def test_unreachable_api_fails_the_watchdog_run(self, tmp_path):
+        proc, writes, _ = self._run(tmp_path, 30, env_extra={"API_DOWN": "1"})
+        assert proc.returncode != 0, (
+            "fan-in wrote no verdict, yet the watchdog reported success — a broken check "
+            "must go red so scheduled-failure-alarm files it, never look like 'all fine'"
+        )
+        assert self._created(writes) == []
+
+    # --- one issue, not many --------------------------------------------------
+
+    def test_open_issue_is_not_duplicated(self, tmp_path):
+        proc, writes, _ = self._run(tmp_path, 30, issues=[self._issue("open", "SHA")])
+        assert proc.returncode == 0, proc.stderr
+        assert writes == [], "every 6h tick would add an issue or comment"
+
+    def test_open_issue_follows_a_moved_tag(self, tmp_path):
+        """Open issue, then a re-tag: the issue must learn the new commit now, or
+        closing it later reopens it once with 'the tag moved'."""
+        proc, writes, sha = self._run(tmp_path, 30, issues=[self._issue("open", "0ld5ha")])
+        assert proc.returncode == 0, proc.stderr
+        assert self._created(writes) == [] and not [c for c in writes if "comments" in " ".join(c)]
+        (patch,) = [c for c in writes if "PATCH" in c]
+        assert f"<!-- release-watchdog-sha:{sha} -->" in (self._field(patch, "body") or "")
+        assert self._field(patch, "state") is None, "it is already open; only the body changes"
+
+    def test_issue_closed_for_this_commit_stays_closed(self, tmp_path):
+        proc, writes, _ = self._run(tmp_path, 30, issues=[self._issue("closed", "SHA")])
+        assert proc.returncode == 0, proc.stderr
+        assert writes == [], (
+            "you closed this for this exact commit; "
+            "reopening it every 6h is how the watchdog gets disabled"
+        )
+
+    def test_issue_reopens_when_the_tag_moves(self, tmp_path):
+        proc, writes, sha = self._run(tmp_path, 30, issues=[self._issue("closed", "0ld5ha")])
+        assert proc.returncode == 0, proc.stderr
+        assert self._created(writes) == [], "reopen, never duplicate"
+        patch = [c for c in writes if "PATCH" in c and any(a.endswith("/issues/7") for a in c)]
+        assert len(patch) == 1 and self._field(patch[0], "state") == "open"
+        assert f"<!-- release-watchdog-sha:{sha} -->" in (self._field(patch[0], "body") or "")
+
+    # --- things that must not silence the alarm (review findings, PR #616) -----
+
+    def test_forged_pull_request_run_cannot_silence_the_alarm(self, tmp_path):
+        """A PR that edits release-notes.yml runs under the same workflow path and can
+        title itself like a release with a green create step. Only workflow_run runs
+        come from the default branch's file, so only those may count."""
+        proc, writes, _ = self._run(
+            tmp_path,
+            30,
+            rn_pages=self._one_run("completed", event="pull_request"),
+            rn_jobs={"rn1": self._jobs("success")},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert len(self._created(writes)) == 1, "a pull_request run marked the tag released"
+
+    def test_run_for_a_lookalike_tag_does_not_count(self, tmp_path):
+        """A run for a longer tag name that starts with this one must not release it."""
+        proc, writes, _ = self._run(
+            tmp_path,
+            30,
+            rn_pages=self._one_run("completed", self._run_title("v9.9.9@evil", "SHA")),
+            rn_jobs={"rn1": self._jobs("success")},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert len(self._created(writes)) == 1
+
+    def test_release_created_on_an_earlier_attempt_stays_quiet(self, tmp_path):
+        """Re-running a release run that already created the Release skips the step
+        on the new attempt; the jobs API hides older attempts unless asked."""
+        proc, writes, _ = self._run(
+            tmp_path,
+            30,
+            rn_pages=self._one_run("completed"),
+            rn_jobs={"rn1": self._jobs("skipped")},
+            rn_jobs_older={"rn1": self._jobs("success")},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert writes == [], "the Release was created on attempt 1; attempt 2's skip is not a miss"
+
+    def test_planted_closed_issue_cannot_silence_the_alarm(self, tmp_path):
+        """Anyone who can label an issue could plant a closed one carrying the markers,
+        so 'closed for this commit' would swallow the real alarm. Only the watchdog's
+        own issues count."""
+        proc, writes, _ = self._run(tmp_path, 30, issues=[self._issue("closed", "SHA", "mallory")])
+        assert proc.returncode == 0, proc.stderr
+        assert len(self._created(writes)) == 1
+
+    def test_publisher_still_waiting_after_three_days_is_named(self, tmp_path):
+        runs = self.ALL_GREEN.replace(
+            "publish-docker.yml=completed:success", "publish-docker.yml=in_progress:null"
+        )
+        proc, writes, _ = self._run(tmp_path, 80, runs=runs)
+        assert proc.returncode == 0, proc.stderr
+        (created,) = self._created(writes)
+        assert "publish-docker.yml" in (self._field(created, "body") or ""), (
+            "a publisher that never finished is a missing Release too; the issue must name it"
+        )
+
+    def test_publishers_waiting_on_their_own_approvals_stay_quiet(self, tmp_path):
+        """Three of the four publishers sit behind their own environment approvals
+        (pypi, npm-publish, worthless-sh-production — see scripts/tag-release.sh).
+
+        While those wait, fan-in correctly says "not all green". Alarming at 24h
+        would fire on every release the maintainer approves the next working day —
+        the false alarm that killed the two earlier designs.
+        """
+        runs = self.ALL_GREEN.replace("publish.yml=completed:success", "publish.yml=waiting:null")
+        proc, writes, _ = self._run(tmp_path, 30, runs=runs)
+        assert proc.returncode == 0, proc.stderr
+        assert writes == [], (
+            "a publisher still waiting for its own approval is the NORMAL path; "
+            f"the watchdog alarmed anyway:\n{proc.stdout}"
+        )
+
+    def test_stuck_release_run_alarms_after_three_days(self, tmp_path):
+        """A run queued behind the release concurrency group reports pending/queued,
+        not waiting. Skipping every non-completed run forever means a release stuck
+        that way is silent until it ages out — the failure this exists to end."""
+        proc, writes, _ = self._run(tmp_path, 80, rn_pages=self._one_run("in_progress"))
+        assert proc.returncode == 0, proc.stderr
+        (created,) = self._created(writes)
+        body = self._field(created, "body") or ""
+        assert "unfinished for 80h" in body, (
+            "the issue must say the run is wedged, not blame the create step — "
+            f"otherwise it sends you looking in the wrong place:\n{body}"
+        )
+
+    def test_tag_from_before_the_run_labels_is_ignored(self, tmp_path):
+        """Tags cut before release-notes.yml gained its run-name have runs titled
+        with the bare workflow name, so they read as "the automation never ran"."""
+        proc, writes, _ = self._run(tmp_path, 30, run_name_landed_hours_ago=10)
+        assert proc.returncode == 0, proc.stderr
+        assert writes == [], (
+            "a tag older than the run labels cannot be judged; alarming on it makes "
+            f"the first release after merge a false alarm:\n{proc.stdout}"
+        )
+
+    # --- the fake gh cannot prove the real API shape ---------------------------
+
+    def test_watchdog_alarm_path_holds_against_the_real_github_api(self, tmp_path):
+        """Drive the watchdog down its whole alarm path against the LIVE API.
+
+        The fake gh above pins decisions; it cannot catch a query the real API
+        rejects (fan-in's -f POST trap was exactly that). A probe tag 80h old (past
+        the approval grace) that no publisher ever ran for makes it list real release
+        runs, run the real fan-in, and look up real issues — then try to file one.
+
+        Read-only: a wrapper refuses every write and records it. What this does
+        NOT prove: the POST's labels[]/assignees[] syntax, and the jobs query
+        (no real release run matches the probe tag).
+        """
+        real = shutil.which("gh")
+        if real is None:
+            pytest.skip("gh CLI not installed")
+        if subprocess.run(
+            [real, "api", "/rate_limit"], capture_output=True, timeout=60, check=False
+        ).returncode:
+            pytest.skip("no authenticated/reachable GitHub API from this environment")
+        slug = subprocess.run(
+            [real, "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        ).stdout.strip()
+        if not slug:
+            pytest.skip("cannot resolve the repository slug from gh")
+        repo = _seed_repo(tmp_path)
+        _git(repo, "tag", "-a", "v0.0.0-watchdog-probe", "-m", "probe", when=_hours_ago(80))
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        refused = tmp_path / "refused"
+        refused.touch()
+        wrapper = bindir / "gh"
+        # Refuse anything that is not a read: an explicit write method, `gh label`,
+        # or a field without -X GET (gh turns fields into a POST on its own).
+        wrapper.write_text(
+            "#!/usr/bin/env bash\n"
+            "write=no; get=no\n"
+            'for a in "$@"; do case "$a" in\n'
+            "  POST|PATCH|PUT|DELETE) write=yes;; GET) get=yes;;\n"
+            '  -f|-F|--field|--raw-field|--input) [ "$get" = yes ] || write=maybe;;\n'
+            "esac; done\n"
+            '[ "$write" = maybe ] && [ "$get" = no ] && write=yes\n'
+            '[ "${1:-}" = label ] && write=yes\n'
+            f'if [ "$write" = yes ]; then printf "%s\\n" "$*" >>{refused}; '
+            'echo "{}"; exit 0; fi\n'
+            f'exec {real} "$@"\n'
+        )
+        wrapper.chmod(0o755)
+        proc = subprocess.run(
+            ["bash", str(RELEASE_WATCHDOG_SCRIPT)],
+            cwd=repo,
+            env={
+                **os.environ,
+                "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+                "GH_REPO": slug,
+            },
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        assert proc.returncode == 0, (
+            f"watchdog failed against the real API:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+        )
+        attempted = refused.read_text()
+        assert "/issues -X POST" in attempted, (
+            "the probe tag should have reached 'file an issue' after real queries; it did not.\n"
+            f"refused writes: {attempted!r}\n{proc.stdout[-2000:]}"
         )

@@ -8,7 +8,10 @@ import hmac
 import logging
 import os
 import secrets
+import socket
 import sqlite3
+import stat
+import sys
 import threading
 import time
 import weakref
@@ -33,6 +36,15 @@ from worthless.cli.keystore import (
     store_fernet_key,
 )
 from worthless.cli.platform import IS_WINDOWS
+
+# grp is POSIX-only; the module must stay importable on Windows so the CLI can
+# print its refusal (mirrors worthless/openclaw/integration.py).
+if sys.platform != "win32":
+    import fcntl as _fcntl
+    import grp as _grp
+else:
+    _fcntl = None  # type: ignore[assignment]
+    _grp = None  # type: ignore[assignment]
 from worthless.crypto.types import zero_buf
 from worthless.ipc.client import IPCClient, IPCError
 from worthless.proxy.config import DEFAULT_SIDECAR_SOCKET_PATH
@@ -41,6 +53,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE = Path.home() / ".worthless"
 _STALE_LOCK_SECONDS = 300  # 5 minutes
+# WOR-965: what a live lock holder looks like to the next command. One text for
+# every path, and never "delete the lock file" (that lets two commands write).
+_BUSY_MESSAGE = "Another worthless command is running. Wait for it to finish, then try again."
 
 _BOOTSTRAP_ATTEST_PURPOSE = "bootstrap-validate"
 
@@ -120,7 +135,7 @@ class WorthlessHome:
     # observe ``None`` and both call ``read_fernet_key`` — firing duplicate
     # macOS Keychain prompts and discarding one bytearray without
     # ``zero_buf``. Real call site: ``src/worthless/mcp/server.py`` runs
-    # FastMCP's asyncio loop on the main thread but dispatches blocking
+    # MCPServer's asyncio loop on the main thread but dispatches blocking
     # work (``_do_lock``) via ``loop.run_in_executor`` to the default
     # thread pool — main + executor can both touch ``home.fernet_key``.
     _cache_lock: threading.Lock = field(
@@ -410,6 +425,32 @@ def _guard_and_provision_keystore(home: WorthlessHome) -> bool:
         return True
 
 
+_DOCKER_TRAVERSE_MODE = 0o710
+_DOCKER_TRAVERSE_GROUP = "worthless"
+
+
+def _is_docker_group_traverse_dir(path: Path) -> bool:
+    """True when ``path`` is the Docker split-uid home we ourselves widened.
+
+    ``deploy/start.py`` sets ``/data`` to 0o710 so the sidecar (worthless-crypto,
+    group worthless) can traverse into ``/data/run/<pid>/``. ``ensure_home`` used
+    to chmod 0o700 unconditionally, so ``docker exec --user root <c> worthless …``
+    — the command doctor's SIDECAR_NOT_READY hint recommends — cut the sidecar
+    off until the next restart (worthless-agmg).
+
+    Gated on the group too: a pre-created home at 0o710 with an attacker's group
+    is NOT ours and is still tightened. Compares the full 0o7777 so setgid or
+    sticky variants fall through to the tightening branch.
+    """
+    try:
+        st = path.stat()
+        if stat.S_IMODE(st.st_mode) != _DOCKER_TRAVERSE_MODE:
+            return False
+        return _grp.getgrgid(st.st_gid).gr_name == _DOCKER_TRAVERSE_GROUP
+    except (OSError, KeyError):
+        return False
+
+
 def _provision_keystore_path(home: WorthlessHome) -> bool:
     """Run the bare-metal keystore cascade for ``ensure_home``.
 
@@ -524,6 +565,17 @@ def _seed_cache_from_advisory_source(home: WorthlessHome) -> None:
     try:
         key = read_fernet_key_from_file(home.base_dir)
     except WorthlessError as exc:
+        if exc.code is ErrorCode.KEY_REFUSED and keyring_available():
+            # worthless-6hu7: a stale, wrong-mode fernet.key next to a working
+            # keychain key must not lock out every command. The refusal exists
+            # to stop the file being REPLACED, not to block an install whose
+            # real key is in the keychain. Leave the file alone and let the
+            # lazy fetch use the keychain; if the keychain is empty, that read
+            # refuses on its own, so nothing is minted over the file.
+            logger.warning(
+                "ignoring a fernet.key we refuse to read; using the keychain. %s", exc.message
+            )
+            return
         if exc.code != ErrorCode.KEY_NOT_FOUND:
             raise
         logger.debug(
@@ -551,7 +603,8 @@ def ensure_home(base_dir: Path | None = None) -> WorthlessHome:
         home.shard_a_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
         if not IS_WINDOWS:
-            home.base_dir.chmod(0o700)
+            if not _is_docker_group_traverse_dir(home.base_dir):
+                home.base_dir.chmod(0o700)
             home.shard_a_dir.chmod(0o700)
 
         # WOR-465 A3b / A4: under the proxy uid, bypass the keystore cascade
@@ -689,7 +742,14 @@ def _init_db(home: WorthlessHome) -> None:
 
 @contextmanager
 def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
-    """Acquire an exclusive lock file using O_CREAT|O_EXCL."""
+    """Acquire an exclusive lock file using O_CREAT|O_EXCL, held under flock.
+
+    WOR-962: the kernel drops a flock the moment its holder dies, so a lock
+    file left by ``kill -9`` is reclaimed at once (``check_stale_lock``)
+    instead of blocking every command for 5 minutes. "<hostname> <pid>",
+    written once the flock is held, marks "this file is flock-held here"; the
+    PID is never trusted on its own.
+    """
     check_stale_lock(home)
     try:
         fd = os.open(
@@ -697,20 +757,33 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
             0o600,
         )
-        os.close(fd)
     except FileExistsError:
         raise WorthlessError(
             ErrorCode.LOCK_IN_PROGRESS,
-            "Another worthless operation is in progress. "
-            "Remove ~/.worthless/.lock-in-progress if stale.",
+            # WOR-965: never suggest deleting the lock file. A live holder's
+            # lock deleted by hand lets two commands write at once, and a dead
+            # holder's lock is reclaimed automatically (check_stale_lock).
+            _BUSY_MESSAGE,
         ) from None  # FileExistsError context is not useful to callers
+    if _fcntl is None:
+        # Windows: no flock, and an open file can't be unlinked there.
+        os.close(fd)
+        fd = -1
     try:
+        if _fcntl is not None and _take_own_flock(fd):
+            os.write(fd, f"{socket.gethostname()} {os.getpid()}\n".encode())
         yield
     finally:
         try:
-            home.lock_file.unlink()
-        except FileNotFoundError:
-            pass
+            try:
+                home.lock_file.unlink()
+            except FileNotFoundError:
+                pass
+        finally:
+            # After the unlink: no window where the flock is free. In its own
+            # finally: an unlink error must never leave the flock held.
+            if fd >= 0:
+                os.close(fd)
 
 
 def get_home() -> WorthlessHome:
@@ -758,15 +831,116 @@ def resolve_home() -> WorthlessHome | None:
 
 
 def check_stale_lock(home: WorthlessHome) -> None:
-    """Remove stale lock files (> 5 min old), raise on fresh locks."""
-    if not home.lock_file.exists():
+    """Reclaim a lock file whose holder is gone; raise while one is alive.
+
+    WOR-962. A file with content was written under a flock by
+    ``acquire_lock``: if that flock is busy, the holder is alive (never
+    stolen, however old); if we can take it, the holder died, so it goes now.
+    An empty file is a holder between create and flock, an older worthless,
+    or Windows (no flock): those keep the 5-minute rule.
+    """
+    if _fcntl is None:
+        _check_stale_lock_by_age(home)  # Windows: never unlink an open file
         return
-    age = time.time() - home.lock_file.stat().st_mtime
+    try:
+        fd = os.open(str(home.lock_file), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return
+    except OSError:
+        # Another user's file (root in a proxy-owned volume) or a symlink: we
+        # can't look inside, so the path-only 5-minute rule decides.
+        _check_stale_lock_by_age(home)
+        return
+    if not stat.S_ISREG(os.fstat(fd).st_mode):  # a FIFO or a directory
+        os.close(fd)
+        _check_stale_lock_by_age(home)
+        return
+    try:
+        if _holder_is_dead(fd):
+            _unlink_if_same_file(home.lock_file, fd)
+            return
+        age = time.time() - os.fstat(fd).st_mtime
+        if age > _STALE_LOCK_SECONDS:
+            _unlink_if_same_file(home.lock_file, fd)
+        else:
+            raise _fresh_lock_error(age)
+    finally:
+        os.close(fd)
+
+
+def _fresh_lock_error(age: float) -> WorthlessError:
+    return WorthlessError(
+        ErrorCode.LOCK_IN_PROGRESS,
+        # WOR-965: say it clears by itself, so nobody deletes a live lock.
+        "Another worthless command may be running. If nothing is, this lock clears "
+        f"by itself in {max(1, int(_STALE_LOCK_SECONDS - age))}s. Wait, then try again.",
+    )
+
+
+def _check_stale_lock_by_age(home: WorthlessHome) -> None:
+    """The original rule, path-only: remove a lock over 5 minutes old."""
+    try:
+        age = time.time() - home.lock_file.stat().st_mtime
+    except FileNotFoundError:
+        return
     if age > _STALE_LOCK_SECONDS:
         home.lock_file.unlink(missing_ok=True)
     else:
+        raise _fresh_lock_error(age)
+
+
+_OWN_FLOCK_WAIT_SECONDS = 2.0
+
+
+def _take_own_flock(fd: int) -> bool:
+    """flock the lock file we just created, giving up after 2 seconds.
+
+    A reclaimer can hold it only for an instant (it sees an empty file and
+    gives up), unless it was stopped right then. False leaves the file empty,
+    which the 5-minute rule then covers — as does a filesystem without flock.
+    """
+    deadline = time.monotonic() + _OWN_FLOCK_WAIT_SECONDS
+    while True:
+        try:
+            _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)  # type: ignore[union-attr]
+            return True
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.01)
+        except OSError:
+            return False
+
+
+def _holder_is_dead(fd: int) -> bool:
+    """True when the flock is free and the holder wrote this host's name.
+
+    Raises 105 while a live process holds the flock. A filesystem without
+    flock (NFS/SMB) answers False, so the caller keeps the 5-minute rule. So
+    does a lock written on another host: a shared mount's flock may be local
+    to one machine, so "free" there proves nothing.
+    """
+    try:
+        _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)  # type: ignore[union-attr]
+    except BlockingIOError:
         raise WorthlessError(
             ErrorCode.LOCK_IN_PROGRESS,
-            f"Lock file is {int(age)}s old (< {_STALE_LOCK_SECONDS}s). "
-            "Another operation may be running.",
-        )
+            _BUSY_MESSAGE,
+        ) from None
+    except OSError:
+        return False
+    writer = os.read(fd, 256).split(maxsplit=1)
+    return writer[:1] == [socket.gethostname().encode()]
+
+
+def _unlink_if_same_file(path: Path, fd: int) -> None:
+    """Unlink *path* only if it is still the file *fd* has open.
+
+    Two reclaimers can open the same dead file; once the first replaces it
+    with its own live lock, the second must not delete that one.
+    """
+    try:
+        if path.stat().st_ino == os.fstat(fd).st_ino:
+            path.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass

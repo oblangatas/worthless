@@ -9,9 +9,12 @@ Run with:
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -414,6 +417,87 @@ class TestBuild:
         )
         assert result.returncode == 0
 
+    def test_image_holds_exactly_the_locked_runtime_set(self, docker_image: str) -> None:
+        """Every package in the image is the one uv.lock pins, and nothing else (WOR-1077).
+
+        The check lives in scripts/check_image_matches_lock.py so `scan`, a
+        required check, can run it on every PR. This wrapper is how the publish
+        smoke in publish-docker.yml runs it against the image users pull.
+        """
+        result = _run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "check_image_matches_lock.py"),
+                docker_image,
+            ]
+        )
+        assert "match uv.lock" in result.stdout
+
+    def test_lock_check_refuses_two_records_of_one_package(self, docker_image: str) -> None:
+        """A second install record for a locked package fails the check (WOR-1077).
+
+        `pip install --ignore-installed` leaves the old dist-info next to the new
+        one. The check read whichever came last, so a record at the locked
+        version could vouch for files from another release.
+        """
+        tag = f"worthless-test:lock-dup-{uuid.uuid4().hex[:8]}"
+        dockerfile = (
+            f"FROM {docker_image}\n"
+            'RUN sp="$(python -c \'import sysconfig; print(sysconfig.get_path("purelib"))\')"'
+            " \\\n"
+            '    && mkdir "$sp/msgpack-0.0.1.dist-info" \\\n'
+            "    && printf 'Metadata-Version: 2.1\\nName: msgpack\\nVersion: 0.0.1\\n' \\\n"
+            '       > "$sp/msgpack-0.0.1.dist-info/METADATA"\n'
+        )
+        _run(["docker", "build", "-q", "-t", tag, "-"], input=dockerfile)
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts" / "check_image_matches_lock.py"), tag],
+                capture_output=True,
+                text=True,
+                env=_docker_env(),
+                check=False,
+            )
+        finally:
+            subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "more than one install record: msgpack" in proc.stderr, proc.stderr
+
+    def test_lock_check_refuses_a_runtime_version_the_audit_never_sees(
+        self, docker_image: str, tmp_path: Path
+    ) -> None:
+        """The image's lock set must be one the audit checks (WOR-1077).
+
+        The required audit exports uv.lock with the dev group; the image installs
+        the export without it. A dev-group conflict can resolve a package to one
+        version in each, so the image would run a version no required audit
+        checked. A wrapper `uv` stands in for such a lock: it gives websockets a
+        different version only in the export that includes the dev group.
+        """
+        real_uv = shutil.which("uv")
+        assert real_uv, "uv is not on PATH"
+        fake = tmp_path / "uv"
+        fake.write_text(
+            "#!/bin/sh\n"
+            f'case " $* " in *" --no-dev "*) exec "{real_uv}" "$@" ;; esac\n'
+            f'"{real_uv}" "$@" | sed "s/^websockets==[^ ;]*/websockets==0.0.1/"\n'
+        )
+        fake.chmod(0o755)
+        env = _docker_env({"PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"})
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "check_image_matches_lock.py"),
+                docker_image,
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "the audit doesn't check: websockets==" in proc.stderr, proc.stderr
+
     def test_runs_as_non_root(self, container: tuple[str, int]) -> None:
         """The runtime PROCESSES (uvicorn + sidecar) must run as non-root.
 
@@ -479,6 +563,90 @@ class TestBuild:
             f"10002 (crypto), saw uids {sorted(uids_seen)}.\n"
             f"full /proc walk:\n{result.stdout}"
         )
+
+
+# Runs inside the container as worthless-proxy (10001). It serves its own
+# socket, so the kernel reports 10001 for it: the uid of the proxy, not of the
+# sidecar (10002), which is exactly the impostor WOR-1078 is about. The
+# impostor answers hello like a real sidecar and keeps any plaintext a seal
+# hands it, then the same client talks to the real sidecar.
+_IMPOSTOR_PROBE = r"""
+import asyncio, json, os
+from worthless.ipc.client import IPCAuthError, IPCClient
+from worthless.ipc.framing import encode_frame, read_frame
+
+SECRET = b"wor-1078-plaintext-for-the-impostor"
+IMPOSTOR = "/tmp/wor-1078-impostor.sock"
+
+async def main():
+    seen = {"connections": 0, "frames": 0, "plaintext_seen": False}
+
+    async def impostor(reader, writer):
+        seen["connections"] += 1
+        try:
+            while True:
+                frame = await read_frame(reader)
+                seen["frames"] += 1
+                if (frame.get("body") or {}).get("plaintext") == SECRET:
+                    seen["plaintext_seen"] = True
+                writer.write(encode_frame({
+                    "v": 1, "id": frame.get("id"), "kind": "resp", "op": frame.get("op"),
+                    "body": {"version": 1, "backend_caps": ["seal", "open"], "ciphertext": b"ct"},
+                }))
+                await writer.drain()
+        except Exception:
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_unix_server(impostor, path=IMPOSTOR)
+    try:
+        async with IPCClient(IMPOSTOR, timeout=1.0) as client:
+            await client.seal(SECRET)
+        seen["impostor"] = "accepted"
+    except IPCAuthError as exc:
+        seen["impostor"] = "refused"
+        seen["reason"] = str(exc)
+    await asyncio.sleep(0.2)
+    server.close()
+
+    async with IPCClient(os.environ["WORTHLESS_SIDECAR_SOCKET"], timeout=2.0) as client:
+        seen["real_sidecar_roundtrip"] = await client.open(await client.seal(b"ok")) == b"ok"
+    seen["uid"] = os.getuid()
+    seen["expected_sidecar_uid"] = os.environ.get("WORTHLESS_SIDECAR_UID")
+    print(json.dumps(seen))
+
+asyncio.run(main())
+"""
+
+
+class TestSidecarAuthentication:
+    """WOR-1078 on a real kernel: two real uids, no test-side uid forcing."""
+
+    def test_proxy_uid_refuses_an_impostor_socket_and_keeps_its_sidecar(
+        self, container: tuple[str, int]
+    ) -> None:
+        """A socket served by any uid but worthless-crypto never gets a seal plaintext.
+
+        The image's ENV tells clients the sidecar runs as 10002. The impostor is
+        served by 10001, so the client must refuse it before sending a frame,
+        and still complete a seal/open round-trip with the real sidecar.
+        """
+        name, _ = container
+        result = _run(
+            ["docker", "exec", "-u", "10001:10001", name, "python", "-c", _IMPOSTOR_PROBE]
+        )
+        seen = json.loads(result.stdout.strip().splitlines()[-1])
+
+        assert seen["uid"] == 10001
+        assert seen["expected_sidecar_uid"] == "10002"
+        assert seen["impostor"] == "refused", seen
+        assert "not served by the sidecar uid 10002" in seen["reason"]
+        assert "peer uid 10001" in seen["reason"]
+        assert seen["connections"] == 1
+        assert seen["frames"] == 0, f"client sent {seen['frames']} frame(s) to the impostor"
+        assert seen["plaintext_seen"] is False
+        assert seen["real_sidecar_roundtrip"] is True
 
 
 # ===================================================================
@@ -1113,6 +1281,9 @@ class TestLockWrapE2E:
         assert output.startswith("STATUS="), (
             f"Request did not reach proxy. Expected STATUS=<code>, got: {output}"
         )
+        # Except 503: that is the proxy saying it can't reach its sidecar, for
+        # example because it refused a socket served by the wrong uid (WOR-1078).
+        assert output != "STATUS=503", "proxy answered 503: it couldn't reach its sidecar"
 
     def test_wrap_inside_daemon_container_is_rejected(self, container: tuple[str, int]) -> None:
         """v0.3.4 contract: ``worthless wrap`` inside a ``worthless up`` container
@@ -1441,6 +1612,30 @@ class TestComposeSecurity:
         )
 
 
+# In-container fake upstream for the upstream_500 fault (stdlib only; /tmp is noexec).
+_UPSTREAM_500_STUB = """
+import http.server as h
+class H(h.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.send_response(500)
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"error": {"type": "server_error"}}')
+h.HTTPServer(("127.0.0.1", 18080), H).serve_forever()
+"""
+_WAIT_FOR_18080 = """
+import socket, time
+for _ in range(50):
+    try:
+        socket.create_connection(("127.0.0.1", 18080), 0.2).close()
+        break
+    except OSError:
+        time.sleep(0.1)
+else:
+    raise SystemExit("port 18080 not listening")
+"""
+
+
 class TestSDKSmokeDocker:
     """Smoke: SDKs on the host can reach the production Docker image's proxy.
 
@@ -1484,56 +1679,158 @@ class TestSDKSmokeDocker:
         assert result.returncode == 0
         return result.stdout.strip()
 
-    def test_openai_sdk_reaches_proxy_from_host(self, container: tuple[str, int]) -> None:
-        name, port = container
-        fake_key = fake_openai_key()
-        alias = _make_alias("openai", fake_key)
+    def _enroll(
+        self, container_name: str, provider: str, upstream: str | None = None
+    ) -> tuple[str, str]:
+        """Lock a fake key in the container; return (alias, shard_a).
 
-        self._enroll_fake_key(name, "OPENAI_API_KEY", fake_key)
-        shard_a = self._read_shard_a(name, "OPENAI_API_KEY")
-        assert shard_a != fake_key
-        assert shard_a.startswith("sk-")
-
-        client = openai.OpenAI(
-            api_key=shard_a,
-            base_url=f"http://127.0.0.1:{port}/{alias}/v1",
-        )
-        with pytest.raises(openai.APIError) as exc:
-            client.chat.completions.create(
-                model="gpt-4o-mini",
-                max_tokens=1,
-                messages=[{"role": "user", "content": "hi"}],
+        ``upstream`` registers a custom provider URL and locks against it.
+        """
+        fake_key = fake_openai_key() if provider == "openai" else fake_anthropic_key()
+        env_var = f"{provider.upper()}_API_KEY"
+        env_line = fake_key
+        if upstream:
+            reg = docker_exec(
+                container_name,
+                [
+                    "worthless",
+                    "providers",
+                    "register",
+                    "--name",
+                    f"stub-{provider}",
+                    "--url",
+                    upstream,
+                    "--protocol",
+                    provider,
+                ],
             )
-        err_name = type(exc.value).__name__
+            assert reg.returncode == 0, f"register failed: {reg.stderr}"
+            env_line = f"{fake_key}\n{provider.upper()}_BASE_URL={upstream}"
+        self._enroll_fake_key(container_name, env_var, env_line)
+        shard_a = self._read_shard_a(container_name, env_var)
+        assert shard_a != fake_key
+        assert shard_a.startswith("sk-ant-" if provider == "anthropic" else "sk-")
+        return _make_alias(provider, fake_key), shard_a
+
+    def _assert_sdk_reached_upstream(self, provider: str, base_url: str, shard_a: str) -> None:
+        """The smoke assertion; test_smoke_assertion_fails_on_broken_proxy proves it goes red."""
+        if provider == "openai":
+            client = openai.OpenAI(api_key=shard_a, base_url=f"{base_url}/v1", max_retries=0)
+            # APIStatusError = an HTTP response came back. APIConnectionError
+            # (proxy unreachable) is NOT a subclass, so it escapes and fails.
+            with pytest.raises(openai.APIStatusError) as exc:
+                client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+        else:
+            client = anthropic.Anthropic(api_key=shard_a, base_url=base_url, max_retries=0)
+            with pytest.raises(anthropic.APIStatusError) as exc:
+                client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+        # 401 + sanitized upstream message = proxy dispatched the alias, rebuilt
+        # the fake key, and the real provider rejected it. A broken alias lookup
+        # ("authentication required"), unreachable upstream (502), dead sidecar
+        # (503), or crash page (500) all fail here.
+        assert exc.value.status_code == 401, exc.value.response.text
+        assert "upstream provider error" in exc.value.response.text
         err_str = str(exc.value).lower()
-        assert "connectionerror" != err_name, (
-            f"SDK raised raw ConnectionError — proxy unreachable: {exc.value}"
-        )
         assert "traceback" not in err_str
         assert "worthless" not in err_str
+
+    def test_openai_sdk_reaches_proxy_from_host(self, container: tuple[str, int]) -> None:
+        name, port = container
+        alias, shard_a = self._enroll(name, "openai")
+        self._assert_sdk_reached_upstream("openai", f"http://127.0.0.1:{port}/{alias}", shard_a)
 
     def test_anthropic_sdk_reaches_proxy_from_host(self, container: tuple[str, int]) -> None:
         name, port = container
-        fake_key = fake_anthropic_key()
-        alias = _make_alias("anthropic", fake_key)
+        alias, shard_a = self._enroll(name, "anthropic")
+        self._assert_sdk_reached_upstream("anthropic", f"http://127.0.0.1:{port}/{alias}", shard_a)
 
-        self._enroll_fake_key(name, "ANTHROPIC_API_KEY", fake_key)
-        shard_a = self._read_shard_a(name, "ANTHROPIC_API_KEY")
-        assert shard_a != fake_key
-        assert shard_a.startswith("sk-ant-")
-
-        client = anthropic.Anthropic(
-            api_key=shard_a,
-            base_url=f"http://127.0.0.1:{port}/{alias}",
-        )
-        with pytest.raises(anthropic.APIError) as exc:
-            client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=1,
-                messages=[{"role": "user", "content": "hi"}],
+    # Proves the smoke assertion goes RED on a broken image. Without this, a
+    # future edit could loosen it back to "any error" and stay green on a dead proxy.
+    @pytest.mark.parametrize("provider", ["openai", "anthropic"])
+    @pytest.mark.parametrize(
+        ("fault", "expected", "match"),
+        [
+            # Nothing listening on the port.
+            pytest.param(
+                "unreachable_port",
+                (openai.APIConnectionError, anthropic.APIConnectionError),
+                None,
+                id="unreachable_port",
+            ),
+            # Proxy up, alias unknown: uniform 401 "authentication required".
+            pytest.param(
+                "unknown_alias", AssertionError, "authentication required", id="unknown_alias"
+            ),
+            # uvicorn (uid 10001) is tini's child: killing it stops the container.
+            pytest.param(
+                "proxy_killed",
+                (openai.APIConnectionError, anthropic.APIConnectionError),
+                None,
+                id="proxy_killed",
+            ),
+            # Sidecar (uid 10002) dead, proxy up: 503 "sidecar unavailable".
+            pytest.param(
+                "sidecar_killed", AssertionError, "sidecar unavailable", id="sidecar_killed"
+            ),
+            # Upstream never resolves (RFC 6761 .invalid): proxy answers 502.
+            pytest.param(
+                "upstream_unreachable",
+                AssertionError,
+                r"(?s)bad gateway.*assert 502 == 401",
+                id="upstream_unreachable",
+            ),
+            # Upstream answers 500: proxy relays it sanitized. "server_error" comes
+            # only from the stub, so a proxy-side crash can't satisfy this.
+            pytest.param(
+                "upstream_500",
+                AssertionError,
+                r"(?s)server_error.*upstream provider error.*assert 500 == 401",
+                id="upstream_500",
+            ),
+        ],
+    )
+    def test_smoke_assertion_fails_on_broken_proxy(
+        self,
+        container: tuple[str, int],
+        provider: str,
+        fault: str,
+        expected: type[BaseException] | tuple[type[BaseException], ...],
+        match: str | None,
+    ) -> None:
+        name, port = container
+        upstream = None
+        if fault == "upstream_unreachable":
+            upstream = "https://upstream.invalid"
+        elif fault == "upstream_500":
+            upstream = "http://127.0.0.1:18080"
+            subprocess.run(
+                ["docker", "exec", "-d", name, "python", "-c", _UPSTREAM_500_STUB],
+                capture_output=True,
+                check=True,
             )
-        err_name = type(exc.value).__name__
-        err_str = str(exc.value).lower()
-        assert "connectionerror" != err_name
-        assert "traceback" not in err_str
-        assert "worthless" not in err_str
+            ready = docker_exec(name, ["python", "-c", _WAIT_FOR_18080])
+            assert ready.returncode == 0, f"stub upstream never listened: {ready.stderr}"
+        alias, shard_a = self._enroll(name, provider, upstream)
+        base_url = f"http://127.0.0.1:{port}/{alias}"
+        if fault == "unreachable_port":
+            base_url = f"http://127.0.0.1:1/{alias}"
+        elif fault == "unknown_alias":
+            base_url = f"http://127.0.0.1:{port}/{provider}-00000000"
+        elif fault in ("proxy_killed", "sidecar_killed"):
+            uid = "10001" if fault == "proxy_killed" else "10002"
+            # kill -1 as that uid signals only that uid's processes (no CAP_KILL needed).
+            subprocess.run(
+                ["docker", "exec", "-u", uid, name, "sh", "-c", "kill -9 -1"],
+                capture_output=True,
+                check=False,
+            )
+        with pytest.raises(expected, match=match):
+            self._assert_sdk_reached_upstream(provider, base_url, shard_a)

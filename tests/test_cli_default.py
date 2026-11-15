@@ -13,16 +13,18 @@ Pipeline phases:
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.errors import ErrorCode, WorthlessError
 
-from tests.helpers import fake_anthropic_key, fake_openai_key
+from tests.helpers import fake_anthropic_key, fake_key, fake_openai_key
 
 runner = CliRunner()
 
@@ -63,8 +65,6 @@ def env_no_keys(tmp_path: Path) -> Path:
 @pytest.fixture()
 def env_many_keys(tmp_path: Path) -> Path:
     """Create a .env with 6 keys to test truncation."""
-    from tests.helpers import fake_key
-
     lines = []
     for i in range(6):
         lines.append(f"OPENAI_KEY_{i}={fake_key('sk-proj-', seed=f'key-{i}')}")
@@ -379,6 +379,38 @@ class TestEdgeCases:
         )
         # Should still succeed (proxy started) even with partial lock
         assert result.exit_code == 0, result.stdout + result.stderr
+
+    @pytest.mark.parametrize(
+        "code", [73, 87, 129, 130, 143], ids=["openclaw", "refused", "sighup", "ctrl-c", "sigterm"]
+    )
+    def test_lock_failure_keeps_its_exit_code(
+        self,
+        code: int,
+        home_dir: WorthlessHome,
+        env_with_two_keys: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """worthless-nhc0: a failed or interrupted lock under bare `worthless` keeps its code.
+
+        It was swallowed to exit 0, so scripts and agents read success after
+        Ctrl-C, `docker stop`, or LOCK FAILED. The proxy must not start either.
+        """
+        monkeypatch.chdir(env_with_two_keys.parent)
+
+        def failing_lock(*_a: object, **_k: object) -> int:
+            raise typer.Exit(code=code)
+
+        started: list[object] = []
+        monkeypatch.setattr("worthless.cli.default_command._lock_keys", failing_lock)
+        monkeypatch.setattr(
+            "worthless.cli.default_command.start_supervised_proxy",
+            lambda *a, **kw: started.append(a) or 54321,
+        )
+
+        result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)}, args=["--yes"])
+
+        assert result.exit_code == code, result.stdout + result.stderr
+        assert started == [], "the proxy started after the lock failed"
 
     def test_many_keys_truncated_display(
         self,
@@ -768,3 +800,157 @@ class TestSecurity:
         combined = result.stdout + result.stderr
         # Should show both keys; the unsupported one should be noted
         assert "OPENAI_API_KEY" in combined
+
+
+class TestDefaultCommandOAuthOnlyEnv:
+    """worthless-p55g: bare ``worthless`` offered to lock a Claude Code OAuth
+    token that lock refuses by design, then said "0 of 1 keys protected.
+    Re-run to retry the rest." — a retry that can never succeed.
+    """
+
+    @pytest.mark.parametrize("args", [[], ["--yes"]], ids=["report-only", "yes"])
+    def test_oauth_token_is_named_not_offered(
+        self,
+        args: list[str],
+        home_dir: WorthlessHome,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'p55g-default')}\n"
+        )
+        monkeypatch.setattr(
+            "worthless.cli.default_command.start_supervised_proxy",
+            lambda *a, **kw: 54321,
+        )
+        monkeypatch.setattr("worthless.cli.default_command.poll_health", lambda *a, **kw: True)
+
+        result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)}, args=args)
+        low = " ".join((result.stdout + result.stderr).split()).lower()
+
+        assert result.exit_code == 0, low
+        # Not offered: lock would skip it, so both of these are dead ends.
+        assert "to protect these keys" not in low, low
+        assert "re-run to retry" not in low, low
+        # Named, honestly, with a fix that exists.
+        assert "can't protect" in low, low
+        assert "sk-ant-api03" in low, low
+
+    def test_quiet_stays_silent_on_an_oauth_only_env(
+        self,
+        home_dir: WorthlessHome,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Documented in the PR: bare `worthless --quiet` is the user's explicit
+        # choice for silence, and nothing fails — exit 0, nothing printed.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'p55g-default-quiet')}\n"
+        )
+
+        result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)}, args=["--quiet"])
+
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "can't protect" not in (result.stdout + result.stderr).lower()
+
+    def test_committed_env_token_is_told_to_revoke(
+        self,
+        home_dir: WorthlessHome,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Same rule as scan: a .env in git has already left the machine, so
+        # "swap it" is not enough — the token has to be revoked.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'p55g-default-committed')}\n"
+        )
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S607
+        subprocess.run(["git", "-C", str(tmp_path), "add", ".env"], check=True)  # noqa: S607
+        subprocess.run(  # noqa: S607
+            [  # noqa: S607
+                "git",
+                "-C",
+                str(tmp_path),
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-q",
+                "-m",
+                "x",
+            ],
+            check=True,
+        )
+
+        result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)})
+        low = " ".join((result.stdout + result.stderr).split()).lower()
+
+        assert result.exit_code == 0, low
+        assert "committed to git" in low, low
+        assert "revoke" in low, low
+
+    def test_env_only_older_commits_hold_gets_the_history_warning(
+        self,
+        home_dir: WorthlessHome,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # worthless-87rb: same warning as scan when the .env was committed and
+        # then untracked — local now, but an older commit still holds it.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', '87rb-default-history')}\n"
+        )
+        git = ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t"]
+        git += ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"]
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S607
+        subprocess.run([*git, "add", ".env"], check=True)  # noqa: S603
+        subprocess.run([*git, "commit", "-q", "-m", "x"], check=True)  # noqa: S603
+        leaked = subprocess.run(  # noqa: S603
+            [*git, "rev-parse", "--short", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        subprocess.run([*git, "rm", "-q", "--cached", ".env"], check=True)  # noqa: S603
+        subprocess.run([*git, "commit", "-q", "-m", "untrack"], check=True)  # noqa: S603
+
+        result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)})
+        low = " ".join((result.stdout + result.stderr).split()).lower()
+
+        assert result.exit_code == 0, low
+        assert "older commits hold a copy of" in low, low
+        assert f"commit {leaked}" in low, low
+        assert "committed to git" not in low, low
+
+    def test_mixed_env_locks_the_real_key_and_reports_done(
+        self,
+        home_dir: WorthlessHome,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Before: "1 of 2 keys protected. Re-run to retry the rest." — the rest
+        # was the login token, and no re-run could ever protect it.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'p55g-default-mixed')}\n"
+            f"OPENAI_API_KEY={fake_openai_key()}\n"
+        )
+        monkeypatch.setattr(
+            "worthless.cli.default_command.start_supervised_proxy",
+            lambda *a, **kw: 54321,
+        )
+        monkeypatch.setattr("worthless.cli.default_command.poll_health", lambda *a, **kw: True)
+
+        result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)}, args=["--yes"])
+        low = " ".join((result.stdout + result.stderr).split()).lower()
+
+        assert result.exit_code == 0, low
+        assert "re-run to retry" not in low, low
+        assert "1 key protected" in low, low
+        assert "can't protect" in low, low

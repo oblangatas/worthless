@@ -74,12 +74,22 @@ jobs:
       - name: Build image
         run: docker build -t worthless-proxy:${{ github.sha }} .
 
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+
+      # WOR-1077: the image holds exactly uv.lock's runtime set, the one
+      # dependency-audit.yml audits. Here because `scan` is required and
+      # docker-e2e is not. First after the build, so an expired grype ignore
+      # or a CVE fails the job without hiding this step's result.
+      - name: Image holds exactly the locked dependency set
+        env:
+          IMAGE: worthless-proxy:${{ github.sha }}
+        run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"
+
       # Grype silently drops the unknown `expiry` key in .grype.yaml, so a
       # suppression dated 2020 still suppresses. The pre-commit hook that
       # enforces expiry is bypassed by Dependabot, web edits, --no-verify and
       # any clone that never ran `pre-commit install` — so it has to run here
       # too, right before the scan it is protecting. WOR-852.
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
       - name: Grype ignores are dated and current
         # --no-project: this only parses ~50 lines of YAML, so there is no
         # reason to sync the whole project venv for it.
@@ -97,7 +107,7 @@ jobs:
       # findings, all four named with reachability arguments in .grype.yaml.
       # A fifth now fails the build, which is the entire point. WOR-852.
       - name: Grype vulnerability scan (fixable only, fail on MEDIUM+)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           image: worthless-proxy:${{ github.sha }}
           severity-cutoff: medium
@@ -110,7 +120,7 @@ jobs:
       # table was ~181 rows nobody reads on a green job.
       - name: Grype full scan (including unfixed)
         id: full_scan
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         env:
           # Read the ignore-free config, NOT .grype.yaml. Otherwise this scan
           # inherits the gate's suppressions and a CVE we have accepted shows
@@ -193,7 +203,7 @@ jobs:
 
       - name: Grype arm64 (fixable only, fail on MEDIUM+)
         if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           image: docker-archive:${{ env.ARM64_TAR }}
           severity-cutoff: medium
@@ -204,7 +214,7 @@ jobs:
       - name: Grype arm64 full scan (including unfixed)
         id: arm64_full_scan
         if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         env:
           GRYPE_CONFIG: .grype-informational.yaml
         with:
@@ -406,7 +416,47 @@ jobs:
           SDIST="$(find /tmp/sdist-check -maxdepth 1 -name '*.tar.gz' -type f)"
           echo "sdist under test: $SDIST"
           uv venv /tmp/sdist-venv --python 3.13
+          # Start from a certifi older than GHSA-6q48-6c7w-9gw2's fix, as an
+          # existing install would have; the step below checks it was upgraded.
+          VIRTUAL_ENV=/tmp/sdist-venv uv pip install certifi==2026.7.22
           VIRTUAL_ENV=/tmp/sdist-venv uv pip install "$SDIST"
+
+      # pip and uv keep an installed dependency that still meets the floor, so
+      # only pyproject's certifi floor moves an existing install off the
+      # emSign roots. Check what the proxy's TLS trusts, not the version: ask
+      # the installed proxy for the context its provider calls use, with no
+      # WORTHLESS_UPSTREAM_CA_BUNDLE (SSL_CERT_FILE no longer applies, #744).
+      - name: Installing worthless drops the emSign roots certifi 2026.10.23 removed
+        run: |
+          set -euo pipefail
+          cd /tmp
+          /tmp/sdist-venv/bin/python - <<'PY'
+          import certifi
+          from worthless.proxy.upstream import _upstream_ssl_context
+
+          names = {
+              value
+              for cert in _upstream_ssl_context(None).get_ca_certs()
+              for rdn in cert["subject"]
+              for key, value in rdn
+              if key == "commonName"
+          }
+          assert len(names) > 100, f"only {len(names)} roots loaded; is this certifi's list?"
+          # The three roots 2026.10.23 dropped, plus the other two roots the
+          # oss-security notice lists for the compromised keys (the CHANGELOG
+          # names them), so neither can come back unnoticed.
+          banned = {
+              "emSign ECC Root CA - G3",
+              "emSign Root CA - C1",
+              "emSign ECC Root CA - C3",
+              "emSign Root TLS CA - G3",
+              "AAA Certificate Services",
+          }
+          assert not names & banned, (
+              f"certifi {certifi.__version__} still trusts {sorted(names & banned)}"
+          )
+          print(f"certifi {certifi.__version__}: {len(names)} roots, none of {sorted(banned)}")
+          PY
 
       # THE POINT OF THIS JOB. `worthless --version` is importlib.metadata — it
       # reads installed METADATA and never touches the package tree, so it

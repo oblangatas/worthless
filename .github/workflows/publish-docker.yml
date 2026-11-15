@@ -189,6 +189,15 @@ jobs:
           tags: worthless-proxy:scan-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      # WOR-1077: the image holds exactly uv.lock's runtime set, before anything
+      # is pushed. The smoke job checks the pulled image too, but only once it is
+      # public. First after the build, as in docker-security.yml's `scan`. amd64
+      # only: the arm64 build is a tarball this runner can't run natively.
+      - name: Image holds exactly the locked dependency set
+        env:
+          IMAGE: worthless-proxy:scan-${{ github.sha }}
+        run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"
+
       # Grype (Anchore) replaces Trivy (Aqua) after the TeamPCP supply-chain
       # compromise of aquasecurity/trivy-action in Feb-Mar 2026. Different
       # vendor, different codebase, different CI pipeline — limits blast
@@ -200,7 +209,7 @@ jobs:
       # while a Medium blocked a branch — the strict gate guarding the
       # proposal, the loose one guarding the artifact. WOR-871.
       - name: Grype release-gate amd64 (fail on MEDIUM+)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           image: worthless-proxy:scan-${{ github.sha }}
           severity-cutoff: medium
@@ -229,7 +238,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Grype release-gate arm64 (fail on MEDIUM+)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           # docker-archive: scheme tells Grype to read the tarball directly
           # (via its internal libs). No daemon load needed for foreign arch.
@@ -246,7 +255,7 @@ jobs:
       # CVEs shipped. This scan reads the ignore-free config so the release
       # record states what we chose to carry. Mirrors docker-security.yml.
       - name: Grype full scan amd64 (including unfixed — informational)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         env:
           GRYPE_CONFIG: .grype-informational.yaml
         with:
@@ -261,7 +270,7 @@ jobs:
       # amd64 informational scan cannot see it. Both arches ship; both arches
       # get a record of what they carry.
       - name: Grype full scan arm64 (including unfixed — informational)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         env:
           GRYPE_CONFIG: .grype-informational.yaml
         with:
@@ -438,10 +447,12 @@ jobs:
       - name: Pull published image from registry
         run: docker pull "${IMAGE_REF}"
 
+      # `locked_runtime_set` (WOR-1077): the image users pull holds exactly
+      # uv.lock's runtime set. This runner pulls the amd64 image only.
       - name: Run Docker smoke tests against published image
         env:
           WORTHLESS_DOCKER_IMAGE: ${{ env.IMAGE_REF }}
         run: |
           uv run pytest tests/test_docker_e2e.py -v -m docker \
-            -k "container_starts_healthy or enroll_and_healthz or runs_as_non_root" \
+            -k "container_starts_healthy or enroll_and_healthz or runs_as_non_root or locked_runtime_set" \
             --tb=short

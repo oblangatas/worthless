@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tests.helpers import skip_if_root
 
 
 class TestScanFinding:
@@ -215,6 +216,7 @@ class TestScanGuards:
         assert findings == []
         assert skipped == []
 
+    @skip_if_root
     def test_unreadable_existing_file_recorded(self, tmp_path: Path):
         """A regular file the OS refuses to read (here: chmod 000) IS a fail-
         closed concern — we don't know what we missed. Recorded as ``unreadable``."""

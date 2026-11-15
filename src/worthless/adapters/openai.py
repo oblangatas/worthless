@@ -60,6 +60,8 @@ class OpenAIAdapter:
         base_url: str,
     ) -> AdapterRequest:
         out_headers = strip_internal_headers(headers)
+        # WOR-979: a client may also send shard-A as x-api-key; forward only ours.
+        out_headers.pop("x-api-key", None)
         out_headers["authorization"] = f"Bearer {api_key.decode()}"
         new_body = _inject_include_usage(body)
         if new_body is not body:

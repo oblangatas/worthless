@@ -58,8 +58,8 @@ Create two environments:
 
 | Name | Required reviewers | Wait timer | Deployment branches |
 |---|---|---|---|
-| `worthless-sh-preview` | 0 (solo dev) | 0 min | `main`, `feature/wor-300-*` |
-| `worthless-sh-production` | 0 (per WOR-330; solo until v2.x) | 0 min | tags matching `v*` only |
+| `worthless-sh-preview` | 0 (solo dev) | 0 min | `main` |
+| `worthless-sh-production` | 1 — the maintainer (since 2026-09-13; WOR-330 had kept it at 0) | 0 min | tags matching `v*` only |
 
 Each environment scopes secrets:
 
@@ -137,10 +137,13 @@ Then in the repo's Settings → Secrets and variables → Actions →
 
 #### Verifying the setup
 
-Push a test signed tag against a sandbox branch:
+Push a test tag, signed the way `tag-release.sh` signs (a bare `git tag -s` signs with SSH on the
+maintainer's machine, and CI refuses it). The push starts all four publishers — reject their
+approvals:
 
 ```bash
-git tag -s v0.0.0-verify-test -m "test"
+# <fingerprint> = GPG_FINGERPRINT in scripts/tag-release.sh
+git -c gpg.format=openpgp -c user.signingkey=<fingerprint> tag -s v0.0.0-verify-test -m "test"
 git push origin v0.0.0-verify-test
 gh run watch
 # Verify step should print: "Tag v0.0.0-verify-test verified against pinned fingerprint <FPR>."
@@ -162,25 +165,10 @@ rotation window must be re-signed against the new key before push.
 
 ## Per-release deploy
 
-Standard release procedure once setup is complete:
-
-```bash
-# 1. From the feature branch, ensure tests are green and PR is merged.
-gh pr checks <PR>
-gh pr merge <PR> --squash
-
-# 2. Pull latest main locally.
-git checkout main && git pull
-
-# 3. Tag with a signed tag (gpg key configured in git config).
-git tag -s v0.3.1 -m "Release v0.3.1 — <one-line summary>"
-
-# 4. Push the tag. This fires .github/workflows/deploy-worker.yml.
-git push origin v0.3.1
-
-# 5. Watch the deploy workflow.
-gh run watch
-```
+The Worker deploys as part of every release — follow [RELEASING.md](../../RELEASING.md). Tag
+with `scripts/tag-release.sh`, never a bare `git tag -s`: on the maintainer's machine that signs
+with SSH, and CI refuses it. The tag push starts `.github/workflows/deploy-worker.yml`, which
+waits for the maintainer's approval on `worthless-sh-production` before it deploys.
 
 The workflow's smoke-test step verifies `curl worthless.sh | sha256sum`
 matches `X-Worthless-Script-Sha256` matches the build-time hash. If the
@@ -289,20 +277,25 @@ identified.
 
 ### 2. Re-deploy a known-good tag (~2 minutes)
 
-Production deploys are tag-only — there is no `workflow_dispatch` path
-into production (the dispatch trigger only offers `preview`). Rollback
-is by re-tagging a known-good commit and pushing the new signed tag:
+Production deploys are tag-only — the `workflow_dispatch` trigger only offers `preview`. Two
+ways back:
+
+- **The known-good release ran in the last 30 days:** open its **Deploy Worker (worthless-sh)**
+  run → **Re-run all jobs**, then approve `worthless-sh-production`.
+- **Older than that:** tag the last-good commit with a clearly named rollback tag, signed the same
+  way `tag-release.sh` signs (a bare `git tag -s` signs with SSH here, and CI refuses it):
 
 ```bash
-git checkout v0.3.0      # the last-good tag (or its commit sha)
-git tag -s v0.3.2-rollback-of-v0.3.1 -m "Roll back v0.3.1 — see <incident>"
-git push origin v0.3.2-rollback-of-v0.3.1
+# <fingerprint> = GPG_FINGERPRINT in scripts/tag-release.sh
+git -c gpg.format=openpgp -c user.signingkey=<fingerprint> \
+    tag -s v<next>-rollback-of-v<bad> v<good> -m "Roll back v<bad> — see <incident>"
+git push origin v<next>-rollback-of-v<bad>
 ```
 
-Convention: rollback tags are clearly named so the audit trail shows
-intent. The deploy workflow's GPG-verify step gates the rollback tag
-the same way it gates a forward release — sign with the maintainer
-key whose fingerprint matches `MAINTAINER_GPG_FINGERPRINT`.
+A rollback tag starts all four publishers, not only the Worker. Approve only **Deploy Worker
+(worthless-sh)** and reject the PyPI and npm approvals; the GHCR image has no approval and
+publishes anyway. Name rollback tags clearly so the audit trail shows intent. The deploy
+workflow's GPG-verify step checks a rollback tag the same way it checks a forward release.
 
 ### 3. Domain compromise (~5 minutes, last resort)
 
@@ -409,10 +402,11 @@ acknowledged before each release:
    wire the audit log into a notification channel before scaling
    beyond ~10 deploys/year (brutus round-3 follow-up).
 
-For solo dev, **production environment required-reviewers stays at 0**
-(per WOR-330) — but the `worthless-sh-production` env's deployment-branch
-rule restricts it to `v*` tags only, so a malicious workflow_dispatch
-cannot cut a production deploy without a signed tag.
+Production requires the maintainer's approval (since 2026-09-13; WOR-330 had kept it at 0 for
+solo dev), and its deployment-branch rule restricts it to `v*` tags, so a `workflow_dispatch`
+cannot deploy production. Neither rule requires the tag to be *signed*: the signature check runs
+from the tagged commit, so anyone who can push a tag can skip it. See
+[What a signed tag does NOT stop](../../RELEASING.md#what-a-signed-tag-does-not-stop).
 
 ---
 

@@ -14,6 +14,12 @@ from worthless.cli.commands.doctor.checks.fernet_drift import _INSTRUCTIONS as _
 PLAYBOOKS: dict[str, str] = {
     # Each playbook LEADS with the plain-language verdict (safe / gone / at risk),
     # glosses any jargon once, then names the one command to run (WOR-778).
+    "fernet_key_refused": (
+        "Nothing is lost — your encryption key is still on disk; worthless just "
+        "won't read (or replace) it while its permissions, owner or file type look "
+        "wrong. The error names the exact fix, usually `chmod 0600` on the key. If "
+        "the path is a symlink, move it aside and put the real key back in its place."
+    ),
     "recovery_import": (
         "No secret at risk — a sibling-Mac recovery file didn't finish importing "
         "(your keys aren't lost). Re-run `worthless doctor` to retry; the import is "
@@ -40,9 +46,21 @@ PLAYBOOKS: dict[str, str] = {
         "key is allowlisted and never touched."
     ),
     "stranded_shards": (
-        "Nothing at risk — a shard file (one half of a split key) has no matching database "
-        "row, usually from a crash mid-revoke. Run `worthless doctor --fix` to unlink it; "
-        "a lone shard is unusable on its own."
+        "Nothing at risk — a shard file (one half of a split key) has no link in the "
+        "database. Doctor's fix removes it only when the key's other half is gone too, so "
+        "it can never be used; a file whose key is still stored is kept, because that key "
+        "is probably recoverable."
+    ),
+    "dead_proxy_run_dirs": (
+        "A key is at risk on disk — a `worthless up` or `wrap` that stopped without "
+        "cleaning up left both halves of it, readable only by you. Run `worthless doctor "
+        "--fix` to delete the folder; doctor only deletes it once nothing is using it."
+    ),
+    "unlocked_keys": (
+        "A key is exposed — a lock was cut off (kill -9, crash, power loss) before it "
+        "rewrote the `.env`, so the real key is still there in plain text. Run "
+        "`worthless lock --env <that .env>` to finish it. Don't use `doctor --fix` or "
+        "`uninstall`: lock reuses the stored half, so other copies of the key keep working."
     ),
     "fernet_drift": _FERNET_DRIFT,
     "broken_status": (
@@ -65,9 +83,18 @@ PLAYBOOKS: dict[str, str] = {
     ),
     "unshardable_credentials": (
         "These aren't API keys — they're OAuth logins (Claude Code, Codex, Gemini, MiniMax, "
-        "or Google Vertex), and the proxy can't shard or protect them at all. Run `worthless "
-        "doctor --fix` to clear the ones you don't need; each provider re-prompts you to log "
-        "in again on next use. Vertex needs one extra step after clearing: "
-        "`gcloud auth application-default login`."
+        "Google Vertex, or an OpenClaw auth profile), and the proxy can't shard or protect "
+        "them at all. Each finding's `location` says where it is, so you can remove only the "
+        "ones you don't need: delete a plain file path (if it's a symlink, delete the file it "
+        "points to; deleting the link leaves the login in place); for `keychain:<name>`, run "
+        '`security delete-generic-password -s "<name>"`; for `<file>#<id>`, delete only the '
+        "`<id>` entry under `profiles` in that file, not the whole file, which can hold other "
+        "profiles too. Each provider asks you to log in again on next use. Vertex needs one "
+        "extra step after removing its login: `gcloud auth application-default login`, which "
+        "writes to the default path, so if `GOOGLE_APPLICATION_CREDENTIALS` named the file you "
+        "removed, unset `GOOGLE_APPLICATION_CREDENTIALS` or point it at the new file. One "
+        "exception: a Vertex file whose `type` field is `service_account` is a service-account "
+        "key, not a login. Google never lets you download one again and `gcloud` doesn't "
+        "recreate it, so keep it."
     ),
 }

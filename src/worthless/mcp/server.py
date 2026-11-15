@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]  # optional dep
+from mcp.server.mcpserver import MCPServer  # type: ignore[import-not-found]  # optional dep
+from mcp.server.mcpserver.exceptions import (  # type: ignore[import-not-found]
+    ToolError,
+    UnexpectedToolError,
+)
 
 from worthless.cli.bootstrap import (
     WorthlessHome,
@@ -19,7 +24,27 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.process import check_proxy_health, resolve_port
 from worthless.storage.sqlite import connect as sqlite_connect
 
-mcp = FastMCP("worthless")
+
+class _WorthlessMCPServer(MCPServer):
+    """MCPServer whose tools' WorthlessError messages reach the agent (WOR-929).
+
+    mcp 2.x hides the text of any tool exception other than ``ToolError``, so an
+    agent would see "Error executing tool …" instead of "Run `worthless lock`
+    first". WorthlessError messages are written for users, so they are re-raised
+    as ToolError; every other crash stays hidden.
+    """
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], context: Any = None) -> Any:
+        try:
+            return await super().call_tool(name, arguments, context)
+        except UnexpectedToolError as exc:
+            if isinstance(exc.__cause__, WorthlessError):
+                raise ToolError(f"Error executing tool {name}: {exc.__cause__}") from exc
+            raise
+
+
+# mcp 2.x reports an empty version unless told; hosts show and log it.
+mcp = _WorthlessMCPServer("worthless", version=version("worthless"))
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +175,7 @@ async def worthless_status() -> str:
         _list_enrolled_keys,
         _resolve_home_for_status,
         _status_verdict,
+        _survives_restart_for,
     )
     from worthless.cli.sentinel import is_partial, read_sentinel
 
@@ -165,11 +191,11 @@ async def worthless_status() -> str:
     keys: list[dict[str, str]] = []
     proxy_info: dict[str, Any] = {"healthy": False, "port": None, "mode": None}
     sentinel: dict[str, Any] | None = None
+    # _list_enrolled_keys calls asyncio.run() internally, raising RuntimeError
+    # inside MCPServer's running event loop. Run in a thread executor — the
+    # same pattern used by worthless_lock in this file.
+    loop = asyncio.get_running_loop()
     if home is not None:
-        # _list_enrolled_keys calls asyncio.run() internally, raising
-        # RuntimeError inside FastMCP's running event loop. Run in a thread
-        # executor — the same pattern used by worthless_lock in this file.
-        loop = asyncio.get_running_loop()
         keys = await loop.run_in_executor(None, _list_enrolled_keys, home)
         port = _discover_proxy_port(home)
         if port is not None:
@@ -186,7 +212,12 @@ async def worthless_status() -> str:
     # so a squatter on the port can't forge a green verdict on this surface
     # either — the whole point of routing both through `_status_verdict`.
     identified = "bind_probe_count" in proxy_info
-    verdict, header = _status_verdict(keys, bool(proxy_info["healthy"]), degraded, identified)
+    # WOR-860: same restart fact the CLI status uses, so the editor's green
+    # header can't promise more than the terminal's.
+    survives = await loop.run_in_executor(None, _survives_restart_for, home, proxy_info)
+    verdict, header = _status_verdict(
+        keys, bool(proxy_info["healthy"]), degraded, identified, survives_restart=survives
+    )
 
     return json.dumps(
         {
@@ -196,6 +227,7 @@ async def worthless_status() -> str:
             "proxy": proxy_info,
             "sentinel": _safe_sentinel(sentinel),
             "degraded": degraded,
+            "survives_restart": survives,
         },
         default=str,
     )
@@ -211,6 +243,15 @@ async def worthless_scan(
     Detects unprotected API keys in .env files and config files.
     Returns structured findings with provider, location, and protection status.
 
+    ``summary.unprotected`` counts every key that isn't protected.
+    ``summary.unshardable`` is the subset ``worthless lock`` can't fix: a
+    Claude Code login token in a local, uncommitted .env file. Such a finding
+    may carry ``committed_before``: the newest commit, on any branch or tag,
+    that added or changed that .env. It still passes; tell the user to revoke
+    any login token that was ever in it. Don't run lock
+    for those — follow the finding's ``remediation``. Any finding with a
+    ``remediation`` is a login token lock refuses, wherever it sits.
+
     Args:
         paths: Files to scan. If empty, scans .env and .env.local in cwd.
         deep: Extended scan — also checks *.yml, *.yaml, *.toml, *.json,
@@ -224,7 +265,7 @@ async def worthless_scan(
         _collect_fast_paths,
         _load_db_state_async,
     )
-    from worthless.cli.scanner import SkippedFile, scan_files
+    from worthless.cli.scanner import SkippedFile, finding_to_dict, scan_files
 
     explicit = [Path(p) for p in (paths or [])]
 
@@ -246,7 +287,7 @@ async def worthless_scan(
         # the agent doesn't misread "0 findings" as "clean" on a partial scan.
         #
         # scan_files is synchronous and can run for up to SCAN_TIME_BUDGET_S
-        # seconds. Calling it inline would block the FastMCP event loop and
+        # seconds. Calling it inline would block the MCPServer event loop and
         # starve other concurrent MCP tool calls — offload to a thread executor
         # (same pattern worthless_status / worthless_lock use in this file).
         # ``skipped`` is mutated in-place inside the executor; the reference
@@ -259,22 +300,15 @@ async def worthless_scan(
             enrolled_locations=enrolled,
             deadline=deadline,
             skipped=skipped,
+            env_dump=tmp_file,
         )
 
-        items = [
-            {
-                "file": f.file,
-                "line": f.line,
-                "var_name": f.var_name,
-                "provider": f.provider,
-                "is_protected": f.is_protected,
-                "value_preview": f.value_preview,
-            }
-            for f in findings
-        ]
+        # Same per-finding shape as `scan --json`, so the two can't drift.
+        items = [finding_to_dict(f) for f in findings]
 
         protected = sum(1 for f in findings if f.is_protected)
-        unprotected = sum(1 for f in findings if not f.is_protected)
+        unshardable = sum(1 for f in findings if f.is_unshardable and not f.is_protected)
+        unprotected = len(findings) - protected  # unshardable is a subset of this
 
         return json.dumps(
             {
@@ -283,6 +317,7 @@ async def worthless_scan(
                     "total": len(findings),
                     "protected": protected,
                     "unprotected": unprotected,
+                    "unshardable": unshardable,
                 },
                 "enrollment_checker_available": enrollment_checker_available,
                 # Additive fields (c5kc): tell the calling agent which files

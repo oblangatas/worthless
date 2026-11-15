@@ -43,7 +43,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests._docker_helpers import docker_available
+from tests._docker_helpers import docker_available, image_present
 from tests.helpers import fake_openai_key
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -52,10 +52,6 @@ MOCK_DOCKERFILE_DIR = str(REPO_ROOT / "tests" / "openclaw" / "mock-upstream")
 _MOCK_PORT = 9999
 _MODEL = "openai/gpt-4o"
 _UI_PLACEHOLDER = "Message Assistant (Enter to send)"
-
-
-def _image_present(ref: str) -> bool:
-    return subprocess.run(["docker", "image", "inspect", ref], capture_output=True).returncode == 0
 
 
 def _chromium_available() -> bool:
@@ -76,7 +72,7 @@ pytestmark = [
     pytest.mark.playwright,
     pytest.mark.skipif(not docker_available(), reason="Docker not available"),
     pytest.mark.skipif(
-        not _image_present(OC_WORTHLESS_IMAGE),
+        not image_present(OC_WORTHLESS_IMAGE),
         reason=f"{OC_WORTHLESS_IMAGE} not built (see module docstring)",
     ),
     pytest.mark.skipif(
