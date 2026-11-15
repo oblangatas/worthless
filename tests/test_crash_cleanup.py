@@ -142,11 +142,17 @@ def test_kill_9_on_wrap_takes_its_proxy_with_it(sandbox: tuple[Path, dict[str, s
     )
     kids: dict[str, psutil.Process] = {}
     try:
+        # wrap starts its child only once the proxy is healthy. Killing wrap
+        # earlier ends a proxy still logging startup into wrap's pipe (EPIPE),
+        # which passes on main too.
         deadline = time.monotonic() + 30
-        while "proxy" not in kids and time.monotonic() < deadline:
+        child_up = False
+        while not child_up and time.monotonic() < deadline:
             kids = _children(wrap.pid)
+            child_up = any(marker in c.cmdline() for c in psutil.Process(wrap.pid).children())
             time.sleep(0.2)
         assert "proxy" in kids, "wrap never started its proxy"
+        assert child_up, "wrap never started its child"
 
         wrap.send_signal(signal.SIGKILL)
         wrap.wait(timeout=5)
