@@ -8,7 +8,6 @@ test_install_docker.py (marked 'docker').
 
 from __future__ import annotations
 
-import re
 import subprocess  # noqa: S404
 from pathlib import Path
 
@@ -21,8 +20,11 @@ from tests._install_helpers import (
     EXIT_PIPX_CONFLICT,
     EXIT_PLATFORM,
     INSTALL_SH,
+    _TOOL_PYTHON,
+    _UV_VERSION,
     install_sh_with_pin,
     read_install_pin,
+    read_install_var,
     run_install,
     write_happy_path_stubs,
     write_stub,
@@ -37,7 +39,8 @@ from tests._install_helpers import (
 def test_default_install_pins_baked_version(tmp_path: Path) -> None:
     """With no WORTHLESS_VERSION, install.sh must install `worthless==<pin>`,
     never bare `worthless` (which would resolve PyPI latest — F-06/F-49) and
-    never via `uv tool upgrade` (also resolves latest)."""
+    never via `uv tool upgrade` (also resolves latest). It names the Python too:
+    unrequested, uv 0.13 picks 3.15 and builds PyYAML from source (WOR-1116)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_happy_path_stubs(bin_dir)
@@ -47,7 +50,7 @@ def test_default_install_pins_baked_version(tmp_path: Path) -> None:
 
     pin = read_install_pin()
     log = (tmp_path / "uv-invocations.log").read_text()
-    assert f"tool install --force worthless=={pin}" in log, (
+    assert f"tool install --force --python {_TOOL_PYTHON} worthless=={pin}" in log, (
         f"default install must pin to worthless=={pin}.\nuv log:\n{log}"
     )
     assert "tool upgrade" not in log, (
@@ -235,7 +238,7 @@ def test_leading_dash_pin_is_not_arg_injection(tmp_path: Path) -> None:
 
     run_install(bin_dir, install_sh=patched)
     log = (tmp_path / "uv-invocations.log").read_text()
-    assert "--force worthless==-rf" in log, (
+    assert f"--force --python {_TOOL_PYTHON} worthless==-rf" in log, (
         f"pin must be passed as `worthless==<pin>`, never a standalone "
         f"argument uv could interpret as a flag.\nuv log:\n{log}"
     )
@@ -400,7 +403,7 @@ def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
         "uv",
         'env >> "$HOME/uv-env.log" || true\n'
         'case "$1" in\n'
-        '  --version) echo "uv 0.11.7" ;;\n'
+        f'  --version) echo "uv {_UV_VERSION}" ;;\n'
         '  tool) shift; case "$1" in\n'
         '    install|upgrade) echo "ok" ;;\n'
         "    list) ;;\n"
@@ -759,7 +762,7 @@ def test_success_with_persistent_rc_but_missing_parent_path_says_open_terminal(
 def _failing_uv_stub(install_stderr: str = "") -> str:
     """Build a uv stub whose `tool install` fails with the given stderr."""
     return f"""case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
     list) ;;  # empty → fast-path miss; forces the install attempt
     install)
@@ -1012,7 +1015,7 @@ def test_a_half_finished_install_repairs_itself_on_the_next_run(tmp_path: Path) 
         "uv",
         f"""printf 'uv %s\\n' "$*" >> "$HOME/uv-invocations.log"
 case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) echo "worthless v{pinned}" ;;
@@ -1066,7 +1069,7 @@ def test_a_genuine_no_op_install_still_short_circuits(tmp_path: Path) -> None:
         "uv",
         f"""printf 'uv %s\\n' "$*" >> "$HOME/uv-invocations.log"
 case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) echo "worthless v{pinned}" ;;
@@ -1132,7 +1135,7 @@ def test_a_present_but_broken_entry_point_still_repairs(tmp_path: Path) -> None:
         "uv",
         f"""printf 'uv %s\\n' "$*" >> "$HOME/uv-invocations.log"
 case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) echo "worthless v{pinned}" ;;
@@ -1192,7 +1195,7 @@ def test_the_fast_path_looks_where_uv_actually_put_the_binary(tmp_path: Path) ->
         "uv",
         f"""printf 'uv %s\\n' "$*" >> "$HOME/uv-invocations.log"
 case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) echo "worthless v{pinned}" ;;
@@ -1302,7 +1305,7 @@ def test_a_planted_uv_never_performs_the_install(tmp_path: Path, already_install
         "uv",
         f"""echo "LEGIT $*" >> {log}
 case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) case "$2" in
     list) [ -x "$HOME/.local/bin/worthless" ] && echo "worthless v{pin}" ;;
     install)
@@ -1330,7 +1333,7 @@ esac""",
         "uv",
         f"""echo "EVIL  $*" >> {log}
 case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) case "$2" in dir) echo "$HOME/.local/bin" ;; esac ;;
 esac""",
     )
@@ -1348,7 +1351,7 @@ esac""",
     if already_installed:
         expected = ["--version", "tool list", "tool dir --bin", "tool dir --bin"]
     else:
-        install = f"tool install --force worthless=={pin}"
+        install = f"tool install --force --python {_TOOL_PYTHON} worthless=={pin}"
         expected = ["--version", "tool list", install, "tool dir --bin"]
     if not already_installed:
         # Brutus on this PR: ~/.config/uv/uv.toml pointed the GENUINE uv at an
@@ -1380,7 +1383,7 @@ def test_an_unpinned_uv_left_after_bootstrap_never_installs(tmp_path: Path) -> N
     bin_dir = home / "bin"
     bin_dir.mkdir(parents=True)
     log = tmp_path / "stale-uv.log"
-    sha = re.search(r'ASTRAL_INSTALLER_SHA256="([0-9a-f]+)"', INSTALL_SH.read_text()).group(1)
+    sha = read_install_var("ASTRAL_INSTALLER_SHA256")
 
     write_stub(bin_dir, "uname", "echo Darwin")
     write_stub(bin_dir, "sw_vers", 'echo "14.5"')
@@ -1447,7 +1450,7 @@ def test_a_broken_install_reports_an_error_not_success(tmp_path: Path) -> None:
         bin_dir,
         "uv",
         f"""case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) ;;

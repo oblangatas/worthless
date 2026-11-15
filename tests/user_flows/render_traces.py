@@ -164,7 +164,7 @@ class TraceRunner:
                 bin_dir,
                 "uv",
                 """case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv 0.13.7" ;;
   tool) shift; case "$1" in
     list) echo "worthless v0.3.0" ;;
     install|upgrade) echo "unexpected reinstall" >&2; exit 1 ;;
@@ -225,7 +225,7 @@ exit 0""",
                 bin_dir,
                 "uv",
                 """case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv 0.13.7" ;;
   tool) shift; case "$1" in
     list) ;;
     install) echo "x No solution found when resolving dependencies" >&2; exit 1 ;;
@@ -262,7 +262,7 @@ esac""",
                 bin_dir,
                 "uv",
                 """case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv 0.13.7" ;;
   tool) shift; case "$1" in
     list) echo "worthless v0.2.0" ;;
     install) echo "installed $3" ;;

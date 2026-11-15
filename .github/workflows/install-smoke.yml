@@ -15,6 +15,7 @@ on:
       - "tests/test_uninstall_sh.py"
       - "tests/_install_helpers.py"
       - "tests/install_fixtures/**"
+      - "tests/live/test_install_uv_trust_live.py"
       - ".github/workflows/install-smoke.yml"
   push:
     branches:
@@ -26,6 +27,7 @@ on:
       - "tests/test_uninstall_sh.py"
       - "tests/_install_helpers.py"
       - "tests/install_fixtures/**"
+      - "tests/live/test_install_uv_trust_live.py"
       - ".github/workflows/install-smoke.yml"
 
 permissions:
@@ -62,6 +64,35 @@ jobs:
         run: |
           uv sync --extra test
           uv run pytest -q tests/test_install_static.py tests/test_install_shellcheck.py tests/test_install_logic.py tests/test_uninstall_sh.py tests/test_install_shadow_warning.py
+
+  uv-trust:
+    # WOR-1116: the pinned uv, installed through the SHA-checked Astral
+    # installer as install.sh does, must refuse a server chained to emSign ECC
+    # Root CA - G3 (the root above the compromised eMudhra keys), and a server
+    # whose leaf is signed with one of those keys (CPython's test chain), even
+    # when the chain's root is given as a trust anchor. Fails if eMudhra's test
+    # site or CPython's test data is gone, or the site no longer chains to that
+    # root: a skip here would leave the job green with the check lost.
+    name: Pinned uv refuses the emSign G3 root and the compromised keys
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: static
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+
+      - name: Run the live trust test
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+          WORTHLESS_UV_TRUST_REQUIRED: "1"
+        run: |
+          uv sync --extra test
+          uv run pytest -q -rs -m live tests/live/test_install_uv_trust_live.py
 
   execute:
     name: Execute install.sh (${{ matrix.os }})
@@ -112,6 +143,14 @@ jobs:
           echo "WORTHLESS_VERSION=$V" >> "$GITHUB_ENV"
           echo "PR install-test will install published worthless==$V (baked pin is asserted by the daily monitor + the release tag)."
 
+      - name: Plant an older uv-managed Python 3.14 (WOR-1116)
+        # A returning user's managed 3.14 can predate 3.14.10, whose ssl rejects
+        # the compromised eMudhra keys. install.sh must not reuse it: the check
+        # after install fails if Worthless runs on it. The planting uv lives in
+        # pipx's cache, so install.sh still bootstraps its own.
+        shell: bash
+        run: pipx run --spec uv==0.13.7 uv python install --no-bin 3.14.4
+
       - name: Run install.sh
         env:
           # Force the same managed-Python path real users get on a fresh box.
@@ -135,6 +174,10 @@ jobs:
           "$(uv tool dir --bin)/worthless" --version 2>&1 | tee install-smoke-traces/verify-version-${{ runner.os }}.log
           # And via uv tool list (smoke that the tool is registered).
           uv tool list 2>&1 | tee install-smoke-traces/uv-tool-list-${{ runner.os }}.log
+          # WOR-1116: install.sh's TOOL_PYTHON. 3.14.10's ssl rejects the
+          # compromised eMudhra keys; the planted 3.14.4 must not be reused, and
+          # unrequested, uv 0.13 would pick 3.15.
+          "$(uv tool dir)/worthless/bin/python" -c 'import sys; v = sys.version_info[:3]; print("worthless runs on Python %d.%d.%d" % v); assert (3, 14, 10) <= v < (3, 15), v'
 
       - name: Re-run install.sh — must be idempotent (upgrade path)
         env:
