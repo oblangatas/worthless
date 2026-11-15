@@ -14,6 +14,7 @@ honest warning, and ``doctor --fix`` clears a detected surface end to end.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.openclaw import unshardable_credentials as uc
 
-from tests.helpers import fake_openai_key
+from tests.helpers import fake_openai_key, skip_if_root
 
 runner = CliRunner()
 
@@ -78,6 +79,8 @@ def test_surface1_claude_cli_keychain(
     findings = uc.detect_unshardable_credentials()
     finding = _find_surface(findings, "claude_cli_keychain")
     assert finding.clear_kind == "keychain"
+    # doctor's fix advice tells users what to run for a `keychain:<name>` location.
+    assert finding.location == f"keychain:{uc.CLAUDE_CLI_KEYCHAIN_SERVICE}"
     assert not finding.needs_vertex_reauth_notice
 
     assert uc.clear_unshardable_credential(finding)
@@ -131,6 +134,7 @@ def test_surface3_codex_cli_auth_file_and_keychain(
     keychain_finding = _find_surface(findings, "codex_cli_keychain")
     assert file_finding.clear_kind == "file"
     assert keychain_finding.clear_kind == "keychain"
+    assert keychain_finding.location == f"keychain:{uc.CODEX_CLI_KEYCHAIN_SERVICE}"
 
     assert uc.clear_unshardable_credential(file_finding)
     assert uc.clear_unshardable_credential(keychain_finding)
@@ -288,6 +292,20 @@ def test_surface8_vertex_adc_needs_reauth_notice(
 # ---------------------------------------------------------------------------
 
 
+def _warn_line(output: str) -> str:
+    """lock's ``[WARN]`` line, unwrapped, without the ``[NOTE]`` that may follow."""
+    flat = " ".join(output.split())
+    return flat[flat.index("[WARN]") :].split("[NOTE]")[0]
+
+
+def _assert_warn_points_at_doctor_json(output: str) -> None:
+    # Plain `doctor --fix` doesn't run this check, so it can't clear these:
+    # the warning must name the command that lists them.
+    warn = _warn_line(output)
+    assert "worthless doctor --json" in warn, warn
+    assert "doctor --fix" not in warn, warn
+
+
 def test_lock_prints_warning_when_unshardable_credential_present(
     home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -310,7 +328,7 @@ def test_lock_prints_warning_when_unshardable_credential_present(
 
     assert result.exit_code == 0, result.output
     assert "cannot protect" in result.output.lower() or "cannot protect" in result.stderr.lower()
-    assert "worthless doctor --fix" in result.output or "worthless doctor --fix" in result.stderr
+    _assert_warn_points_at_doctor_json(result.output)
 
 
 def test_lock_warns_about_oauth_credentials_when_no_shardable_keys_exist(
@@ -347,7 +365,7 @@ def test_lock_warns_about_oauth_credentials_when_no_shardable_keys_exist(
     assert "no unprotected api keys found" in out
     # THE FIX: the OAuth warning now fires on the zero-shardable-keys path too.
     assert "cannot protect" in out
-    assert "worthless doctor --fix" in result.output
+    _assert_warn_points_at_doctor_json(result.output)
 
 
 def test_doctor_fix_clears_unshardable_credential_via_cli(
@@ -419,6 +437,46 @@ def test_doctor_fix_vertex_adc_prints_gcloud_reauth_remediation(
     entry = next(f for f in check["fixed"] if f["surface_id"] == "vertex_adc")
     assert "gcloud auth application-default login" in entry.get("remediation", ""), entry
     assert not adc_path.exists()
+
+
+def test_doctor_playbook_points_at_no_fix_command() -> None:
+    """`doctor --json` attaches this playbook to each finding, and `doctor
+    --explain` prints it. Plain `doctor --fix` doesn't run this check, so
+    sending users there leaves every credential in place. `--json --fix` does
+    run it, but deletes every listed file, including a Vertex service-account
+    key Google never lets you download again, and runs every other check's fix
+    without asking. Until `--fix` can tell that key from a login, the advice
+    gives only the steps to remove each one by hand (council, 2026-11-10).
+    """
+    from worthless.cli.commands.doctor.checks._remediation import PLAYBOOKS
+
+    play = " ".join(PLAYBOOKS["unshardable_credentials"].split())
+    assert "--fix" not in play, play
+
+
+def test_doctor_playbook_says_how_to_remove_one_by_hand() -> None:
+    """The playbook offers removing only the ones you don't need, so it must
+    say how for each ``location`` form, the way ``--fix`` clears it. A
+    ``<file>#<id>`` is one entry in an auth-profiles.json that can hold other
+    profiles too: deleting the whole file would take those with it. Deleting
+    a symlinked file removes only the link, which is why ``--fix`` refuses
+    one. And a Vertex finding can be a service-account key: Google never lets
+    you download one again, so the advice must say to keep it.
+    """
+    from worthless.cli.commands.doctor.checks._remediation import PLAYBOOKS
+
+    play = " ".join(PLAYBOOKS["unshardable_credentials"].split())
+    assert "OpenClaw" in play, play
+    assert 'security delete-generic-password -s "<name>"' in play, play
+    assert "under `profiles`" in play, play
+    assert "not the whole file" in play, play
+    assert "if it's a symlink, delete the file it points to" in play, play
+    # Not the JSON form: Semgrep's secret scan (src/ only) reads that as a key.
+    assert "whose `type` field is `service_account`" in play, play
+    assert "keep it" in play, play
+    # gcloud writes to the default path, so a GOOGLE_APPLICATION_CREDENTIALS
+    # still naming the cleared file leaves Vertex pointing at nothing.
+    assert "unset `GOOGLE_APPLICATION_CREDENTIALS`" in play, play
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +657,16 @@ def test_lock_surfaces_detection_caveats_on_non_macos(
     out = result.output
     assert "[NOTE]" in out, "the coverage caveat must be surfaced on the lock path"
     assert "could not be checked" in out
-    assert "worthless doctor" in out, "the NOTE must point the user at the full check"
+    # Plain `worthless doctor` doesn't run this check and can say "No issues
+    # found.", so pointing there would turn the caveat back into an all-clear.
+    flat = " ".join(out.split())
+    assert "worthless doctor --json" in flat, (
+        "the NOTE must point the user at the command that runs this check"
+    )
+    # doctor runs the same probe as lock, so it can't check what lock couldn't:
+    # the NOTE says what doctor lists instead of promising a fuller check.
+    assert "to list the logins it finds and the places it couldn't check" in flat
+    assert "full check" not in flat, "doctor --json repeats this check; it isn't a fuller one"
 
 
 def test_doctor_summary_names_the_credentials_when_found(
@@ -691,35 +758,76 @@ def test_doctor_fix_reports_symlinked_credential_as_unfixed_with_reason(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    hasattr(os, "geteuid") and os.geteuid() == 0,
-    reason="root ignores chmod, so the unreadable directory would still be readable "
-    "and this test would pass without exercising anything",
+@pytest.fixture(params=["this-python", "python-3.14"])
+def pathlib_like(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run once with this interpreter's pathlib, once with Python 3.14's.
+
+    Under a directory this process can't search, ``Path.is_file()`` and its
+    siblings raise ``PermissionError`` on 3.10-3.13 but return False on 3.14.
+    CI runs this suite on 3.10 and 3.13, so the second run gives them 3.14's
+    answer: ``os.path``'s versions have always swallowed the error.
+    """
+    if request.param == "python-3.14":
+        for name, probe in (
+            ("is_file", os.path.isfile),
+            ("is_dir", os.path.isdir),
+            ("exists", os.path.exists),
+            ("is_symlink", os.path.islink),
+        ):
+            monkeypatch.setattr(Path, name, lambda self, *_a, _probe=probe, **_k: _probe(self))
+
+
+@skip_if_root
+@pytest.mark.usefixtures("pathlib_like")
+@pytest.mark.parametrize(
+    ("credential", "surface"),
+    [
+        (".claude/.credentials.json", "Claude Code CLI"),
+        (".codex/auth.json", "Codex CLI"),
+        (".gemini/oauth_creds.json", "Gemini CLI"),
+        (".minimax/oauth_creds.json", "MiniMax CLI"),
+        (".config/gcloud/application_default_credentials.json", "Vertex AI ADC"),
+    ],
 )
 def test_unreadable_credential_dir_is_caveated_not_crashed(
-    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch, credential: str, surface: str
 ) -> None:
-    """WOR-823: ``Path.is_file()`` does not swallow EACCES, so a credential
-    directory this process can't traverse used to raise ``PermissionError``
-    straight out of detection and take down the whole scan (confirmed
-    empirically). It must now fail soft AND say what it couldn't check.
+    """WOR-823: a credential directory this process can't traverse used to
+    raise ``PermissionError`` straight out of detection and take down the
+    whole scan (confirmed empirically). It must now fail soft AND say what it
+    couldn't check, for every file surface, on every Python version.
     """
     monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
-    gemini_dir = sandboxed_home / ".gemini"
-    gemini_dir.mkdir(parents=True)
-    (gemini_dir / "oauth_creds.json").write_text('{"refresh_token": "fake"}')
-    gemini_dir.chmod(0o000)
+    path = sandboxed_home / credential
+    path.parent.mkdir(parents=True)
+    path.write_text('{"refresh_token": "fake"}')
+    path.parent.chmod(0o000)
     try:
         caveats: list[str] = []
         findings = uc.detect_unshardable_credentials(caveats)  # must not raise
     finally:
-        gemini_dir.chmod(0o700)  # always restore so tmp cleanup works
+        path.parent.chmod(0o700)  # always restore so tmp cleanup works
 
     assert findings == [], "an un-probeable surface is reported absent, not invented"
-    assert any("could not be checked" in c for c in caveats), (
-        f"the blind spot must be surfaced, got {caveats!r}"
+    assert any(surface in c and "could not be checked" in c for c in caveats), (
+        f"the blind spot must be surfaced and name its surface, got {caveats!r}"
     )
-    assert any("Gemini" in c for c in caveats), "the caveat must name which surface"
+
+
+def test_credential_file_in_a_symlink_loop_is_caveated(
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pathlib's ``is_file()`` reports a symlink loop as absent. A loop at a
+    credential path is one we couldn't look past, not proof nothing is there.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    creds = sandboxed_home / ".gemini" / "oauth_creds.json"
+    creds.parent.mkdir()
+    creds.symlink_to(creds)
+
+    caveats: list[str] = []
+    assert uc.detect_unshardable_credentials(caveats) == []
+    assert any("Gemini" in c and "could not be checked" in c for c in caveats), caveats
 
 
 def test_clean_machine_emits_no_probe_caveats(
@@ -736,6 +844,70 @@ def test_clean_machine_emits_no_probe_caveats(
     findings = uc.detect_unshardable_credentials(caveats)
     assert findings == []
     assert caveats == [], f"a clean machine must not be told the scan was partial: {caveats!r}"
+
+
+@skip_if_root
+@pytest.mark.usefixtures("pathlib_like")
+def test_agent_dir_behind_an_unreadable_folder_is_caveated(
+    sandboxed_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``agents/<id>`` symlink into a folder this process can't search
+    crashed the scan on 3.10-3.13 and was dropped without a caveat on 3.14,
+    with every OAuth profile in it. It must be listed, so its unreadable
+    auth-profiles.json is named.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    locked = tmp_path / "locked"
+    _write_json(
+        locked / "work" / "agent" / "auth-profiles.json",
+        {"profiles": {"work-login": {"type": "oauth", "provider": "anthropic"}}},
+    )
+    agents = sandboxed_home / ".openclaw" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "work").symlink_to(locked / "work")
+    locked.chmod(0o000)
+    try:
+        caveats: list[str] = []
+        findings = uc.detect_unshardable_credentials(caveats)  # must not raise
+    finally:
+        locked.chmod(0o700)
+
+    assert findings == [], "an unreadable profile store is reported absent, not invented"
+    assert any("auth-profiles.json could not be read" in c for c in caveats), (
+        f"the unreadable agent must be surfaced, got {caveats!r}"
+    )
+
+
+@skip_if_root
+def test_probe_failures_keep_credential_paths_out_of_warnings(
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The CLI has no log handler, so Python prints WARNING records to stderr
+    on every scan. Caveats name the surface, never the path, and the probe's
+    log must match: the full path goes only to the debug log.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    gemini = sandboxed_home / ".gemini" / "oauth_creds.json"
+    gemini.parent.mkdir()
+    gemini.write_text('{"refresh_token": "fake"}')
+    store = sandboxed_home / ".openclaw" / "agents" / "main" / "agent" / "auth-profiles.json"
+    store.parent.mkdir(parents=True)
+    store.write_text('{"profiles": {"leaky": {"type": "oau')
+    gemini.parent.chmod(0o000)
+    try:
+        caveats: list[str] = []
+        with caplog.at_level(logging.DEBUG, logger=uc.logger.name):
+            uc.detect_unshardable_credentials(caveats)
+    finally:
+        gemini.parent.chmod(0o700)
+
+    assert any("Gemini" in c for c in caveats), caveats
+    assert any("auth-profiles.json could not be read" in c for c in caveats), caveats
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not any(str(sandboxed_home) in m for m in warnings), warnings
+    debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any(str(gemini) in m for m in debug), debug
+    assert any(str(store) in m for m in debug), debug
 
 
 def test_malformed_auth_profiles_json_is_reported_not_silently_skipped(
@@ -759,6 +931,53 @@ def test_malformed_auth_profiles_json_is_reported_not_silently_skipped(
     assert any("auth-profiles.json could not be read" in c for c in caveats), (
         f"the unparsable profile store must be surfaced, got {caveats!r}"
     )
+
+
+def test_unreadable_auth_profiles_caveat_names_which_agent(
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI prints no DEBUG log, so the caveat is all a user sees. With
+    several agents, it must say which one's auth-profiles.json to look at.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    agents = sandboxed_home / ".openclaw" / "agents"
+    _write_json(agents / "fine" / "agent" / "auth-profiles.json", {"profiles": {}})
+    broken = agents / "broken" / "agent"
+    broken.mkdir(parents=True)
+    (broken / "auth-profiles.json").write_text('{"profiles": {"leaky": {"type": "oau')
+
+    caveats: list[str] = []
+    uc.detect_unshardable_credentials(caveats)
+
+    unread = [c for c in caveats if "auth-profiles.json could not be read" in c]
+    assert len(unread) == 1, caveats
+    assert "(in ~/.openclaw/agents/broken/agent)" in unread[0], unread
+    assert "fine" not in unread[0], unread
+
+
+def test_unreadable_agent_dir_override_is_named_from_home(
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``agentDir`` set in openclaw.json can sit outside OpenClaw's folder.
+    lock prints the caveat and CI logs keep it, so a folder under home is
+    named from ``~``, not by its full path.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    custom = sandboxed_home / "work-agent"
+    custom.mkdir()
+    (custom / "auth-profiles.json").write_text('{"profiles": {"leaky": {"type": "oau')
+    _write_json(
+        sandboxed_home / ".openclaw" / "openclaw.json",
+        {"agents": {"list": [{"id": "work", "agentDir": str(custom)}]}},
+    )
+
+    caveats: list[str] = []
+    uc.detect_unshardable_credentials(caveats)
+
+    unread = [c for c in caveats if "auth-profiles.json could not be read" in c]
+    assert len(unread) == 1, caveats
+    assert "(in ~/work-agent)" in unread[0], unread
+    assert str(sandboxed_home) not in unread[0], unread
 
 
 def test_doctor_reports_probe_caveats_so_a_blind_scan_is_not_verified_clean(

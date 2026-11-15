@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
 from worthless.proxy.metering import (
+    StreamingUsageCollector,
+    UsageInfo,
     extract_usage_anthropic,
     extract_usage_openai,
     record_spend,
@@ -315,3 +318,244 @@ def test_extraction_failure_is_distinguishable_from_zero_usage():
     assert result is not None
     assert result.total_tokens == 0
     assert result.model == "gpt-4"
+
+
+# ---------------------------------------------------------------------------
+# WOR-1002: a null cache count is 0; any other non-int count is unreadable usage
+# ---------------------------------------------------------------------------
+
+# Not a whole, non-negative number. A whole float such as 5.0 is a count.
+_NOT_COUNTS = ["5", 5.5, -5.0, math.nan, math.inf, -math.inf, True, [5]]
+# Null means "none" only for the counts the SDKs type Optional[int].
+_NOT_REQUIRED_COUNTS = [None, *_NOT_COUNTS]
+_ANTHROPIC_COUNTS = {
+    "input_tokens": 5,
+    "cache_creation_input_tokens": 7,
+    "cache_read_input_tokens": 11,
+    "output_tokens": 3,
+}
+
+
+def _anthropic_delta(usage: object) -> tuple[str, dict]:
+    """A message_delta (event, payload) pair for ``_sse`` carrying *usage*."""
+    return "message_delta", {"type": "message_delta", "usage": usage}
+
+
+def _anthropic_stream(start_usage: dict, delta_usage: dict) -> bytes:
+    """Anthropic SSE body: message_start carries *start_usage*, message_delta *delta_usage*."""
+    start = {"type": "message_start", "message": {"model": "m", "usage": start_usage}}
+    return _sse(("message_start", start), _anthropic_delta(delta_usage))
+
+
+def _openai_stream(*usages: object) -> bytes:
+    """OpenAI SSE body with one chunk per usage in *usages*, then [DONE]."""
+    chunks = (json.dumps({"model": "m", "choices": [], "usage": usage}) for usage in usages)
+    return "".join(f"data: {chunk}\n\n" for chunk in chunks).encode() + b"data: [DONE]\n\n"
+
+
+def _collect_anthropic(body: bytes) -> UsageInfo | None:
+    """Feed *body* to an Anthropic StreamingUsageCollector in one chunk."""
+    collector = StreamingUsageCollector(provider="anthropic")
+    collector.feed(body)
+    return collector.result()
+
+
+def _collect_openai(body: bytes) -> UsageInfo | None:
+    """Feed *body* to an OpenAI StreamingUsageCollector in one chunk."""
+    collector = StreamingUsageCollector(provider="openai")
+    collector.feed(body)
+    return collector.result()
+
+
+@pytest.mark.parametrize("field", ["cache_creation_input_tokens", "cache_read_input_tokens"])
+def test_extract_usage_anthropic_json_null_cache_count_is_zero(field):
+    usage = {**_ANTHROPIC_COUNTS, field: None}
+    result = extract_usage_anthropic(json.dumps({"model": "m", "usage": usage}).encode())
+    assert result is not None
+    assert result.total_tokens == sum(_ANTHROPIC_COUNTS.values()) - _ANTHROPIC_COUNTS[field]
+
+
+@pytest.mark.parametrize("field", ["input_tokens", "output_tokens"])
+def test_extract_usage_anthropic_json_null_required_count_is_no_usage(field):
+    usage = {**_ANTHROPIC_COUNTS, field: None}
+    assert extract_usage_anthropic(json.dumps({"model": "m", "usage": usage}).encode()) is None
+
+
+@pytest.mark.parametrize("bad", _NOT_COUNTS, ids=repr)
+@pytest.mark.parametrize("field", list(_ANTHROPIC_COUNTS))
+def test_extract_usage_anthropic_json_non_int_count_is_no_usage(field, bad):
+    usage = {**_ANTHROPIC_COUNTS, field: bad}
+    assert extract_usage_anthropic(json.dumps({"model": "m", "usage": usage}).encode()) is None
+
+
+_ANTHROPIC_STREAM_PARSERS = pytest.mark.parametrize(
+    "parse", [extract_usage_anthropic, _collect_anthropic], ids=["sse_fallback", "collector"]
+)
+
+
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_null_cache_counts_are_zero(parse):
+    start = {
+        "input_tokens": 5,
+        "cache_creation_input_tokens": None,
+        "cache_read_input_tokens": None,
+    }
+    result = parse(_anthropic_stream(start, {"output_tokens": 3}))
+    assert result is not None
+    assert result.total_tokens == 8
+
+
+@pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_unreadable_input_count_counts_output_only(parse, bad):
+    """An unreadable message_start usage is treated like a missing message_start."""
+    start = {"input_tokens": bad, "cache_read_input_tokens": 11}
+    result = parse(_anthropic_stream(start, {"output_tokens": 3}))
+    assert result is not None
+    assert result.total_tokens == 3
+
+
+@pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_unreadable_output_count_is_no_usage(parse, bad):
+    assert parse(_anthropic_stream({"input_tokens": 5}, {"output_tokens": bad})) is None
+
+
+@pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_unreadable_latest_output_count_drops_earlier_one(parse, bad):
+    """output_tokens is cumulative: an unreadable latest count must not leave a stale one."""
+    body = _anthropic_stream({"input_tokens": 5}, {"output_tokens": 10}) + _sse(
+        _anthropic_delta({"output_tokens": bad})
+    )
+    assert parse(body) is None
+
+
+# A usage that isn't an object, like a non-object usage in a JSON reply.
+_NOT_USAGE_OBJECTS = ["bad", "", 5, [11], True]
+
+
+@pytest.mark.parametrize("bad", _NOT_USAGE_OBJECTS, ids=repr)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_non_object_latest_usage_drops_earlier_count(parse, bad):
+    body = _anthropic_stream({"input_tokens": 5}, {"output_tokens": 10}) + _sse(
+        _anthropic_delta(bad)
+    )
+    assert parse(body) is None
+
+
+@pytest.mark.parametrize("bad", _NOT_USAGE_OBJECTS, ids=repr)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_readable_count_after_a_non_object_usage_counts(parse, bad):
+    """The latest count wins, so a readable one after a non-object usage is billed."""
+    body = _anthropic_stream({"input_tokens": 5}, {"output_tokens": 10}) + _sse(
+        _anthropic_delta(bad), _anthropic_delta({"output_tokens": 20})
+    )
+    assert _total(parse(body)) == 25
+
+
+@pytest.mark.parametrize("usage", [None, {}], ids=repr)
+def test_anthropic_stream_collector_keeps_count_past_a_delta_without_usage(usage):
+    """A null usage, or one without output_tokens, carries no new count."""
+    body = _anthropic_stream({"input_tokens": 5}, {"output_tokens": 10}) + _sse(
+        _anthropic_delta(usage)
+    )
+    assert _total(_collect_anthropic(body)) == 15
+
+
+@pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
+def test_extract_usage_openai_json_unreadable_total_is_no_usage(bad):
+    body = json.dumps({"model": "m", "usage": {"total_tokens": bad}}).encode()
+    assert extract_usage_openai(body) is None
+
+
+_OPENAI_STREAM_PARSERS = pytest.mark.parametrize(
+    "parse", [extract_usage_openai, _collect_openai], ids=["sse_fallback", "collector"]
+)
+
+
+@pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
+@_OPENAI_STREAM_PARSERS
+def test_openai_stream_unreadable_total_is_no_usage(parse, bad):
+    assert parse(_openai_stream({"total_tokens": bad})) is None
+
+
+@pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
+@_OPENAI_STREAM_PARSERS
+def test_openai_stream_unreadable_latest_total_drops_earlier_one(parse, bad):
+    """Some upstreams send usage on every chunk: an unreadable latest total must not
+    leave a stale one."""
+    assert parse(_openai_stream({"total_tokens": 11}, {"total_tokens": bad})) is None
+
+
+@pytest.mark.parametrize("bad", _NOT_USAGE_OBJECTS, ids=repr)
+@_OPENAI_STREAM_PARSERS
+def test_openai_stream_non_object_latest_usage_drops_earlier_total(parse, bad):
+    assert parse(_openai_stream({"total_tokens": 11}, bad)) is None
+
+
+@pytest.mark.parametrize("usage", [None, {}], ids=repr)
+def test_openai_stream_collector_keeps_total_past_a_chunk_without_usage(usage):
+    """A null or empty usage carries no new total, so the earlier one stands."""
+    assert _total(_collect_openai(_openai_stream({"total_tokens": 11}, usage))) == 11
+
+
+# ---------------------------------------------------------------------------
+# WOR-1002: one reply bills at most 10**12 tokens
+# ---------------------------------------------------------------------------
+
+_REPLY_CAP = 10**12
+_OVER_CAP_COUNTS = [_REPLY_CAP + 1, 9_000_000_000_000_000_000, 2**63, 1e300]
+
+
+def _anthropic_json_usage(usage: dict) -> UsageInfo | None:
+    return extract_usage_anthropic(json.dumps({"model": "m", "usage": usage}).encode())
+
+
+def _openai_json_usage(usage: dict) -> UsageInfo | None:
+    return extract_usage_openai(json.dumps({"model": "m", "usage": usage}).encode())
+
+
+def _total(usage: UsageInfo | None) -> int | None:
+    return None if usage is None else usage.total_tokens
+
+
+@pytest.mark.parametrize("count", _OVER_CAP_COUNTS, ids=repr)
+def test_over_cap_count_bills_the_cap(count):
+    """A count above 10**12 bills 10**12, so a bogus count can't overflow the key's
+    spend total."""
+    assert _total(_anthropic_json_usage({"input_tokens": 5, "output_tokens": count})) == _REPLY_CAP
+    assert _total(_openai_json_usage({"total_tokens": count})) == _REPLY_CAP
+    for parse in (extract_usage_openai, _collect_openai):
+        assert _total(parse(_openai_stream({"total_tokens": count}))) == _REPLY_CAP
+
+
+@pytest.mark.parametrize("count", _OVER_CAP_COUNTS, ids=repr)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_over_cap_count_bills_the_cap(parse, count):
+    assert _total(parse(_anthropic_stream({"input_tokens": 5}, {"output_tokens": count}))) == (
+        _REPLY_CAP
+    )
+    assert _total(parse(_anthropic_stream({"input_tokens": count}, {"output_tokens": 3}))) == (
+        _REPLY_CAP
+    )
+
+
+def test_counts_whose_total_is_over_the_cap_bill_the_cap():
+    """Each count is under the cap, but their sum isn't."""
+    usage = {"input_tokens": 600_000_000_000, "output_tokens": 600_000_000_000}
+    assert _total(_anthropic_json_usage(usage)) == _REPLY_CAP
+
+
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_input_plus_output_over_the_cap_bills_the_cap(parse):
+    """Each event's count is under the cap, but their sum isn't."""
+    body = _anthropic_stream({"input_tokens": 6e11}, {"output_tokens": 6e11})
+    assert _total(parse(body)) == _REPLY_CAP
+
+
+def test_a_count_of_exactly_the_cap_is_billed_as_is():
+    assert _total(_openai_json_usage({"total_tokens": _REPLY_CAP})) == _REPLY_CAP
+    assert _total(_anthropic_json_usage({"input_tokens": _REPLY_CAP - 3, "output_tokens": 3})) == (
+        _REPLY_CAP
+    )
