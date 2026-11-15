@@ -6,9 +6,10 @@ attacker sees: an answer from OpenRouter, a rejection, a stopped loop, or
 what an agent can read.
 
 The attack tests never need a working key: the proxy must refuse before
-anything reaches OpenRouter. "Refused by the proxy" means the reply is
-byte-identical to the one an unknown alias gets, so a forwarded request that
-OpenRouter rejected cannot pass for a proxy refusal.
+anything reaches OpenRouter, and must still let the right shard through.
+"Refused by the proxy" means the reply is byte-identical to the one an
+unknown alias gets, so a forwarded request that OpenRouter rejected cannot
+pass for a proxy refusal.
 
 Skipped unless OPENROUTER_API_KEY is set. Costs well under $0.01 per run
 (openai/gpt-4o-mini, at most 5 output tokens per call). Run it so the key
@@ -302,6 +303,8 @@ class TestOpenRouterUnderAttack:
                 assert (resp.status_code, resp.content) == (401, refusal.content), (
                     f"{label}: the proxy did not refuse it ({resp.status_code}: {resp.text[:200]})"
                 )
+            right = _chat(client, base_url, shard_a)
+            assert right.content != refusal.content, "the proxy refuses even the right shard"
 
     def test_old_shard_is_refused_after_relock(self, sandbox: Sandbox) -> None:
         _, old_shard = sandbox.lock()
@@ -316,6 +319,8 @@ class TestOpenRouterUnderAttack:
             )
             direct = _chat(client, OPENROUTER_URL, old_shard)
             assert direct.status_code in {401, 403}, "OpenRouter accepted the old shard"
+            right = _chat(client, base_url, new_shard)
+            assert right.content != refusal.content, "the proxy refuses even the right shard"
 
     def test_strangers_all_get_the_same_401(self, sandbox: Sandbox) -> None:
         """No shard, a guessed shard, or the right shard on another alias: one reply, no hints."""
@@ -342,6 +347,8 @@ class TestOpenRouterUnderAttack:
                 assert (resp.status_code, resp.content) == (401, refusal.content), (
                     f"{label}: got {resp.status_code}: {resp.text[:200]}"
                 )
+            right = _chat(client, base_url, shard_a)
+            assert right.content != refusal.content, "the proxy refuses even the right shard"
 
     def test_runaway_loop_is_stopped_by_the_daily_token_budget(self, sandbox: Sandbox) -> None:
         base_url, shard_a = sandbox.lock("--token-budget-daily", "40")
