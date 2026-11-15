@@ -24,10 +24,16 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib  # backport for Python 3.10
 
 REPO = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO / ".github" / "workflows" / "dependency-audit.yml"
@@ -194,6 +200,26 @@ def test_lock_freshness_is_checked() -> None:
         "without a freshness check, `--frozen` happily audits a lock that no longer "
         "matches pyproject.toml, while a different tree actually ships"
     )
+
+
+def test_every_locked_package_is_a_pypi_release() -> None:
+    """A lock-only edit can't point a package at a URL the audit skips (WOR-1077).
+
+    The Docker image installs uv.lock's export. A package whose lock source is a
+    URL exports as `name @ url` with whatever hash the lock carries, and pip
+    installs it while pip-audit skips it ("URL requirements cannot be pinned")
+    and exits 0. `uv lock --check` passes too when pyproject.toml is unchanged.
+    So the only non-registry entry allowed is worthless itself.
+    """
+    lock = tomllib.loads((REPO / "uv.lock").read_text())
+    pypi = {"registry": "https://pypi.org/simple"}
+    elsewhere = [
+        f"{p['name']} {p['source']}"
+        for p in lock["package"]
+        if p["source"] != pypi
+        and not (p["name"] == "worthless" and p["source"] == {"editable": "."})
+    ]
+    assert not elsewhere, f"uv.lock entries that aren't PyPI releases: {elsewhere}"
 
 
 @pytest.mark.parametrize("forbidden", ["paths", "paths-ignore"])
@@ -471,8 +497,6 @@ def test_worker_override_is_declared_exactly(name: str, fixed: tuple[int, ...]) 
 #                      request's traceparent; the proxy has tracing off)
 
 PYPROJECT = REPO / "pyproject.toml"
-_RUNTIME_BLOCK = r"^dependencies = \[(.*?)^\]"
-_MCP_EXTRA_BLOCK = r"^mcp = \[(.*?)^\]"
 MCP_EXTRA_FLOORS = {"opentelemetry-api": (1, 45, 2)}
 RUNTIME_FLOORS = {
     "certifi": (2026, 10, 23),
@@ -486,18 +510,18 @@ RUNTIME_FLOORS = {
 RUNTIME_FLOOR_MARKERS = {"websockets": "python_version >= '3.11'"}
 
 
-def _declared_floor(name: str, block_re: str = _RUNTIME_BLOCK) -> tuple[str, str | None] | None:
-    """The `>=` version and marker a pyproject dependency list gives *name*.
+def _declared_floor(name: str, extra: str | None = None) -> tuple[str, str | None] | None:
+    """The `>=` version and marker pyproject gives *name*.
 
-    *block_re* picks the list: [project] dependencies by default. Regex over
-    the raw text, not a TOML parse: tomllib is 3.11+ and this suite runs on
-    3.10 too.
+    Read from [project] dependencies, or from the optional-dependencies *extra*.
     """
-    block = re.search(block_re, PYPROJECT.read_text(), re.S | re.M)
-    assert block, f"no list matching {block_re!r} in pyproject.toml"
-    pattern = rf'^\s*"{re.escape(name)}>=([0-9.]+)(?:\s*;\s*([^"]*))?"'
-    match = re.search(pattern, block.group(1), re.M)
-    return (match.group(1), match.group(2)) if match else None
+    project = tomllib.loads(PYPROJECT.read_text())["project"]
+    deps = project["optional-dependencies"][extra] if extra else project["dependencies"]
+    for dep in deps:
+        match = re.fullmatch(rf"{re.escape(name)}>=([0-9.]+)\s*(?:;\s*(.+))?", dep)
+        if match:
+            return match.group(1), match.group(2)
+    return None
 
 
 @pytest.mark.parametrize(("name", "required"), RUNTIME_FLOORS.items(), ids=list(RUNTIME_FLOORS))
@@ -521,7 +545,7 @@ def test_runtime_floor_is_outside_the_advisory(name: str, required: tuple[int, .
 @pytest.mark.parametrize(("name", "required"), MCP_EXTRA_FLOORS.items(), ids=list(MCP_EXTRA_FLOORS))
 def test_mcp_extra_floor_is_outside_the_advisory(name: str, required: tuple[int, ...]) -> None:
     """The `mcp` extra requires at least the listed version, with no marker."""
-    declared = _declared_floor(name, _MCP_EXTRA_BLOCK)
+    declared = _declared_floor(name, extra="mcp")
     assert declared, (
         f"{name} has no `>=` floor in pyproject.toml's `mcp` extra. pip keeps an "
         f"existing env's {name}, so upgrading worthless[mcp] can leave a vulnerable copy."
