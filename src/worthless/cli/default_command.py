@@ -30,7 +30,7 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.key_patterns import is_oauth_token
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
 from worthless.cli.orphans import UNLOCKED_FIX_PHRASE, find_unlocked
-from worthless.cli.scanner import remedy_for_exposure, token_facts
+from worthless.cli.scanner import _has_git_above, remedy_for_exposure, token_facts
 from worthless.openclaw.audit import sanitise_for_message
 from worthless.storage.repository import ShardRepository
 from worthless.cli.commands.service._common import ServiceState
@@ -230,11 +230,13 @@ def _run_enrollment_if_needed(
         total = len(keys)
         count = _lock_keys(env_path, home, quiet=True)
 
-    _report_lock_and_offer_service(home, console, count=count, total=total, yes=yes)
+    _report_lock_and_offer_service(
+        home, console, count=count, total=total, yes=yes, env_path=env_path
+    )
 
 
 def _report_lock_and_offer_service(
-    home: WorthlessHome, console, *, count: int, total: int, yes: bool
+    home: WorthlessHome, console, *, count: int, total: int, yes: bool, env_path: Path
 ) -> None:
     """Say how the lock went, then ask about the background service."""
     if count < total:
@@ -247,7 +249,13 @@ def _report_lock_and_offer_service(
     # after it would race the detached proxy for the port. --yes never installs
     # a service on this path (see run_default). Same rule as `worthless lock`:
     # offer once anything was locked; real lock failures raise before here.
-    if count > 0 and not yes:
+    #
+    # worthless-mivd: but only inside a git repository. Plain `worthless` is
+    # the quiet path, and a scratch folder is not worth keeping a proxy alive
+    # for. An explicit `worthless lock` still always asks (lock.py). Reuses
+    # the scanner's repo test so there is one answer to "is this a repo";
+    # ponytail: it walks to /, so a dotfiles repo at ~ counts every folder.
+    if count > 0 and not yes and _has_git_above(env_path):
         _offer_service_after_lock(console, home=home, port=resolve_port(None))
 
 

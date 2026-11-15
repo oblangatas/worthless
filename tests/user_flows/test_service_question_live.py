@@ -57,14 +57,20 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _setup(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
+def _setup(tmp_path: Path, *, git: bool) -> tuple[Path, Path, dict[str, str]]:
     """A throwaway home + project with one real-looking key, and an env with CI
     and AI-agent markers removed: the offer treats them as 'nobody is
-    watching', and the point here is to be the person who is."""
+    watching', and the point here is to be the person who is.
+
+    *git* makes the project a repository. Plain `worthless` asks about the
+    service only inside one (worthless-mivd), and pytest's tmp_path sits
+    outside any repo, so "no repo" is the default state here."""
     home = tmp_path / "home"
     project = tmp_path / "project"
     home.mkdir()
     project.mkdir()
+    if git:
+        subprocess.run(["git", "init", "-q", str(project)], check=True)  # noqa: S603, S607
     # Random, not a repeated pattern: lock rightly ignores low-entropy "keys".
     alphabet = string.ascii_letters + string.digits
     key = "sk-proj-" + "".join(secrets.choice(alphabet) for _ in range(40))
@@ -161,12 +167,15 @@ def _nothing_installed(home: Path) -> bool:
 def test_plain_worthless_asks_explicitly_and_declining_installs_nothing(
     tmp_path: Path, answer: bytes
 ) -> None:
-    _home, project, env = _setup(tmp_path)
+    _home, project, env = _setup(tmp_path, git=True)
     text, installed = _run([], project, env, {b"Lock these keys?": b"y\n", _QUESTION: answer})
 
     assert "Install the background service on port" in text, (
         f"plain `worthless` never asked about the background service:\n{text}"
     )
+    # Exactly once. A second call site once made plain `worthless` ask twice
+    # in a repo, and saying no just brought the same question back.
+    assert text.count(_QUESTION.decode()) == 1, f"asked more than once:\n{text}"
     assert "What it adds:" in text
     assert "fernet.key" in text, "the master-key trade-off must be in the question"
     assert "worthless service uninstall (the key file stays)" in text
@@ -179,9 +188,19 @@ def test_plain_worthless_asks_explicitly_and_declining_installs_nothing(
     assert not installed, "declining (or just pressing Enter) must install nothing"
 
 
+def test_plain_worthless_outside_a_repo_locks_without_asking(tmp_path: Path) -> None:
+    """worthless-mivd: no repository, no question. The keys still get locked."""
+    _home, project, env = _setup(tmp_path, git=False)
+    text, installed = _run([], project, env, {b"Lock these keys?": b"y\n"})
+
+    assert "protected" in text, f"the lock itself did not run:\n{text}"
+    assert "Install the background service on port" not in text, text
+    assert not installed
+
+
 def test_plain_worthless_yes_never_asks_and_installs_nothing(tmp_path: Path) -> None:
     """`worthless --yes` is documented as 'never service install'."""
-    _home, project, env = _setup(tmp_path)
+    _home, project, env = _setup(tmp_path, git=True)
     text, installed = _run(["--yes"], project, env, {})
 
     assert "Lock" in text or "protected" in text, f"--yes did not run the lock at all:\n{text}"

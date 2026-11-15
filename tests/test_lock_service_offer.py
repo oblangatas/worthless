@@ -710,7 +710,9 @@ class TestPlainWorthlessAsks:
     `test_asks_after_locking` turns red.
     """
 
-    def _enroll(self, *, yes: bool, locked: int = 1, found: int = 1) -> MagicMock:
+    def _enroll(
+        self, *, yes: bool, locked: int = 1, found: int = 1, in_repo: bool = True
+    ) -> MagicMock:
         home = MagicMock(name="WorthlessHome")
         home.db_path.exists.return_value = False
         with (
@@ -721,6 +723,7 @@ class TestPlainWorthlessAsks:
             patch.object(default_command.typer, "confirm", return_value=True),
             patch.object(default_command, "acquire_lock", return_value=nullcontext()),
             patch.object(default_command, "_lock_keys", return_value=locked),
+            patch.object(default_command, "_has_git_above", return_value=in_repo),
             patch.object(default_command, "_offer_service_after_lock") as offer,
         ):
             default_command._run_enrollment_if_needed(
@@ -744,6 +747,16 @@ class TestPlainWorthlessAsks:
 
     def test_nothing_locked_gets_no_offer(self) -> None:
         self._enroll(yes=False, locked=0, found=1).assert_not_called()
+
+    def test_outside_a_git_repo_plain_worthless_does_not_ask(self) -> None:
+        """worthless-mivd: plain `worthless` asks only where there is a repo.
+
+        Quiet means quiet in a scratch folder. An explicit `worthless lock`
+        still always asks (that call lives in lock.py, not here). Drop the
+        `_has_git_above` guard in `_report_lock_and_offer_service` and this
+        turns red.
+        """
+        self._enroll(yes=False, in_repo=False).assert_not_called()
 
     def test_asks_before_the_proxy_starts(self) -> None:
         """Asking after the detached proxy starts would race it for the port."""
