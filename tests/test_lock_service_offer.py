@@ -130,6 +130,22 @@ class TestConsent:
         install.assert_not_called()
         assert "worthless service install" in _flat(capsys.readouterr())
 
+    def test_ask_false_hints_without_asking(self, console: WorthlessConsole, capsys) -> None:
+        """worthless-mivd: outside a git repo plain `worthless` gets the hint only.
+
+        Without it a no-repo user's proxy dies at reboot and nothing said how
+        to keep it. Drop `not ask` from the hint branch and this turns red.
+        """
+        with (
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock.typer.confirm", return_value=True) as confirm,
+            patch("worthless.cli.commands.lock.install_service_for_offer") as install,
+        ):
+            assert _offer_service_after_lock(console, home=_home(), port=8787, ask=False) is False
+        confirm.assert_not_called()
+        install.assert_not_called()
+        assert "worthless service install" in _flat(capsys.readouterr())
+
 
 class TestHonestCopy:
     def test_does_not_promise_reboot_survival(self, console: WorthlessConsole, capsys) -> None:
@@ -732,7 +748,9 @@ class TestPlainWorthlessAsks:
         return offer
 
     def test_asks_after_locking(self) -> None:
-        self._enroll(yes=False).assert_called_once()
+        offer = self._enroll(yes=False)
+        offer.assert_called_once()
+        assert offer.call_args.kwargs["ask"] is True
 
     def test_yes_never_installs_a_service_on_this_path(self) -> None:
         """`worthless --yes` is documented as 'never service install'."""
@@ -748,15 +766,17 @@ class TestPlainWorthlessAsks:
     def test_nothing_locked_gets_no_offer(self) -> None:
         self._enroll(yes=False, locked=0, found=1).assert_not_called()
 
-    def test_outside_a_git_repo_plain_worthless_does_not_ask(self) -> None:
+    def test_outside_a_git_repo_plain_worthless_hints_instead_of_asking(self) -> None:
         """worthless-mivd: plain `worthless` asks only where there is a repo.
 
-        Quiet means quiet in a scratch folder. An explicit `worthless lock`
-        still always asks (that call lives in lock.py, not here). Drop the
-        `_has_git_above` guard in `_report_lock_and_offer_service` and this
+        A scratch folder gets the one-line hint (ask=False), not the question.
+        An explicit `worthless lock` still always asks (lock.py). Pass
+        ask=True unconditionally in `_report_lock_and_offer_service` and this
         turns red.
         """
-        self._enroll(yes=False, in_repo=False).assert_not_called()
+        offer = self._enroll(yes=False, in_repo=False)
+        offer.assert_called_once()
+        assert offer.call_args.kwargs["ask"] is False
 
     def test_asks_before_the_proxy_starts(self) -> None:
         """Asking after the detached proxy starts would race it for the port."""

@@ -136,6 +136,15 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Releases newer than the v0.3.16 image's with no security fix, such as fastapi 0.162.4 and starlette 1.10.0, stay out of the lock until a later refresh.
   - For compiled packages with no signed build record (cffi, pydantic-core, watchfiles), only the source archive was compared with the upstream tag; their prebuilt binaries can't be checked against it.
 
+### Changed
+- **Plain `worthless` asks about the background service only inside a git repository** (worthless-mivd, [#773](https://github.com/oblangatas/worthless/pull/773)).
+  Before: plain `worthless` asked "Install the background service?" after every lock, in any folder, including a scratch folder with no git.
+  Now: inside a git repository it asks once, as before. Outside one it locks your keys and prints one line instead of the question: `worthless service install` keeps the proxy running after you close the terminal. `worthless lock` always asks, in any folder. `--yes` never asks and never installs.
+
+  **Limits.**
+  - Worthless looks for a `.git` in the folder and every folder above it, up to `/`. If your home folder is a git repository (for example, for dotfiles), every folder under it counts, and plain `worthless` asks everywhere.
+  - A repository without a `.git` folder or file (a bare repository used through `--git-dir`, or jj, Mercurial or Subversion) does not count. Plain `worthless` prints the hint there instead of asking.
+
 ### Fixed
 - **On Python 3.14, `worthless lock` and `worthless doctor --json` say when they couldn't look for a credentials file** ([#762](https://github.com/oblangatas/worthless/pull/762)).
   Before: on Python 3.14, if your user couldn't open the folder holding one of the OAuth credential files Worthless looks for, such as `~/.gemini`, that file was reported as not there, with no note. `worthless lock`'s `[NOTE]` line and the caveats in `worthless doctor --json` left it out, so a check that couldn't look read as a clean one. Python 3.10 to 3.13 were not affected: there, both add "Gemini CLI credentials file could not be checked (Permission denied)".

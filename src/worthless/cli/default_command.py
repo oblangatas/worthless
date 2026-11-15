@@ -250,13 +250,12 @@ def _report_lock_and_offer_service(
     # a service on this path (see run_default). Same rule as `worthless lock`:
     # offer once anything was locked; real lock failures raise before here.
     #
-    # worthless-mivd: but only inside a git repository. Plain `worthless` is
-    # the quiet path, and a scratch folder is not worth keeping a proxy alive
-    # for. An explicit `worthless lock` still always asks (lock.py). Reuses
-    # the scanner's repo test so there is one answer to "is this a repo";
-    # ponytail: it walks to /, so a dotfiles repo at ~ counts every folder.
-    if count > 0 and not yes and _has_git_above(env_path):
-        _offer_service_after_lock(console, home=home, port=resolve_port(None))
+    # worthless-mivd: the question only inside a git repo; a scratch folder gets
+    # the one-line hint instead. `worthless lock` always asks (lock.py).
+    if count > 0 and not yes:
+        _offer_service_after_lock(
+            console, home=home, port=resolve_port(None), ask=_has_git_above(env_path)
+        )
 
 
 def _ensure_proxy_running(home: WorthlessHome, console) -> tuple[bool, int | None, int]:
@@ -309,7 +308,8 @@ def run_default(
         Auto-approve lock + proxy start (but never service install).
 
         Without --yes, plain ``worthless`` asks the explicit service question
-        after locking (WOR-859); with --yes it never asks and never installs.
+        after locking inside a git repo (WOR-859, worthless-mivd); outside one
+        it prints a one-line hint. With --yes it never asks and never installs.
         The same holds for ``worthless --yes lock``: only a typed "y" installs
         a service. A piped, CI or AI-agent run is never asked.
     json_mode:

@@ -13,6 +13,7 @@ locked quietly and never asked.
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import socket
 import string
@@ -31,6 +32,7 @@ import select  # noqa: E402
 
 from worthless.cli.commands.lock import _AGENT_ENV_VARS, _CI_ENV_VARS  # noqa: E402
 from worthless.cli.platform import _in_container  # noqa: E402
+from worthless.cli.scanner import _has_git_above  # noqa: E402
 
 pytestmark = [
     pytest.mark.user_flow,
@@ -71,6 +73,10 @@ def _setup(tmp_path: Path, *, git: bool) -> tuple[Path, Path, dict[str, str]]:
     project.mkdir()
     if git:
         subprocess.run(["git", "init", "-q", str(project)], check=True)  # noqa: S603, S607
+    elif _has_git_above(project):
+        # Otherwise the question appears, nobody answers it, and the test hangs
+        # to its timeout instead of saying why (seen with TMPDIR in a checkout).
+        pytest.fail(f"{tmp_path} is inside a git repo; set TMPDIR outside one")
     # Random, not a repeated pattern: lock rightly ignores low-entropy "keys".
     alphabet = string.ascii_letters + string.digits
     key = "sk-proj-" + "".join(secrets.choice(alphabet) for _ in range(40))
@@ -189,12 +195,29 @@ def test_plain_worthless_asks_explicitly_and_declining_installs_nothing(
 
 
 def test_plain_worthless_outside_a_repo_locks_without_asking(tmp_path: Path) -> None:
-    """worthless-mivd: no repository, no question. The keys still get locked."""
+    """worthless-mivd: no repository, no question, but the one-line hint.
+
+    The keys still get locked, and the user still learns the proxy will not
+    outlive this terminal unless they install the service.
+    """
     _home, project, env = _setup(tmp_path, git=False)
     text, installed = _run([], project, env, {b"Lock these keys?": b"y\n"})
 
     assert "protected" in text, f"the lock itself did not run:\n{text}"
     assert "Install the background service on port" not in text, text
+    # Rich wraps the hint at the PTY's width and styles it: compare words, not layout.
+    flat = re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", text))
+    assert "worthless service install" in flat, f"no hint outside a repo:\n{text}"
+    assert not installed
+
+
+def test_explicit_lock_outside_a_repo_still_asks(tmp_path: Path) -> None:
+    """worthless-mivd: the repo rule is plain `worthless` only. Someone who
+    typed `worthless lock` asked for the full flow, repo or not."""
+    _home, project, env = _setup(tmp_path, git=False)
+    text, installed = _run(["lock"], project, env, {_QUESTION: b"n\n"})
+
+    assert text.count(_QUESTION.decode()) == 1, f"`worthless lock` did not ask once:\n{text}"
     assert not installed
 
 
