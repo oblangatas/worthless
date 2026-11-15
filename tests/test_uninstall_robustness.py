@@ -92,27 +92,27 @@ def _seed_missing_env_enrollment(home_dir: WorthlessHome, missing_path: str) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_uninstall_missing_env_file_skips_and_still_wipes(
-    home_dir: WorthlessHome, tmp_path
-) -> None:
-    """CONTRACT 1 / BUG-2: an enrollment whose ``.env`` was deleted (file gone,
-    row present) must SKIP+WARN and NOT block — ``~/.worthless`` is still wiped
-    with ``--yes``.
-
-    Pre-fix the missing file is collected as a ``failed`` restore, the
-    key-shredder guard fires, and uninstall aborts ``WRTLS-103`` with nothing
-    wiped — a deleted project makes uninstall impossible. There is nothing to
-    lose here (no real key sits in a file that's gone), so the only correct
-    action is to remove the dead row on wipe.
+def test_uninstall_missing_env_file_blocks_unless_forced(home_dir: WorthlessHome, tmp_path) -> None:
+    """CONTRACT 1 / BUG-2, revised by WOR-1135: an enrollment whose ``.env``
+    is gone must never be reported as a FAILED restore. BUG-2 assumed there is
+    nothing to lose there; a moved project proves otherwise (its shard-A still
+    sits in the .env at the new path). Operator decision 2026-11-15: uninstall
+    refuses, naming the key; ``--force`` skips it and wipes, as BUG-2 did.
     """
     missing = tmp_path / "deleted-project" / ".env"  # never created
     _seed_missing_env_enrollment(home_dir, str(missing))
 
-    result = runner.invoke(
+    refused = runner.invoke(
         app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
     )
+    assert refused.exit_code == 103, refused.output
+    assert "ghost-alias" in refused.output and home_dir.base_dir.exists(), refused.output
 
-    assert result.exit_code == 0, f"a missing .env must NOT block the wipe (BUG-2): {result.output}"
+    result = runner.invoke(
+        app, ["uninstall", "--yes", "--force"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+
+    assert result.exit_code == 0, f"--force must get past a missing .env: {result.output}"
     out = result.output.lower()
     assert "ghost" in out or "missing" in out or "skip" in out, (
         f"uninstall must surface a skip/warn for the missing .env, got: {result.output}"
@@ -146,23 +146,28 @@ def test_uninstall_missing_env_does_not_count_as_failed_restore(
     )
 
 
-def test_uninstall_missing_env_mixed_with_healthy_env_restores_then_wipes(
+def test_uninstall_missing_env_mixed_with_healthy_env_refuses_then_force_restores(
     home_dir: WorthlessHome, tmp_path
 ) -> None:
-    """CONTRACT 1 / BUG-2 (mixed): one healthy locked ``.env`` PLUS one
-    deleted-project row. The healthy file must be restored to its real key and
-    the dead row skipped — the whole uninstall still completes and wipes.
-
-    The realistic shape: a user locked two projects, deleted one off disk, then
-    runs uninstall. Losing the ability to restore the surviving project just
-    because a sibling row is orphaned would be the worst outcome.
+    """CONTRACT 1 / BUG-2 (mixed), revised by WOR-1135: one healthy locked
+    ``.env`` PLUS one missing-project row. Without --force uninstall refuses
+    BEFORE restoring anything, so the healthy project is still locked (a
+    refusal changes nothing). With --force the healthy file is restored to its
+    real key, the missing row skipped, and the wipe completes.
     """
     key, env = _lock_one(home_dir, tmp_path)
+    locked = env.read_text()
     missing = tmp_path / "deleted-project" / ".env"
     _seed_missing_env_enrollment(home_dir, str(missing))
 
-    result = runner.invoke(
+    refused = runner.invoke(
         app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert refused.exit_code == 103, refused.output
+    assert env.read_text() == locked, "a refusal must not restore anything"
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes", "--force"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
     )
 
     assert result.exit_code == 0, result.output

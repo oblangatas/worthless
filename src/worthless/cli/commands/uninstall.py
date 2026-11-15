@@ -45,6 +45,9 @@ from worthless.openclaw import audit as _oc_audit
 
 logger = logging.getLogger(__name__)
 
+# Pinned issue that tells people hit by the doctor bug what to do (WOR-959).
+_RESCUE_ISSUE_URL = "https://github.com/oblangatas/worthless/issues/719"
+
 
 def _scrub_exc(exc: BaseException) -> str:
     """SR-04: a path-free token for user-facing messages.
@@ -165,6 +168,129 @@ async def _read_enrollments(repo) -> list:  # noqa: ANN001
     return await repo.list_enrollments()
 
 
+def _file_gone(env_path: str) -> bool:
+    """True only when the file is really not there. ``stat()`` follows symlinks,
+    so a dangling symlink counts as gone too. Not ``exists()``: from Python 3.14
+    it returns False for any OSError, and before that it read ELOOP as gone
+    (WOR-1043)."""
+    try:
+        Path(env_path).stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
+async def _rescuable_keys(repo, enrollments: list) -> tuple[list[str], list[tuple[str, str]]]:  # noqa: ANN001
+    """Keys a wipe would destroy although they can still be rescued (WOR-1135).
+
+    ``unlinked``: a shard with no enrollment, as the v0.3.7–v0.3.14 doctor bug
+    left them. ``moved``: an enrollment whose .env is gone because the project
+    was moved, renamed or deleted. Either way Shard A may still sit in a .env
+    Worthless can't see, so the wipe would make the key unrecoverable.
+    """
+    linked = {e.key_alias for e in enrollments}
+    unlinked = sorted(set(await repo.list_keys()) - linked)
+    moved = [
+        (e.key_alias, e.env_path)
+        for e in enrollments
+        if e.env_path is not None and _file_gone(e.env_path)
+    ]
+    return unlinked, moved
+
+
+def _holds_no_keys(home) -> bool:  # noqa: ANN001
+    """True when the DB reads fine and has no shard rows. Read without the
+    Fernet key, read-only; any failure (missing or corrupt DB) is False."""
+    try:
+        con = sqlite3.connect(f"file:{home.db_path}?mode=ro", uri=True)
+        try:
+            return con.execute("SELECT COUNT(*) FROM shards").fetchone()[0] == 0
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return False
+
+
+def _find_rescuable(home) -> tuple[list[str], list[tuple[str, str]]]:  # noqa: ANN001
+    """Read the rescuable keys before uninstall changes anything.
+
+    A busy DB refuses here with nothing changed. Any other read failure returns
+    nothing, so the broken-install path below decides exactly as before.
+    """
+
+    async def _read():
+        async with open_repo(home) as repo:
+            return await _rescuable_keys(repo, await _read_enrollments(repo))
+
+    try:
+        return asyncio.run(_read())
+    except (WorthlessError, sqlite3.Error, OSError) as exc:
+        if _is_recoverable_repo_error(exc):
+            raise WorthlessError(
+                ErrorCode.LOCK_IN_PROGRESS,
+                "Worthless couldn't read its database because another process is using "
+                "it (most likely the running proxy). Nothing was changed — your keys "
+                "are safe. Stop it with `worthless down` and re-run.",
+            ) from exc
+        return [], []
+
+
+def _guard_rescuable(
+    console, unlinked: list[str], moved: list[tuple[str, str]], *, force: bool
+) -> None:  # noqa: ANN001
+    """Refuse to destroy a rescuable key (WOR-1135). Runs before any restore,
+    so a refusal really means nothing changed. ``--force`` goes on, but names
+    every such key first; ``print_key_note`` shows even under ``--quiet``."""
+    if not unlinked and not moved:
+        return
+    rows = [
+        f"  {alias}   lost its link to its project (Worthless doctor bug, v0.3.7–v0.3.14)"
+        for alias in unlinked
+    ]
+    rows += [
+        f"  {alias}   its project moved or was deleted: {_shown(path)}" for alias, path in moved
+    ]
+    if force:
+        names = ", ".join([*unlinked, *(alias for alias, _ in moved)])
+        console.print_key_note(
+            f"--force: destroying {len(rows)} key(s) that could have been rescued: {names}. "
+            "Rotate them at your provider."
+        )
+        return
+    lines = [
+        "uninstall stopped. Nothing was changed.",
+        "",
+        "These keys can still be rescued, and uninstalling now would destroy them:",
+        *rows,
+        "",
+    ]
+    if moved:
+        lines.append(
+            "If a project moved, put it back at that path (or wait for the next release, "
+            "which can follow it), then run uninstall again."
+        )
+    if unlinked:
+        tip = unlinked[0]
+        lines.append(
+            "Keep ~/.worthless: the next Worthless release brings these keys back. "
+            f"A project locked with a proxy URL has a .env line containing /{tip}/."
+        )
+    first = (unlinked or [alias for alias, _ in moved])[0]
+    lines += [
+        f"See {_RESCUE_ISSUE_URL}",
+        "",
+        "Sure you'll never need one of these keys? Remove just that key:",
+        f"  worthless revoke --alias {first}",
+    ]
+    raise WorthlessError(
+        ErrorCode.SHARD_STORAGE_FAILED,
+        "\n".join(lines),
+        exit_code=ErrorCode.SHARD_STORAGE_FAILED.value,
+    )
+
+
 async def _restore_all(
     home, repo, enrollments: list, *, assume_yes: bool, console
 ) -> tuple[
@@ -249,16 +375,7 @@ async def _restore_all(
                 #     → `failed`, trips the guard.
                 #   - a folder it can't open (EACCES, EIO) or a symlink loop (ELOOP)
                 #     → `failed`, so the guard names it and --force can still finish.
-                #     Not exists(): from Python 3.14 it returns False for any OSError,
-                #     and before that it read ELOOP as gone (WOR-1043).
-                try:
-                    Path(env_path).stat()
-                    gone = False
-                except (FileNotFoundError, NotADirectoryError):
-                    gone = True
-                except OSError:
-                    gone = False
-                if gone:
+                if _file_gone(env_path):
                     missing.append(env_path)
                 else:
                     failed.append((env_path, _scrub_exc(exc)))
@@ -706,6 +823,10 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
 
     oc_partial = False
     with acquire_lock(home):
+        # WOR-1135: before anything is restored, so a refusal changes nothing.
+        unlinked, moved = _find_rescuable(home)
+        _guard_rescuable(console, unlinked, moved, force=force)
+
         read = False  # set once the install has been read: only before that is it "broken"
 
         async def _run():
@@ -752,9 +873,22 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
                     "openclaw.json may still point at the proxy for them. Re-run "
                     "`worthless uninstall` to restore the rest.",
                 ) from exc
-            restored, failed, missing, unlocked, enroll_only, oc_build_failed = _handle_broken_repo(
-                console, exc, force=force
-            )
+            if _holds_no_keys(home):
+                # Revoking the last key also removes the Fernet key, so the repo
+                # can't open, but there is nothing left to restore or lose: not a
+                # broken install that needs --force (WOR-1135).
+                restored, failed, missing, unlocked, enroll_only, oc_build_failed = (
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                    False,
+                )
+            else:
+                restored, failed, missing, unlocked, enroll_only, oc_build_failed = (
+                    _handle_broken_repo(console, exc, force=force)
+                )
 
         try:
             _report_outcomes(console, restored, missing, enroll_only)

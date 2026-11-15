@@ -577,6 +577,56 @@ async def _select_unlocked_keys(
     return candidates
 
 
+async def _halves_of_stored_keys(
+    repo: ShardRepository, scanned: list[tuple[str, str, str]]
+) -> list[tuple[str, str]]:
+    """``(var_name, alias)`` for each value that is already Shard A of a stored key.
+
+    ``scanned`` holds only values not still protected at this .env, so a match
+    here is a key whose link was lost (the v0.3.7–v0.3.14 doctor bug) or whose
+    project moved. Locking it again would re-split Shard A as if it were a key
+    and overwrite the only copy of it (WOR-1135). Each stored shard is
+    decrypted at most once, and only when a value starts with its prefix.
+    """
+    found: list[tuple[str, str]] = []
+    decrypted: list[tuple[str, object, object]] = []
+    try:
+        for alias in await repo.list_keys():
+            encrypted = await repo.fetch_encrypted(alias)
+            if encrypted is None or encrypted.prefix is None or encrypted.charset is None:
+                continue
+            if not any(value.startswith(encrypted.prefix) for _v, value, _p in scanned):
+                continue
+            decrypted.append((alias, encrypted, await repo.decrypt_shard(encrypted)))
+        for var_name, value, _provider in scanned:
+            for alias, encrypted, stored in decrypted:
+                if not value.startswith(encrypted.prefix):
+                    continue
+                shard_a = bytearray(value.encode("utf-8"))
+                reconstructed: bytearray | None = None
+                try:
+                    reconstructed = reconstruct_key_fp(
+                        shard_a,
+                        stored.shard_b,
+                        stored.commitment,
+                        stored.nonce,
+                        encrypted.prefix,
+                        encrypted.charset,
+                    )
+                    found.append((var_name, alias))
+                    break
+                except (ShardTamperedError, ValueError, KeyError, UnicodeDecodeError, IndexError):
+                    continue  # not this key's half; same safe-fail set as above
+                finally:
+                    zero_buf(shard_a)
+                    if reconstructed is not None:
+                        zero_buf(reconstructed)
+    finally:
+        for _alias, _encrypted, stored in decrypted:
+            stored.zero()
+    return found
+
+
 async def _delete_superseded_location_enrollments(
     repo: ShardRepository,
     *,
@@ -3137,6 +3187,20 @@ def _lock_keys(
                 )
 
             env_values = snapshot.parsed
+
+            # WOR-1135: never re-split half of a stored key, before any write.
+            halves = await _halves_of_stored_keys(repo, scanned)
+            if halves:
+                var_name, alias = halves[0]
+                raise WorthlessError(
+                    ErrorCode.ENV_ALREADY_LOCKED,
+                    f"{_oc_audit.sanitise_for_message(var_name)} in "
+                    f"{_oc_audit.sanitise_for_message(str(env_path))} is already half of a "
+                    f"stored key ({alias}). Locking it again would destroy that key, so "
+                    "nothing was changed. If you moved this project, see "
+                    "https://github.com/oblangatas/worthless/issues/719.",
+                    exit_code=ErrorCode.ENV_ALREADY_LOCKED.value,
+                )
 
             # worthless-ftmg: refuse to lock an already-locked .env BEFORE any
             # state mutation. The legitimate idempotent re-lock case (same key
