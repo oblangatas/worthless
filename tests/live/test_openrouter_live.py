@@ -445,7 +445,7 @@ class TestOpenRouterKill9:
         reason=(
             "Known gap: `worthless up` starts the proxy without a liveness pipe, so after "
             "kill -9 the proxy keeps its port until `worthless down` or the next `up`. "
-            "It cannot rebuild the key (its sidecar is gone). Remove when fixed."
+            "It cannot rebuild the key (its sidecar is gone). WOR-1138; remove when fixed."
         ),
     )
     def test_kill_9_leaves_no_listening_port(self, sandbox: Sandbox) -> None:
