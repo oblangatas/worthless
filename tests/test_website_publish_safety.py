@@ -280,7 +280,7 @@ def test_ai_audit_reads_the_installer_that_actually_runs() -> None:
     """`curl worthless.sh` runs the released installer; browsers and AI fetchers
     get an HTML page from that host, and `main` can differ from the release.
     So the "Audit the installer with AI" prompt must point at a release tag,
-    never at main (checked 2026-10-18: the v0.3.14 tag file is byte-identical
+    never at main (checked 2026-11-13: the v0.3.16 tag file is byte-identical
     to what curl receives)."""
     js = (WEBSITE / "homepage.js").read_text(encoding="utf-8")
     assert "/main/install.sh" not in js, "the audit prompt must not read main"
