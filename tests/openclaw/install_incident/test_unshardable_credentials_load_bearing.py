@@ -294,11 +294,11 @@ def test_unreadable_dir_and_malformed_profiles_are_caveated_live(blind_spot_stac
     structured output, so a scan that couldn't look is never presented as a
     clean bill of health."""
     caveats = blind_spot_stack["check"].get("caveats") or []
-    joined = " || ".join(caveats)
-    assert any("could not be checked" in c for c in caveats), (
-        f"the unreadable Gemini dir was not surfaced as a caveat: {caveats!r}"
+    # One caveat must carry both: on Linux the keychain caveat already says
+    # "could not be checked", so the two checked apart pass without Gemini's.
+    assert any("Gemini" in c and "could not be checked" in c for c in caveats), (
+        f"the unreadable Gemini dir was not surfaced as a caveat naming it: {caveats!r}"
     )
-    assert "Gemini" in joined, "the permission caveat must name which surface"
     assert any("could not be read" in c for c in caveats), (
         f"the half-written auth-profiles.json was silently skipped, not caveated: {caveats!r}"
     )
