@@ -22,8 +22,19 @@ import pytest
 
 from tests._install_helpers import run_uninstall, write_stub
 
+# The only sentence that claims keys came back. Asserted present where the
+# script KNOWS that, and absent everywhere it does not.
+KEYS_RESTORED = "every key it had locked in a .env file is restored"
+CANT_TELL = "can't tell whether your keys were restored"
+# The script counts locked keys with the sqlite3 CLI. Without it the count is
+# unknown and the answer is the conditional one, so tests that need a definite
+# answer from a seeded database need the tool.
+needs_sqlite3 = pytest.mark.skipif(
+    shutil.which("sqlite3") is None, reason="sqlite3 CLI needed to count locked keys"
+)
 
-def _seed_home(home: Path, env_paths: list[str]) -> None:
+
+def _seed_home(home: Path, env_paths: list[str | None]) -> None:
     """Create a fake ~/.worthless with a key file + a DB of locked .env paths."""
     home.mkdir(parents=True, exist_ok=True)
     (home / "fernet.key").write_text("fake-fernet-key\n")
@@ -40,6 +51,7 @@ def _seed_home(home: Path, env_paths: list[str]) -> None:
         con.close()
 
 
+@needs_sqlite3
 def test_tier2_wipes_a_broken_install(tmp_path: Path) -> None:
     """No `worthless` on PATH → the home is wiped and the user is told to rotate."""
     bin_dir = tmp_path / "bin"
@@ -52,7 +64,16 @@ def test_tier2_wipes_a_broken_install(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert not home.exists(), "Tier 2 must wipe ~/.worthless"
     combined = (result.stdout + result.stderr).lower()
-    assert "rotate" in combined, "must tell the user to rotate their keys"
+    # Assert the SPECIFIC sentence, not the bare word "rotate". The .env
+    # follow-up line ("These .env files still hold an inert key half (rotate
+    # the keys they used)") also contains it and fires on a different
+    # condition, so a substring check here passes even when the real warning
+    # has gone missing — measured: deleting the warning entirely left all 16
+    # tests green. This wipe DID strand real keys, so this is the one case
+    # where demanding a rotation is true and must not be silenced.
+    assert "could not be restored automatically" in combined, (
+        "a wipe that stranded locked keys must say so explicitly:\n" + combined
+    )
 
 
 def test_tier2_wipes_even_without_a_database(tmp_path: Path) -> None:
@@ -89,15 +110,22 @@ def test_tier2_lists_affected_env_files(tmp_path: Path) -> None:
     assert "/proj/b/.env" in combined
 
 
+@needs_sqlite3
 def test_tier1_delegates_to_a_working_binary_then_removes_the_tool(tmp_path: Path) -> None:
-    """A working `worthless` → the script delegates to `worthless uninstall`
-    (which restores keys) and then removes the installed tool via uv."""
+    """A working installed `worthless` → the script delegates to
+    `worthless uninstall` (which restores keys) and then removes the tool via uv.
+
+    The binary lives where `uv tool dir --bin` reports, not merely on PATH:
+    since WOR-597 a PATH hit alone is not proof it is the copy we installed.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
     home = tmp_path / "wless-home"
     _seed_home(home, ["/proj/a/.env"])
     write_stub(
-        bin_dir,
+        real_bin_dir,
         "worthless",
         'case "$1" in\n'
         '  --version) echo "worthless 0.3.8" ;;\n'
@@ -105,25 +133,506 @@ def test_tier1_delegates_to_a_working_binary_then_removes_the_tool(tmp_path: Pat
         '  *) echo "stub: $*" ;;\n'
         "esac",
     )
-    write_stub(
-        bin_dir,
-        "uv",
-        'printf "uv %s\\n" "$*" >> "$HOME/uv.log"\n'
-        'case "$1 $2" in\n'
-        '  "tool uninstall") echo "removed" ;;\n'
-        "  *) ;;\n"
-        "esac",
-    )
+    _write_uv_stub(bin_dir, real_bin_dir)
 
     result = run_uninstall(bin_dir, worthless_home=home)
 
     assert result.returncode == 0, result.stderr
     out = result.stdout + result.stderr
     assert "STUB_RESTORED_KEYS" in out, "Tier 1 must delegate to the working binary"
+    assert KEYS_RESTORED in out.lower(), (
+        f"keys were locked here and the program put them back; say so:\n{out}"
+    )
+    assert str(real_bin_dir / "worthless") in out, (
+        "the binary being handed `uninstall --yes` must be named, so a redirected "
+        "lookup is visible rather than silent"
+    )
     uv_log = tmp_path / "uv.log"
     assert uv_log.exists() and "tool uninstall worthless" in uv_log.read_text(), (
         "Tier 1 must remove the installed tool after delegating"
     )
+
+
+def _write_uv_stub(bin_dir: Path, tool_bin_dir: Path) -> None:
+    """A uv stub that answers `tool dir --bin` and logs `tool uninstall`."""
+    write_stub(
+        bin_dir,
+        "uv",
+        'printf "uv %s\\n" "$*" >> "$HOME/uv.log"\n'
+        'case "$1 $2 $3" in\n'
+        f'  "tool dir --bin") echo "{tool_bin_dir}" ;;\n'
+        '  "tool uninstall worthless") echo "removed" ;;\n'
+        "  *) ;;\n"
+        "esac",
+    )
+
+
+def test_uninstall_never_runs_a_shadowing_copy(tmp_path: Path) -> None:
+    """WOR-597. The copy PATH resolves may not be the one we installed.
+
+    uninstall.sh delegates the key restoration to `worthless uninstall` — the
+    only thing that can unscramble the shards. Resolving that binary through
+    PATH hands the job to whatever sits earliest: a stale Homebrew or pip copy
+    that knows nothing about this install. It "succeeds", the real tool is then
+    deleted, and the user is told their keys were restored while the shards are
+    still on disk and the stale copy still wins `command -v`.
+
+    The installed binary is what uv reports, so that is what must run. A stale
+    copy is never executed: it is a file of unknown provenance, and running it
+    is the thing this test exists to forbid.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+
+    sentinel = tmp_path / "shadow-was-executed"
+    write_stub(
+        bin_dir,
+        "worthless",
+        f'echo executed >> "{sentinel}"\n'
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.0.1-shadow" ;;\n'
+        '  uninstall) echo "SHADOW_RESTORED_NOTHING" ;;\n'
+        "esac",
+    )
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "REAL_RESTORED_KEYS" ;;\n'
+        "esac",
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = result.stdout + result.stderr
+
+    assert not sentinel.exists(), (
+        f"uninstall.sh executed the shadowing copy; it must run the binary uv installed:\n{out}"
+    )
+    assert "REAL_RESTORED_KEYS" in out, f"the installed binary did not do the uninstall:\n{out}"
+    assert "SHADOW_RESTORED_NOTHING" not in out
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_planted_package_manager_cannot_name_the_binary_we_run(tmp_path: Path) -> None:
+    """WOR-597. Asking uv "where is it?" is only safe if uv is really uv.
+
+    Resolution moved off PATH for `worthless`, but `uv` and `pipx` were still
+    looked up by name — and this script appends the caller's PATH after its own
+    lockdown. On a box with no trusted manager, a planted `uv` wins, reports any
+    directory it likes, and tier 1 then runs the `worthless` inside it with
+    `uninstall --yes`. That is arbitrary code execution during uninstall,
+    reached by the same trick one level up.
+
+    Run WITHOUT WORTHLESS_TRUST_PATH, so the script uses its bounded
+    absolute-path lookup — the planted manager sits in the caller's PATH, which
+    is appended last and must never be consulted.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+
+    evil_dir = tmp_path / "evil"
+    evil_dir.mkdir()
+    sentinel = tmp_path / "evil-worthless-was-executed"
+    write_stub(evil_dir, "worthless", f'echo executed >> "{sentinel}"\necho "worthless 9.9.9"')
+    # A uv that answers every question with the attacker's directory.
+    uv_log = tmp_path / "planted-uv.log"
+    write_stub(
+        bin_dir,
+        "uv",
+        f'echo "$*" >> "{uv_log}"\ncase "$1 $2 $3" in\n'
+        f'  "tool dir --bin") echo "{evil_dir}" ;;\n'
+        "  *) ;;\n"
+        "esac",
+    )
+
+    result = run_uninstall(bin_dir, worthless_home=home, env_extra={"WORTHLESS_TRUST_PATH": ""})
+    out = result.stdout + result.stderr
+
+    assert not sentinel.exists(), (
+        f"a planted uv named a directory and we executed the binary in it:\n{out}"
+    )
+    assert not uv_log.exists(), f"the planted uv was consulted at all:\n{out}"
+
+
+def test_uninstall_delegates_to_a_pipx_install(tmp_path: Path) -> None:
+    """A pipx-installed worthless still gets to restore the user's keys.
+
+    `pipx install worthless` is a documented install path, so requiring uv would
+    send those users to the tier 2 wipe — which deletes ~/.worthless and the
+    keychain entry, leaving keys unrecoverable while a working program that
+    could have unscrambled them sits on disk. pipx knows where it put the
+    binary, so ask pipx, exactly as we ask uv.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pipx_bin_dir = tmp_path / "pipx" / "bin"
+    pipx_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+
+    sentinel = tmp_path / "shadow-was-executed"
+    write_stub(
+        bin_dir,
+        "worthless",
+        f'echo executed >> "{sentinel}"\necho "worthless 0.0.1-shadow"',
+    )
+    write_stub(
+        pipx_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "PIPX_RESTORED_KEYS" ;;\n'
+        "esac",
+    )
+    # uv exists but has no such tool — the pipx cohort's exact shape.
+    _write_uv_stub(bin_dir, tmp_path / "uv-tools" / "bin")
+    write_stub(
+        bin_dir,
+        "pipx",
+        'case "$1 $2 $3" in\n'
+        f'  "environment --value PIPX_BIN_DIR") echo "{pipx_bin_dir}" ;;\n'
+        "  *) ;;\n"
+        "esac",
+    )
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = result.stdout + result.stderr
+
+    assert "PIPX_RESTORED_KEYS" in out, f"a pipx install must still restore keys:\n{out}"
+    assert not sentinel.exists(), "the PATH copy was executed instead of the pipx one"
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_refusal_from_the_program_does_not_become_a_wipe(tmp_path: Path) -> None:
+    """`worthless uninstall` exiting non-zero means "I kept your keys" — honour it.
+
+    The CLI refuses rather than force-wipe when an install is still recoverable
+    (a busy DB, an IPC blip): it exits non-zero having destroyed nothing. The
+    script used to read any non-zero as "didn't finish cleanly" and fall into
+    the tier 2 wipe, which deletes the keychain entry and rm -rf's ~/.worthless —
+    the fernet key and the database the restore needs. A recoverable install
+    became an unrecoverable one, which is the outcome the CLI refused to cause.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "refusing: database is busy" >&2; exit 1 ;;\n'
+        "esac",
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+    # The keychain half of the state is as load-bearing as the files.
+    keychain_log = tmp_path / "security.log"
+    write_stub(bin_dir, "security", f'echo "$*" >> "{keychain_log}"')
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = result.stdout + result.stderr
+
+    assert not keychain_log.exists(), f"a refusal deleted the keychain entry:\n{out}"
+    assert home.exists(), f"a refusal wiped the home the restore needs:\n{out}"
+    assert (home / "fernet.key").exists(), "the key that can unscramble the shards was deleted"
+    assert result.returncode != 0, "a refused uninstall must not report success"
+    assert "nothing was deleted" in out.lower(), (
+        f"the user must be told the state is intact:\n{out}"
+    )
+    # The CLI also refuses when the keys are already dead (a lost Fernet key)
+    # and says so above. Promising "still restorable" here contradicts it.
+    assert "still restorable" not in out.lower(), (
+        f"promised the keys are restorable without knowing it:\n{out}"
+    )
+    # The title's promise on this path: the program that can restore the keys
+    # must survive a refusal. Removing it is the one irreversible step here.
+    uv_log = tmp_path / "uv.log"
+    assert not uv_log.exists() or "tool uninstall" not in uv_log.read_text(), (
+        f"a refusal removed the only tool that can restore the keys:\n{out}"
+    )
+
+
+def test_exit_73_removes_the_tool_and_does_not_claim_keys_were_lost(
+    tmp_path: Path,
+) -> None:
+    """Exit 73 means every key came back; only the OpenClaw undo fell short.
+
+    The CLI wipes ONLY after every .env restore succeeds (its module docstring:
+    "the restore-ALL-then-wipe key-shredder guard"). A failed restore aborts
+    with exit 1 and wipes nothing. So 73 is raised after a successful restore,
+    when undoing the OpenClaw provider config did not fully finish.
+
+    This test previously stubbed the CLI printing "could not restore
+    /proj/a/.env" and exiting 73 — a state the CLI never produces — and
+    asserted the user was told to rotate. It was encoding the shell's
+    misreading of the contract, not the contract. Telling a user to rotate
+    keys that were just restored is WOR-597's own failure class.
+
+    Still not a refusal: the wipe happened, so "nothing was deleted" is false
+    and the tool has to go.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "restored 1 file"; echo "OpenClaw undo incomplete" >&2; exit 73 ;;\n'
+        "esac",
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 73, f"the CLI's partial-restore code must survive:\n{out}"
+    assert "nothing was deleted" not in out, "the wipe already happened; that claim is false"
+    assert "rotate" not in out, (
+        "exit 73 told the user to rotate keys the CLI had just restored:\n" + out
+    )
+    assert KEYS_RESTORED in out, f"the user must be told their keys came back:\n{out}"
+    assert "openclaw" in out, f"the user must be told what did not finish:\n{out}"
+    uv_log = tmp_path / "uv.log"
+    assert uv_log.exists() and "tool uninstall worthless" in uv_log.read_text(), (
+        "the tool must still be removed after a partial restore"
+    )
+
+
+def test_force_wipes_after_a_refusal(tmp_path: Path) -> None:
+    """--force is the escape hatch: wipe anyway, and say keys are not restored."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n  --version) echo "worthless 0.3.12" ;;\n  uninstall) exit 1 ;;\nesac',
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home, args=("--yes", "--force"))
+    out = (result.stdout + result.stderr).lower()
+
+    assert not home.exists(), "--force must still wipe"
+    assert "rotate" in out, "a forced wipe must tell the user to rotate their keys"
+    # The binary was found and ran; it refused. "None found" is a false reason.
+    assert "no working 'worthless' binary found" not in out, (
+        f"a forced wipe after a refusal blamed a missing binary:\n{out}"
+    )
+    uv_log = tmp_path / "uv.log"
+    assert uv_log.exists() and "tool uninstall worthless" in uv_log.read_text(), (
+        "a forced wipe must still remove the installed tool"
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_poisoned_uv_tool_bin_dir_does_not_beat_a_real_install(tmp_path: Path) -> None:
+    """WOR-597 through the environment instead of PATH.
+
+    UV_TOOL_BIN_DIR / XDG_BIN_HOME steer `uv tool dir --bin`, so a hostile value
+    would hand `uninstall --yes` to a binary of the attacker's choosing — the
+    same defeat as a stale copy on PATH. Resolution therefore asks uv with those
+    variables unset first; only if that finds nothing do we honour them, because
+    install.sh honours them too and the tool may genuinely live there.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    evil_bin_dir = tmp_path / "evil"
+    evil_bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+
+    sentinel = tmp_path / "evil-was-executed"
+    write_stub(evil_bin_dir, "worthless", f'echo executed >> "{sentinel}"\necho "worthless 9.9.9"')
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "REAL_RESTORED_KEYS" ;;\n'
+        "esac",
+    )
+    # uv honours UV_TOOL_BIN_DIR when set, and reports the real dir when it is not.
+    write_stub(
+        bin_dir,
+        "uv",
+        'printf "uv %s\\n" "$*" >> "$HOME/uv.log"\n'
+        'case "$1 $2 $3" in\n'
+        '  "tool dir --bin")\n'
+        f'    if [ -n "${{UV_TOOL_BIN_DIR:-}}" ]; then echo "$UV_TOOL_BIN_DIR"; '
+        f'else echo "{real_bin_dir}"; fi ;;\n'
+        '  "tool uninstall worthless") echo "removed" ;;\n'
+        "  *) ;;\n"
+        "esac",
+    )
+
+    result = run_uninstall(
+        bin_dir,
+        worthless_home=home,
+        env_extra={"UV_TOOL_BIN_DIR": str(evil_bin_dir)},
+    )
+    out = result.stdout + result.stderr
+
+    assert not sentinel.exists(), f"a hostile UV_TOOL_BIN_DIR got its binary executed:\n{out}"
+    assert "REAL_RESTORED_KEYS" in out, f"the real install should have done the work:\n{out}"
+
+
+def test_an_unverifiable_copy_stops_the_script_instead_of_wiping(tmp_path: Path) -> None:
+    """WOR-597. A `worthless` we cannot vouch for is neither run nor wiped around.
+
+    Neither uv nor pipx claims this install, yet something answers PATH. It may
+    be the user's own install in a custom bin dir (install.sh honours
+    UV_TOOL_BIN_DIR; this script scrubs it, so we cannot see it) or a leftover
+    copy. Running it is out — unknown provenance. Wiping is also out: it would
+    delete the key and database that copy could still use to restore. So stop,
+    tell the user how to do it themselves, and leave --force as the way out.
+
+    A genuinely broken install — nothing on PATH at all — still gets the tier 2
+    wipe (test_tier2_wipes_a_broken_install).
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+
+    sentinel = tmp_path / "shadow-was-executed"
+    write_stub(
+        bin_dir,
+        "worthless",
+        f'echo executed >> "{sentinel}"\necho "worthless 0.0.1-shadow"',
+    )
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert not sentinel.exists(), "a PATH-resolved copy was executed with no way to verify it"
+    # The advice is "restore with it yourself" — only safe if the user can see
+    # WHICH copy that is and check it is theirs.
+    assert str(bin_dir / "worthless").lower() in out, f"the unverified copy was not named:\n{out}"
+    assert "restored to your .env files" not in out, "claimed a restoration that never happened"
+    assert home.exists(), "the home a recoverable copy needs was wiped"
+    assert (home / "fernet.key").exists(), "the key that unscrambles the shards was deleted"
+    assert "nothing was deleted" in out, f"the user must be told the state is intact:\n{out}"
+    assert "--force" in out, "the escape hatch must be offered"
+    assert result.returncode == 41, f"a refusal needs its own exit code, got {result.returncode}"
+
+
+def test_the_custom_bin_dir_user_can_actually_finish(tmp_path: Path) -> None:
+    """The advice must terminate for a legitimate install we cannot see.
+
+    Someone who installed with UV_TOOL_BIN_DIR set has a real worthless that
+    neither uv's default dir nor pipx reports — this script scrubs that variable
+    on purpose. Run 1 refuses and tells them to restore by hand. `worthless
+    uninstall` wipes ~/.worthless once every key is back, so run 2 finds no
+    state left to protect and finishes the cleanup instead of refusing again.
+    A loop with no exit but --force would be worse than the bug we fixed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.3.12"')
+    write_stub(
+        bin_dir,
+        "uv",
+        'printf "uv %s\\n" "$*" >> "$HOME/uv.log"\n'
+        'case "$1 $2 $3" in\n'
+        f'  "tool dir --bin") echo "{tmp_path / "empty-bin"}" ;;\n'
+        '  "tool uninstall worthless") echo "removed" ;;\n'
+        "  *) ;;\n"
+        "esac",
+    )
+
+    # `worthless uninstall` removes the keystore entry as it restores each key,
+    # so by run 2 there is nothing to find. Stubbed rather than left to the
+    # host: tier2_wipe now reads the keystore to tell a successful restore from
+    # a hand-deleted home, and a test that asks the developer's real keychain
+    # is neither hermetic nor safe to run unattended.
+    # Both keystore tools: run_uninstall does not stub `uname`, so the script
+    # picks its macos/linux branch from the real host. On either, a missing
+    # entry is not proof of anything (the key may have been a file), so the
+    # user gets the conditional "can't tell" message. It may not claim the
+    # keys were lost, which is what the assertions below pin.
+    write_stub(bin_dir, "security", "exit 1")
+    write_stub(bin_dir, "secret-tool", "exit 1")
+
+    first = run_uninstall(bin_dir, worthless_home=home)
+    assert first.returncode == 41, "run 1 must refuse while keys are still locked"
+    assert home.exists(), "run 1 must not delete the state the user still needs"
+
+    # The user follows the advice: `worthless uninstall --yes` restores every
+    # key and removes the home. Simulated here by removing it.
+    shutil.rmtree(home)
+
+    second = run_uninstall(bin_dir, worthless_home=home)
+    out = second.stdout + second.stderr
+
+    assert second.returncode == 0, f"run 2 must finish the cleanup, not refuse again:\n{out}"
+    uv_log = tmp_path / "uv.log"
+    assert "tool uninstall worthless" in uv_log.read_text(), "run 2 must remove the tool"
+
+    # Terminating is not enough — run 2 also has to tell the truth. This user
+    # followed the advice, so `worthless uninstall` already put every key back.
+    # Telling them the keys could not be restored, and to rotate at the
+    # provider, is WOR-597's own failure inverted: the script lying about key
+    # state. Rotating live credentials is expensive and irreversible-ish; a
+    # false alarm here costs real money and trust.
+    assert "rotate them at your provider" not in out, (
+        "run 2 told a user whose keys were just restored to rotate them:\n" + out
+    )
+    assert "could NOT be restored" not in out, (
+        "run 2 claimed the restore failed after it succeeded:\n" + out
+    )
+    # And it must not claim nothing was there — a worthless IS on PATH; the
+    # script simply declined to trust it. Saying "none found" is a different
+    # untruth about the same situation.
+    assert "No working 'worthless' binary found" not in out, (
+        "run 2 reported no binary while one answers on PATH:\n" + out
+    )
+
+
+def test_force_wipes_when_the_copy_cannot_be_verified(tmp_path: Path) -> None:
+    """--force is how a user says "I know, wipe it anyway" — keys stay locked."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.0.1-shadow"')
+
+    result = run_uninstall(bin_dir, worthless_home=home, args=("--yes", "--force"))
+    out = (result.stdout + result.stderr).lower()
+
+    assert not home.exists(), "--force must wipe"
+    assert "rotate" in out, "a forced wipe must tell the user to rotate their keys"
+    # This script only removes what uv or pipx installed. The copy it refused
+    # to trust is still on PATH, so "removed from this machine" is false.
+    assert "removed from this machine" not in out, (
+        f"claimed a full removal while a copy still answers on PATH:\n{out}"
+    )
+    assert "still answers on your path" in out, f"the leftover copy was not named:\n{out}"
+    assert str(bin_dir / "worthless").lower() in out, f"the leftover path was not shown:\n{out}"
+    assert result.returncode == 0, result.stderr
 
 
 def test_refuses_without_yes_when_noninteractive(tmp_path: Path) -> None:
@@ -160,3 +669,498 @@ def test_keychain_account_matches_the_python_keystore(tmp_path: Path) -> None:
     assert result.stdout.strip() == expected, (
         f"shell account {result.stdout.strip()!r} != python {expected!r}"
     )
+
+
+def test_a_hand_deleted_home_still_warns_that_keys_are_stranded(tmp_path: Path) -> None:
+    """A missing home does NOT always mean the keys came back safely.
+
+    A missing ~/.worthless is often benign: the advised flow (`worthless
+    uninstall --yes`, then re-run) removes it only AFTER putting every key
+    back. But a user who simply ran
+    `rm -rf ~/.worthless` by hand destroyed shard-B and the Fernet key: their
+    .env halves are permanently inert and they genuinely must rotate. Using
+    home-dir presence alone conflates the two and leaves that user un-warned —
+    a false negative, which is worse than the false alarm it replaced.
+
+    The keychain tells them apart. `worthless uninstall` deletes the Fernet key
+    entry as part of restoring; `rm -rf` cannot. So a surviving entry with no
+    home means the keys are stranded.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"  # deliberately never created: hand-deleted
+
+    # The entry survives, because only the program removes it.
+    write_stub(
+        bin_dir,
+        "security",
+        'case "$1" in\n'
+        "  find-generic-password) exit 0 ;;\n"
+        "  delete-generic-password) exit 1 ;;\n"
+        "esac",
+    )
+    # Linux equivalent: `lookup` finds the surviving entry, `clear` reports
+    # nothing left so the capped drain loop terminates.
+    write_stub(
+        bin_dir,
+        "secret-tool",
+        'case "$1" in\n  lookup) exit 0 ;;\n  *) exit 1 ;;\nesac',
+    )
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, f"the wipe should still complete:\n{out}"
+    assert "could not be restored automatically" in out, (
+        "a user who hand-deleted their home has stranded keys and was NOT told "
+        f"to rotate them:\n{out}"
+    )
+
+
+def test_the_wipe_actually_deletes_the_keystore_entry(tmp_path: Path) -> None:
+    """A wipe must take the Fernet key with it, and something must prove it.
+
+    Every other test here asserts on MESSAGES. Measured: deleting the
+    `delete_keychain_entry` call from tier2_wipe outright left all 17 tests
+    green — the destructive half of the wipe was unpinned. That matters more
+    than the wording it sits next to: a wipe that removes ~/.worthless but
+    leaves the key in the keystore strands the user's .env halves AND leaves
+    live key material on a machine they have been told is clean.
+
+    Asserts the delete was attempted with the exact account the Python keystore
+    uses, so a drift in either half of that contract fails here too.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+
+    # Both keystore tools log to ONE file. run_uninstall does not stub `uname`,
+    # so the script picks macos or linux from the real host. An earlier version
+    # stubbed only macOS `security`: on Linux CI the script called `secret-tool`,
+    # the log was never written, and this test failed — after passing locally.
+    keystore_log = tmp_path / "keystore-calls.log"
+    write_stub(
+        bin_dir,
+        "security",
+        f'echo "security $*" >> "{keystore_log}"\n'
+        'case "$1" in\n'
+        # One entry exists, then it is gone — otherwise the capped drain loop
+        # would spin to its limit against an always-succeeding stub.
+        f'  delete-generic-password) [ -f "{tmp_path}/.gone" ] && exit 1\n'
+        f'    : > "{tmp_path}/.gone"; exit 0 ;;\n'
+        "  *) exit 1 ;;\n"
+        "esac",
+    )
+    write_stub(
+        bin_dir,
+        "secret-tool",
+        f'echo "secret-tool $*" >> "{keystore_log}"\n'
+        'case "$1" in\n'
+        "  clear) exit 0 ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac",
+    )
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = result.stdout + result.stderr
+
+    assert result.returncode == 0, out
+    assert not home.exists(), "the wipe must remove the home"
+    assert keystore_log.exists(), (
+        "the wipe never touched the keystore — the Fernet key would survive a "
+        f"'Worthless removed from this machine':\n{out}"
+    )
+    calls = keystore_log.read_text()
+    # Whichever platform branch ran, a DELETE must have targeted the key entry:
+    # `security delete-generic-password` on macOS, `secret-tool clear` on Linux.
+    assert "delete-generic-password" in calls or "secret-tool clear" in calls, (
+        f"no keystore delete was attempted:\n{calls}"
+    )
+    assert "fernet-key-" in calls, f"the delete did not target the key entry:\n{calls}"
+
+
+def test_a_keystore_it_cannot_read_gets_an_honest_answer_not_a_guess(
+    tmp_path: Path,
+) -> None:
+    """When the script cannot tell whether keys were restored, it must say so.
+
+    On Linux with no keyring (WSL, servers, no D-Bus) worthless keeps its
+    Fernet key as a FILE inside ~/.worthless, so there is never a keystore
+    entry. Once the home is gone, "the program restored everything" and
+    "someone ran rm -rf by hand" leave identical traces. The script cannot tell
+    them apart, and either flat answer is wrong for half of those users:
+
+      "your keys could NOT be restored, rotate"  -> false alarm after a restore
+      "nothing left to restore"                  -> silence over dead keys
+
+    A previous revision answered "assume stranded" here, which told every WSL
+    user who followed the script's own advice to rotate live credentials. The
+    honest answer is conditional: say the script cannot tell, and give the
+    user the one fact that decides it.
+
+    Driven through an unrecognised OS so the "cannot read the keystore" branch
+    is reached deterministically on any host — a real Linux runner may or may
+    not have secret-tool installed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"  # gone; the script cannot tell why
+    write_stub(bin_dir, "uname", "echo Haiku")
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, f"the wipe should still complete:\n{out}"
+    assert CANT_TELL in out, f"the user was not told the script cannot tell:\n{out}"
+    assert "could not be restored automatically" not in out, (
+        "asserted the keys were lost when the script cannot know that:\n" + out
+    )
+    assert "nothing left here to restore" not in out, (
+        "asserted nothing was lost when the script cannot know that:\n" + out
+    )
+
+
+def _tier1_with_nothing_to_restore(tmp_path: Path) -> Path:
+    """A real (uv-reported) install whose CLI finds no state and exits 0.
+
+    This is what `worthless uninstall --yes` does when ~/.worthless is already
+    gone: prints "Nothing to uninstall" and exits 0. Reproduced live on Debian
+    trixie with no keyring before this test existed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "Nothing to uninstall — Worthless is not installed here."; exit 0 ;;\n'
+        "esac",
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+    return bin_dir
+
+
+def test_a_cli_with_nothing_to_restore_is_not_reported_as_a_restore(
+    tmp_path: Path,
+) -> None:
+    """Exit 0 from the CLI is not proof the keys came back.
+
+    A user runs `rm -rf ~/.worthless` by hand — shard-B and the Fernet key are
+    gone, every .env half is permanently inert — then runs this script. Tier 1
+    finds the real install, hands it `uninstall --yes`, and the CLI, seeing no
+    home, says "Nothing to uninstall" and exits 0. The script read that 0 as
+    success and printed "your real keys were restored to your .env files".
+
+    That is WOR-597's own lie, the dangerous way round: reassurance over dead
+    keys. Found by running the real thing in a container, not by any test —
+    every test here stubbed the CLI as either succeeding at a restore or not.
+
+    On macOS the hand-deleted home leaves the Keychain entry behind, which is
+    proof the keys are stranded, so the user must be told to rotate.
+    """
+    bin_dir = _tier1_with_nothing_to_restore(tmp_path)
+    home = tmp_path / "wless-home"  # deleted by hand before uninstall runs
+    _keystore_entry_exists(bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert KEYS_RESTORED not in out, (
+        "told a user whose keys are dead that they were restored:\n" + out
+    )
+    assert "could not be restored automatically" in out, (
+        "the keystore proves the keys are stranded and the user was not told:\n" + out
+    )
+
+
+def test_a_cli_with_nothing_to_restore_and_an_unreadable_keystore_says_so(
+    tmp_path: Path,
+) -> None:
+    """Same flow on a box with no readable keystore — the WSL case.
+
+    Here the script genuinely cannot tell a hand-deleted home from a restore
+    that already happened, so neither "restored" nor "rotate" may be asserted.
+    """
+    bin_dir = _tier1_with_nothing_to_restore(tmp_path)
+    home = tmp_path / "wless-home"
+    write_stub(bin_dir, "uname", "echo Haiku")
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert KEYS_RESTORED not in out, "claimed a restore the script cannot know happened:\n" + out
+    assert CANT_TELL in out, f"the user was not told the script cannot tell:\n{out}"
+
+
+def _keystore_entry_exists(bin_dir: Path) -> None:
+    """Both keystore tools report an entry, whichever OS branch runs."""
+    write_stub(
+        bin_dir,
+        "security",
+        'case "$1" in\n  find-generic-password) exit 0 ;;\n  *) exit 1 ;;\nesac',
+    )
+    write_stub(bin_dir, "secret-tool", 'case "$1" in\n  lookup) exit 0 ;;\n  *) exit 1 ;;\nesac')
+
+
+def test_a_recreated_empty_home_is_not_reported_as_a_restore(tmp_path: Path) -> None:
+    """An existing ~/.worthless is not evidence that any key is locked in it.
+
+    `worthless scan` (the pre-commit hook), `up`, `wrap`, `lock` and the MCP
+    server all create a fresh, empty home on start. So a user who ran
+    `rm -rf ~/.worthless` and then committed once has a home again, with an
+    empty database, while every key it used to hold is dead. Tier 1 used to
+    read "the home exists" as "keys are restorable", let the CLI print
+    "0 .env file(s) restored", then announce the keys were restored.
+
+    A recreated home also gets a fresh keystore entry, so the keystore cannot
+    break the tie either. The honest answer is the conditional one.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, [])  # recreated: schema present, nothing locked
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "0 .env file(s) restored"; exit 0 ;;\n'
+        "esac",
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+    _keystore_entry_exists(bin_dir)  # the recreated home made a fresh one
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert "your real keys were restored" not in out and KEYS_RESTORED not in out, (
+        "announced a restore over an empty database:\n" + out
+    )
+    assert "could not be restored automatically" not in out, (
+        "asserted the keys were lost when the script cannot know that:\n" + out
+    )
+    assert CANT_TELL in out, f"the user was not told the script cannot tell:\n{out}"
+
+
+def test_a_broken_install_over_an_empty_home_does_not_demand_a_rotation(
+    tmp_path: Path,
+) -> None:
+    """Tier 2's half of the same proxy: an empty home holds no stranded keys.
+
+    A user who ran `worthless uninstall` (every key back), then let a later
+    `worthless scan` recreate the home, then broke or removed the binary, used
+    to be told to rotate live keys — because a home existed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, [])
+    _keystore_entry_exists(bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert not home.exists(), "the leftovers must still be wiped"
+    assert "could not be restored automatically" not in out, (
+        "demanded a rotation over an empty database:\n" + out
+    )
+    assert CANT_TELL in out, f"the user was not told the script cannot tell:\n{out}"
+
+
+@needs_sqlite3
+def test_an_unverified_copy_over_an_empty_home_is_not_a_reason_to_refuse(
+    tmp_path: Path,
+) -> None:
+    """Refusing protects locked keys. With none locked, refusing just strands
+    the user with no way forward but --force."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, [])
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.0.1-shadow"')
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not home.exists(), "nothing was locked, so the cleanup should finish"
+
+
+@pytest.mark.parametrize(
+    ("uname", "tool", "not_found"),
+    [
+        # macOS: exit 44 is the Keychain's "item not found". It used to be read
+        # as "the program removed it, keys came back" — but a key kept in a file
+        # (WORTHLESS_KEYRING_BACKEND=null, or a failed Keychain write) never had
+        # an entry, so a hand-deleted home looked like a clean restore.
+        ("Darwin", "security", "exit 44"),
+        # Linux/WSL: no keyring at all is the common case. This is the branch
+        # WSL users actually take; the unrecognised-OS test does not reach it.
+        ("Linux", "secret-tool", "exit 1"),
+    ],
+)
+def test_a_missing_keystore_entry_is_not_proof_the_keys_came_back(
+    tmp_path: Path, uname: str, tool: str, not_found: str
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"  # gone; the script cannot tell why
+    write_stub(bin_dir, "uname", f"echo {uname}")
+    write_stub(bin_dir, tool, not_found)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert "nothing left here to restore" not in out, (
+        "reassured a user whose keys may be dead:\n" + out
+    )
+    assert "could not be restored automatically" not in out, (
+        "asserted the keys were lost when the script cannot know that:\n" + out
+    )
+    assert CANT_TELL in out, f"the user was not told the script cannot tell:\n{out}"
+
+
+def test_a_broken_official_install_is_not_wiped_or_called_a_stranger(tmp_path: Path) -> None:
+    """uv says the binary is ours, but it no longer runs (say, a Python upgrade).
+
+    It used to fall through either to "neither uv nor pipx installed it" (false,
+    exit 41) when its dir was on PATH, or to the tier 2 wipe when it was not —
+    deleting keys that reinstalling the tool would have restored. Locked keys
+    plus our own broken binary means: stop, keep everything, say reinstall.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(real_bin_dir, "worthless", 'echo "ImportError: broken venv" >&2; exit 1')
+    _write_uv_stub(bin_dir, real_bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 41, f"a broken official install was not a refusal:\n{out}"
+    assert home.exists() and (home / "fernet.key").exists(), (
+        "keys a reinstall could restore were wiped"
+    )
+    assert "neither uv nor pipx installed it" not in out, "called our own install a stranger's copy"
+    assert "reinstall" in out, f"the user was not told how to get their keys back:\n{out}"
+    uv_log = tmp_path / "uv.log"
+    assert not uv_log.exists() or "tool uninstall" not in uv_log.read_text(), (
+        "removed the tool whose reinstall is the way back"
+    )
+
+
+@needs_sqlite3
+def test_a_broken_official_install_with_nothing_locked_is_named_correctly(
+    tmp_path: Path,
+) -> None:
+    """Nothing locked, so the wipe goes ahead — but the reason must be true.
+
+    The script found this binary through uv and ran it; it did not start.
+    "Could not be verified, so it was not run" is false on both counts.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, [])
+    write_stub(real_bin_dir, "worthless", 'echo "ImportError: broken venv" >&2; exit 1')
+    _write_uv_stub(bin_dir, real_bin_dir)
+    # It is on PATH too, as it would be for a default uv install.
+    write_stub(bin_dir, "worthless", f'exec "{real_bin_dir / "worthless"}" "$@"')
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert not home.exists(), "nothing was locked, so the leftovers should go"
+    assert "could not be verified" not in out, "called our own broken install unverified"
+    assert "does not run" in out, f"the real reason was not given:\n{out}"
+
+
+def test_a_wipe_of_a_database_it_could_not_read_does_not_reassure(tmp_path: Path) -> None:
+    """No working sqlite3: the script cannot count what is locked, then wipes it.
+
+    Whatever was locked in that database is unrecoverable once the wipe runs,
+    so "if worthless uninstall restored them, you're done" is the wrong thing
+    to say. The script doesn't know there were keys — so it must not say
+    "could NOT be restored" either — but it must say rotate-if-any.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(bin_dir, "sqlite3", "exit 1")  # present but unusable
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert not home.exists(), "the wipe should still run"
+    assert "you're done" not in out, f"reassured over a database it never read:\n{out}"
+    assert "couldn't read which keys were locked" in out, f"the user was not told why:\n{out}"
+    assert "rotate" in out, f"the user was not told what to do if keys were there:\n{out}"
+
+
+@needs_sqlite3
+def test_enroll_only_keys_are_not_reported_as_restored(tmp_path: Path) -> None:
+    """An enroll-only key has no .env to go back to; the CLI deletes it and
+    tells the user to rotate. A home holding only those has nothing to restore,
+    so "every key it had locked in a .env file is restored" must not print."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, [None])  # enroll-only: no env_path
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        "  uninstall) echo \"enroll-only key 'a' has no .env to restore\"; exit 0 ;;\n"
+        "esac",
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+    _keystore_entry_exists(bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert KEYS_RESTORED not in out, f"claimed a .env restore that had nothing to restore:\n{out}"
+    # The CLI deleted those keys and said rotate; the script must agree with it.
+    assert "could not be restored automatically" in out, (
+        f"enroll-only keys were deleted and the user was not told to rotate:\n{out}"
+    )
+
+
+@needs_sqlite3
+def test_a_wipe_of_enroll_only_keys_says_rotate(tmp_path: Path) -> None:
+    """An enroll-only key has no .env to restore to, but it is still a key the
+    wipe destroys. The CLI's own advice for those is "rotate"; tier 2 must not
+    downgrade that to "can't tell, you may be done"."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, [None])
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert "you're done" not in out, f"reassured over enroll-only keys it just destroyed:\n{out}"
+    assert "could not be restored automatically" in out, f"the user was not told to rotate:\n{out}"

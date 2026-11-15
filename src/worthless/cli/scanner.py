@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
+import subprocess  # nosec B404
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -10,10 +13,21 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from worthless.cli.dotenv_rewriter import shannon_entropy
-from worthless.cli.key_patterns import ENTROPY_THRESHOLD, KEY_PATTERN, detect_provider
+from worthless.cli.key_patterns import (
+    COMMITTED_BEFORE_NOTE,
+    ENTROPY_THRESHOLD,
+    KEY_PATTERN,
+    EXPOSED_LOGIN_REMEDIES,
+    UNSHARDABLE_REMEDY,
+    detect_provider,
+    is_oauth_token,
+)
 from worthless.cli.redaction import mask_secret
+from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
+from worthless.openclaw.audit import sanitise_for_message
 
 _VAR_NAME_RE = re.compile(r"(\w+)\s*$")
+_COMMIT_HASH = re.compile(r"[0-9a-f]{4,64}")  # what %h prints, and nothing else
 
 # Cap bytes read per file. A file larger than this is scanned up to the cap
 # (its prefix) and flagged ``truncated`` — never silently skipped. Fail-closed:
@@ -218,6 +232,228 @@ class ScanFinding:
     # fingerprint THIS finding's key rather than the line's first match, which
     # would show one shared fingerprint for every key on a minified JSON line.
     column: int | None = None
+    # worthless-p55g: a Claude Code OAuth login token. `lock` refuses these by
+    # design, wherever they sit. Decided here, while the raw value is still in
+    # hand — after this only the masked preview exists.
+    is_login_token: bool = False
+    # Why an exposed login token can leave the machine — one key of
+    # EXPOSED_LOGIN_REMEDIES. None when it stays local or isn't a token.
+    exposure: str | None = None
+    # worthless-87rb: for a token that stays local, the newest commit on any
+    # branch that still holds a copy of this .env. A warning, never a failure.
+    committed_before: str | None = None
+
+    @property
+    def is_unshardable(self) -> bool:
+        """A login token that stays on this machine: an untracked, non-symlink
+        .env-family file. Not "unprotected" — lock can't fix it and nothing else
+        will, so scan must not fail the build over it. Anywhere else (in git, a
+        non-.env file, a symlink, the environment) the token is plain exposed."""
+        return self.is_login_token and self.exposure is None
+
+
+def _git_state(path: Path) -> str:
+    """ "tracked", "untracked", "no_repo" or "unknown" — git's answer for *path*.
+
+    Only git's own "not tracked" (exit 1), or "not a git repository" with no
+    .git in any parent folder, means not in git. No git, a timeout, or any
+    other refusal (e.g. "dubious ownership" in a CI container) is "unknown",
+    which callers treat as in git: a token can't pass because the check
+    couldn't run.
+    """
+    try:
+        result = _git(path, "ls-files", "--error-unmatch", "--", path.name)
+    except (subprocess.TimeoutExpired, OSError):  # OSError covers no-git
+        return "unknown"
+    if result.returncode == 0:
+        return "tracked"
+    if result.returncode == 1:
+        return "untracked"
+    no_repo = result.returncode == 128 and b"not a git repository" in result.stderr
+    return "no_repo" if no_repo and not _has_git_above(path) else "unknown"
+
+
+def _has_git_above(path: Path) -> bool:
+    """A .git file or folder in a parent of *path*. There, "not a git
+    repository" means a repo git can't open (a moved worktree, a lost HEAD),
+    not that there is none."""
+    # Resolved: `git -C` follows a symlinked folder to the real repo, so this
+    # must walk the same path. ponytail: walks to /, past git's
+    # filesystem-boundary stop, so a .git above a mount point fails closed.
+    return any((d / ".git").exists() for d in path.resolve().parents)
+
+
+def _git(path: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    """Run a read-only git query in the folder holding *path*."""
+    return subprocess.run(  # nosec B603,B607
+        # The scanned folder's own .git/config can name a command for git to
+        # run (core.fsmonitor); plain scan must never run it.
+        ["git", "-c", "core.fsmonitor=false", "-C", str(path.parent), *args],  # noqa: S607
+        capture_output=True,
+        check=False,
+        timeout=10,
+        # Ask the repo that holds *path*: git sets GIT_DIR for hooks run in a
+        # linked worktree, and inherited it points this at another repo. Ask in
+        # English: the "not a git repository" check reads git's message. Never
+        # fetch: a partial clone would contact its remote, running whatever its
+        # config names. GIT_NO_LAZY_FETCH needs git 2.39.4+/2.45.1+; an empty
+        # GIT_ALLOW_PROTOCOL blocks every transport on any git since 2.6.
+        env={
+            **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+            "LC_ALL": "C",
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_ALLOW_PROTOCOL": "",
+        },
+    )
+
+
+def _in_last_commit(path: Path) -> bool | None:
+    """True if *path* is in HEAD — committed, not just staged. False if not, or
+    no commit yet. None if git didn't answer: the caller fails closed."""
+    try:
+        rc = _git(path, "rev-parse", "--verify", "--quiet", f"HEAD:./{path.name}").returncode
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    # Exit 1 is "no such path in HEAD"; anything else is an error, not a no.
+    return rc == 0 if rc in (0, 1) else None
+
+
+def token_exposure(path: Path) -> str | None:
+    """Why a login token in *path* can leave the machine, or None if it stays
+    local: a .env-family file lock manages, not a symlink, not in git."""
+    if path.name not in _BASENAME_ALLOWLIST:
+        return "other_file"
+    if path.is_symlink():
+        return "symlink"
+    state = _git_state(path)
+    if state == "no_repo":
+        return None
+    # Asked even when untracked: `git rm --cached` without a commit leaves the
+    # file, token included, in the latest commit.
+    in_head = _in_last_commit(path) if state != "unknown" else None
+    if in_head is None:
+        return "git_unknown"
+    if in_head:
+        return "committed"
+    return "staged" if state == "tracked" else None
+
+
+def _committed_before(path: Path) -> str | None:
+    """Short hash of the newest commit, on any branch or tag, that added or
+    changed *path*, or None. It only adds a warning, so if git can't say, it
+    says nothing."""
+    if not _has_git_above(path):
+        # No repo, so no history. Saves a git process when scanning outside a
+        # repo, e.g. the pre-commit hook's staged copies in a temp folder.
+        return None
+    try:
+        # -m: without it git skips merge commits and the side of a merge (a
+        # merged, deleted branch). --full-history is git's documented switch
+        # for that side walk; -m happens to do it too today. The -c pins undo
+        # user config that changes the answer: log.showRoot=false hides a .env
+        # added in the first commit; log.follow=true follows `git mv x .env`
+        # back to x's commit; log.diffMerges=off cancels -m; a non-UTF-8
+        # i18n.logOutputEncoding garbles the hash.
+        # --exclude=refs/stash: a stash is local, never pushed.
+        # --no-show-signature: the repo's own log.showSignature would make git
+        # run its gpg.program on a signed commit.
+        # ponytail: when the .env was never committed this walks all history
+        # (~1 s at 72k commits); past the 10 s git timeout there's no warning.
+        result = _git(
+            path, "-c", "log.showRoot=true", "-c", "log.follow=false",
+            "-c", "log.diffMerges=separate", "-c", "i18n.logOutputEncoding=UTF-8",
+            "log", "--full-history", "-m",
+            "--exclude=refs/stash", "--all", "-1", "--diff-filter=AM",
+            "--format=%h", "--no-show-signature", "--", path.name,
+        )  # fmt: skip
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    # -m prints a merge commit once per parent; the first word is the answer,
+    # and only a plain hex hash is trusted to reach the terminal.
+    out = result.stdout.split()
+    commit = out[0].decode("ascii", errors="replace") if out else ""
+    return commit if _COMMIT_HASH.fullmatch(commit) else None
+
+
+def token_facts(path: Path) -> tuple[str | None, str | None]:
+    """(exposure, committed_before) for a login token in *path*: why it can
+    leave the machine, and, when it stays local, the newest commit that still
+    holds a copy anyway."""
+    exposure = token_exposure(path)
+    return exposure, (_committed_before(path) if exposure is None else None)
+
+
+def _exposure_for(
+    path: Path, from_env: bool, cache: dict[Path, tuple[str | None, str | None]]
+) -> tuple[str | None, str | None]:
+    """token_facts for a login token found in *path*, asked once per file —
+    a .env with several tokens gets one round of git calls, which keeps the
+    pre-commit hook inside its time budget. The --deep environment dump is
+    "environment"."""
+    if from_env:
+        return "environment", None
+    if path not in cache:
+        cache[path] = token_facts(path)
+    return cache[path]
+
+
+def committed_before_note(file: str, commit: str) -> str:
+    """The history warning. The file name is attacker-controllable: sanitised
+    for the terminal, and shell-quoted where it lands in the command to paste.
+    *commit* is already a plain hex hash."""
+    path = Path(file)
+    return COMMITTED_BEFORE_NOTE.format(
+        file=sanitise_for_message(file),
+        commit=commit,
+        folder=shlex.quote(sanitise_for_message(str(path.parent))),
+        name=shlex.quote(sanitise_for_message(path.name)),
+    )
+
+
+def remedy_for_exposure(
+    exposure: str | None, file: str, committed_before: str | None = None
+) -> str:
+    """The fix text for a login token: local (None) or one exposure reason.
+    *file* lands only in commands like `git rm --cached <file>`; a filename is
+    attacker-controlled, so it is sanitised for the terminal and shell-quoted
+    so pasting the command can't run anything else.
+    A local token whose .env an older commit holds also gets the history note."""
+    if exposure is None:
+        if committed_before:
+            return f"{UNSHARDABLE_REMEDY} {committed_before_note(file, committed_before)}"
+        return UNSHARDABLE_REMEDY
+    return EXPOSED_LOGIN_REMEDIES[exposure].format(file=shlex.quote(sanitise_for_message(file)))
+
+
+def remediation_for(f: ScanFinding) -> str | None:
+    """The fix that exists for a login token — never "run worthless lock"."""
+    if f.is_protected or not f.is_login_token:
+        return None
+    return remedy_for_exposure(f.exposure, f.file, f.committed_before)
+
+
+def finding_to_dict(f: ScanFinding) -> dict[str, object]:
+    """One finding as JSON — shared by `scan --json` and the MCP scan tool."""
+    item: dict[str, object] = {
+        "file": f.file,
+        "line": f.line,
+        "var_name": f.var_name,
+        "provider": f.provider,
+        "is_protected": f.is_protected,
+        # worthless-p55g: additive (no schema bump). Lets a consumer tell
+        # "lock can't fix this" from "not protected yet".
+        "is_unshardable": f.is_unshardable,
+        "value_preview": f.value_preview,
+    }
+    if remedy := remediation_for(f):
+        # Why, as data: "local" (passes) or the reason it can leave the machine.
+        item["exposure"] = f.exposure or "local"
+        item["remediation"] = remedy
+        if f.committed_before:
+            item["committed_before"] = f.committed_before
+    return item
 
 
 def scan_files(
@@ -227,8 +463,12 @@ def scan_files(
     max_file_bytes: int | None = None,
     deadline: float | None = None,
     skipped: list[SkippedFile] | None = None,
+    env_dump: Path | None = None,
 ) -> list[ScanFinding]:
     """Scan files for API key patterns.
+
+    *env_dump*: the temp file holding the `--deep` dump of the process
+    environment, so its login tokens get the "environment" exposure.
 
     Each file is read (up to ``max_file_bytes``) line-by-line. Matches with
     entropy below the threshold are skipped (likely placeholders). If
@@ -244,6 +484,8 @@ def scan_files(
     """
     cap = MAX_SCAN_FILE_BYTES if max_file_bytes is None else max_file_bytes
     findings: list[ScanFinding] = []
+    # git is asked at most once per file: (exposure, committed_before)
+    exposure_cache: dict[Path, tuple[str | None, str | None]] = {}
 
     # Deadline is checked BETWEEN files, not mid-file. A single file inside
     # ``cap`` bytes is bounded by the size cap + linear regex — slow but never
@@ -273,6 +515,7 @@ def scan_files(
         if truncated and skipped is not None:
             skipped.append(SkippedFile(file=str(path), reason="truncated"))
         file_str = str(path.resolve())
+        from_env = path == env_dump  # a None dump never equals a real path
         for line_no, line in enumerate(text.splitlines(), start=1):
             for match in KEY_PATTERN.finditer(line):
                 value = match.group(0)
@@ -285,8 +528,15 @@ def scan_files(
                 # Try to extract var_name from KEY=VALUE or KEY = "VALUE"
                 var_name = _extract_var_name(line, match.start())
 
-                is_protected = bool(
+                # worthless-p55g: lock never shards a Claude Code OAuth token, so
+                # one can't be a worthless shard — even under a variable name
+                # that was locked before and later pasted over.
+                token = is_oauth_token(value)
+                is_protected = not token and bool(
                     enrolled_locations and var_name and (var_name, file_str) in enrolled_locations
+                )
+                exposure, committed_before = (
+                    _exposure_for(path, from_env, exposure_cache) if token else (None, None)
                 )
 
                 findings.append(
@@ -298,6 +548,9 @@ def scan_files(
                         is_protected=is_protected,
                         value_preview=_mask(value),
                         column=match.start(),
+                        is_login_token=token,
+                        exposure=exposure,
+                        committed_before=committed_before,
                     )
                 )
     return findings
@@ -323,6 +576,31 @@ def _mask(value: str) -> str:
     return mask_secret(value)
 
 
+EXPOSED_RULE_ID = "worthless/exposed-api-key"
+UNSHARDABLE_RULE_ID = "worthless/unshardable-oauth-token"
+
+
+def _sarif_verdict(f: ScanFinding) -> tuple[str, str, str]:
+    """(ruleId, level, message) for one finding."""
+    in_var = f" in variable {f.var_name}" if f.var_name else ""
+    remedy = remediation_for(f)
+    if remedy and f.is_unshardable:
+        # worthless-p55g: GitHub code scanning reads the level, not scan's exit
+        # code — "error" here would keep the gate red over a token lock refuses.
+        # "note" keeps it visible without blocking.
+        lead = f"Claude Code login token{in_var} — worthless can't protect it."
+        return UNSHARDABLE_RULE_ID, "note", f"{lead} {remedy}"
+    if remedy:
+        return EXPOSED_RULE_ID, "error", f"Exposed Claude Code login token{in_var}. {remedy}"
+    if f.is_protected:
+        return (
+            EXPOSED_RULE_ID,
+            "warning",
+            f"Exposed {f.provider} API key{in_var} (protected by worthless)",
+        )
+    return EXPOSED_RULE_ID, "error", f"Exposed {f.provider} API key{in_var}"
+
+
 def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:
     """Format findings as SARIF v2.1.0.
 
@@ -330,14 +608,11 @@ def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:
     """
     results = []
     for f in findings:
+        rule_id, level, text = _sarif_verdict(f)
         result: dict = {
-            "ruleId": "worthless/exposed-api-key",
-            "level": "warning" if f.is_protected else "error",
-            "message": {
-                "text": f"Exposed {f.provider} API key"
-                + (f" in variable {f.var_name}" if f.var_name else "")
-                + (" (protected by worthless)" if f.is_protected else ""),
-            },
+            "ruleId": rule_id,
+            "level": level,
+            "message": {"text": text},
             "locations": [
                 {
                     "physicalLocation": {
@@ -360,9 +635,14 @@ def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:
                         "version": tool_version,
                         "rules": [
                             {
-                                "id": "worthless/exposed-api-key",
+                                "id": EXPOSED_RULE_ID,
                                 "shortDescription": {"text": "Exposed API key detected"},
-                            }
+                            },
+                            {
+                                "id": UNSHARDABLE_RULE_ID,
+                                "shortDescription": {"text": "API key worthless can't protect"},
+                                "defaultConfiguration": {"level": "note"},
+                            },
                         ],
                     }
                 },

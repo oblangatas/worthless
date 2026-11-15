@@ -40,18 +40,27 @@ atomic-Pass-1 saves it. Per the WOR-646 honesty rule, known gaps are marked
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
+import pty
+import select
 import signal
 import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
+import psutil
 import pytest
 
 from tests.helpers import fake_anthropic_key, fake_key
+from tests.openclaw.install_incident.reproduce import fake_proxy_health
+from worthless.openclaw.config import _file_lock
 
 # POSIX-only: the product targets macOS + Linux, and os.killpg / start_new_session
 # / SIGKILL semantics are POSIX. Mirrors tests/e2e/conftest.py's platform policy.
@@ -184,6 +193,11 @@ def _make_trial_env(tmp_path: Path, trial: int, n_keys: int) -> TrialEnv:
     )
 
 
+def _leaks_a_real_install(var: str) -> bool:
+    """Env vars that would point a child lock at a real worthless/OpenClaw setup."""
+    return var.startswith(("WORTHLESS_", "OPENCLAW_")) or var == "PI_CODING_AGENT_DIR"
+
+
 def _child_env(te: TrialEnv) -> dict[str, str]:
     """Child process environment.
 
@@ -192,12 +206,17 @@ def _child_env(te: TrialEnv) -> dict[str, str]:
     / ``HOME`` / ``XDG_DATA_HOME`` are redirected into the trial sandbox.
     """
     root = te.home.parent
+    # Hermetic: a WORTHLESS_* / OpenClaw var leaked from the developer's shell or a
+    # sibling test (WORTHLESS_OPENCLAW_BIN, OPENCLAW_STATE_DIR, ...) must not point
+    # the child at a real install. Callers add back exactly the ones a test controls.
+    inherited = {k: v for k, v in os.environ.items() if not _leaks_a_real_install(k)}
     return {
-        **os.environ,
+        **inherited,
         "WORTHLESS_HOME": str(te.home),
         "WORTHLESS_KEYRING_BACKEND": "null",
         "HOME": str(te.home),
         "XDG_DATA_HOME": str(root / "xdg"),
+        "PYTHONFAULTHANDLER": "1",  # SIGABRT dumps the stuck stack: _dump_wedged_stack
     }
 
 
@@ -210,6 +229,16 @@ def _child_env(te: TrialEnv) -> dict[str, str]:
 SEAM_FLOOR = 0.05
 
 
+class _ProductFault(pytest.fail.Exception):
+    """A calibration verdict the PRODUCT owns — never retried.
+
+    Retries exist for a stalled host. "The lock exited on its own and wrote
+    nothing" is not a host symptom, and retrying it lets a lock that only
+    SOMETIMES does nothing calibrate on a lucky attempt (worthless-nqce).
+    Subclasses ``Failed`` so pytest still reports it as an ordinary failure.
+    """
+
+
 def _resolve_seam(
     first_shard: float | None,
     *,
@@ -217,6 +246,8 @@ def _resolve_seam(
     returncode: int | None = None,
     elapsed: float | None = None,
     stderr: str = "",
+    harness_killed: bool = False,
+    evidence: str = "",
 ) -> float:
     """Turn the probe result into a usable seam, or refuse to run.
 
@@ -228,8 +259,12 @@ def _resolve_seam(
     aim correctly, or it may put every trial inside process startup, and a green
     run looks identical either way. So refuse, and say why.
 
-    Two faults produce the same "no measurement" symptom, because the probe loop
-    exits when the child does as well as on ``MAX_SEAM``:
+    Three faults produce the same "no measurement" symptom, because the probe loop
+    exits when the child does as well as on ``WAIT_TIMEOUT``. The third is the
+    harness itself: when time runs out it SIGKILLs a lock that is still running,
+    so an empty DB then says nothing about the product. Reporting that as a
+    PRODUCT fault was reproduced under CPU load (2026-09-13, 2/6 runs at load
+    ~300), and ``harness_killed`` exists so it can never happen again:
 
     * the lock wrote shards but the 4ms polling missed the moment — a HARNESS
       problem, fix by polling faster or raising the ceiling;
@@ -246,9 +281,22 @@ def _resolve_seam(
     delay into process startup, so nothing reaches the orphan window and the
     suite passes vacuously with a clean conscience.
     """
+    evidence_line = f"  evidence: {evidence}\n" if evidence else ""
     if first_shard is not None:
         if SEAM_FLOOR <= first_shard <= MAX_SEAM * 0.9:
             return first_shard
+        if first_shard > MAX_SEAM * 0.9:
+            # Too LARGE is not implausible: the lock really did take that long.
+            # The harness cannot tell a loaded host from a slower lock, so the
+            # message must not pick one.
+            pytest.fail(
+                f"chaos seam calibration measured a {first_shard:.2f}s seam, which exceeds "
+                f"the storm budget (max {MAX_SEAM * 0.9:.2f}s: {TRIALS_PER_CELL} trials per "
+                "cell must fit the module timeout).\n"
+                "  Cause NOT determined here: host load OR a lock latency regression. "
+                "Compare load/cores below with an idle run before blaming either.\n"
+                f"{evidence_line}"
+            )
         pytest.fail(
             f"chaos seam calibration returned an implausible seam: {first_shard:.4f}s "
             f"(expected {SEAM_FLOOR}s .. {MAX_SEAM * 0.9:.2f}s).\n"
@@ -259,7 +307,23 @@ def _resolve_seam(
             "or a warm-up lock that wrote its first shard before the probe's first poll."
         )
 
-    if shards_after is None:
+    # Each branch declares whether the PRODUCT owns its verdict, at the point
+    # the verdict is decided. Deriving it again afterwards let the two drift.
+    product_fault = False
+    if harness_killed and shards_after:
+        verdict = (
+            f"the probe saw no shard row within {WAIT_TIMEOUT}s and the harness SIGKILLed "
+            f"it, but {shards_after} row(s) had landed by the kill — the lock was writing, "
+            "just late. Host starvation or a slower lock; judge by load/cores below."
+        )
+    elif harness_killed:
+        verdict = (
+            f"no shard row appeared within {WAIT_TIMEOUT}s, so the harness SIGKILLed the "
+            "probe — either the lock is stuck before its first write, or the host starved "
+            "it; this run alone cannot tell which. On an idle host (low load/cores) treat "
+            "it as a stuck lock. shards_after below is what landed by the kill."
+        )
+    elif shards_after is None:
         verdict = (
             "the warm-up lock wrote no shard row the probe could see, AND the DB "
             "could not be read afterwards, so the cause cannot be determined here."
@@ -268,28 +332,76 @@ def _resolve_seam(
         verdict = (
             f"the probe MISSED the write — the DB holds {shards_after} shard row(s) "
             "after the child exited. The lock worked; calibration did not. This is a "
-            "HARNESS problem: the 4ms poll interval or the MAX_SEAM ceiling is wrong "
+            "HARNESS problem: the 4ms poll interval or the WAIT_TIMEOUT ceiling is wrong "
             "for this machine, NOT a product fault."
         )
-    else:
+    elif returncode is None:
         verdict = (
-            "the warm-up lock wrote NO shard rows at all — the DB is empty after it "
-            "exited. This is a PRODUCT or environment fault; raising MAX_SEAM would "
+            "the warm-up lock left no exit code to read, so who ended it cannot be "
+            "determined here. Treated as a harness symptom, not a product fault."
+        )
+    elif -returncode in _EXTERNAL_KILL_SIGNALS:
+        verdict = (
+            f"the warm-up lock was killed by {signal.Signals(-returncode).name} from "
+            "OUTSIDE the harness (the harness did not kill it) and the DB is empty. That "
+            "is a host symptom — an OOM kill under load looks exactly like this — not "
+            "evidence the lock writes nothing."
+        )
+    elif returncode < 0:
+        # A crash signal is the lock killing ITSELF. Exonerating it as an
+        # "outside kill" would retry away exactly the fault this module hunts.
+        product_fault = True
+        verdict = (
+            f"the warm-up lock died of {signal.Signals(-returncode).name} — a crash it "
+            "raised itself, not a kill from outside — and the DB is empty. This is a "
+            "PRODUCT fault. Read the stderr tail below."
+        )
+    else:
+        product_fault = True
+        verdict = (
+            "the warm-up lock exited on its own and wrote NO shard rows at all — the DB "
+            "is empty. This is a PRODUCT or environment fault; raising WAIT_TIMEOUT would "
             "only hide it. Read the stderr tail below."
         )
 
     detail = f"  child: exit={returncode} elapsed={elapsed:.2f}s shards_after={shards_after}\n"
     tail = f"  stderr tail:\n{stderr[-800:]}\n" if stderr.strip() else "  stderr: (empty)\n"
 
-    pytest.fail(
+    _fail(
+        product_fault,
         "chaos seam calibration FAILED — the orphan-vulnerable window could not be "
-        f"located within MAX_SEAM={MAX_SEAM}s.\n"
+        f"located within WAIT_TIMEOUT={WAIT_TIMEOUT}s.\n"
         f"  Diagnosis: {verdict}\n"
+        f"{evidence_line}"
         f"{detail}"
         "  Refusing to substitute a fabricated seam: an unmeasured seam is "
         "unfalsifiable, and a green run would not distinguish it from a real one.\n"
-        f"{tail}"
+        f"{tail}",
     )
+
+
+class _PartialState(AssertionError):
+    """The documented WOR-646 Part 2 gap: SIGKILL left a partial on-disk state.
+
+    Its own type so ``TestSigkillAtomicity``'s ``xfail`` can name exactly this
+    and nothing else — a bare ``AssertionError`` there would also absorb a
+    stray assert from anywhere in the call path (worthless-7zys).
+    """
+
+
+# Signals that mean "something else ended it": the OOM killer, an operator, a
+# CI runner tearing the job down. Anything else (SIGSEGV, SIGABRT, SIGBUS,
+# SIGFPE, SIGILL) is the lock crashing itself, which the product owns.
+_EXTERNAL_KILL_SIGNALS = frozenset(
+    {signal.SIGKILL, signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGPIPE}
+)
+
+
+def _fail(product_fault: bool, msg: str) -> NoReturn:
+    """``pytest.fail(msg)``, as ``_ProductFault`` when the product owns the verdict."""
+    if product_fault:
+        raise _ProductFault(msg)
+    pytest.fail(msg)
 
 
 SEAM_ATTEMPTS = 3
@@ -303,7 +415,7 @@ def seam(tmp_path_factory: pytest.TempPathFactory) -> float:
     of the orphan-vulnerable window (DB rows exist, ``.env`` not yet rewritten).
 
     Retried, because a single measurement is a coin flip on a stalled runner:
-    calibration has ``MAX_SEAM`` seconds to observe the write, and missing it
+    calibration has ``WAIT_TIMEOUT`` seconds to observe the write, and missing it
     ERRORS the whole module. This is session-scoped, and xdist runs session
     fixtures once PER WORKER — so splitting this module across workers
     (worthless-7zl6) multiplied the number of calibrations, and with it the
@@ -315,14 +427,19 @@ def seam(tmp_path_factory: pytest.TempPathFactory) -> float:
     making the attempts fewer, and costs no wall clock — the workers calibrate
     in parallel.
 
-    A genuinely broken lock fails all ``SEAM_ATTEMPTS``, so this cannot mask a
-    product fault; the final diagnostic is the last attempt's, in full.
+    A verdict the PRODUCT owns (``_ProductFault``: the lock exited on its own
+    having written nothing) is NOT retried — it fails on the first attempt, so a
+    lock that only sometimes does nothing cannot calibrate on a lucky try.
+    Host and harness verdicts keep their ``SEAM_ATTEMPTS`` goes; a genuinely
+    stuck lock exhausts them, and the final diagnostic is the last attempt's.
     """
     last: pytest.fail.Exception | None = None
     for _ in range(SEAM_ATTEMPTS):
         try:
             return _measure_seam(tmp_path_factory)
-        except pytest.fail.Exception as exc:  # noqa: PERF203
+        except _ProductFault:  # noqa: PERF203
+            raise
+        except pytest.fail.Exception as exc:
             last = exc
     assert last is not None
     pytest.fail(
@@ -335,20 +452,14 @@ def _measure_seam(tmp_path_factory: pytest.TempPathFactory) -> float:
     """One calibration attempt. Raises ``pytest.fail.Exception`` if it misses."""
     base = tmp_path_factory.mktemp("seam")
     te = _make_trial_env(base, 0, 2)
-    proc = subprocess.Popen(
-        [*_cli(), "lock", "--env", str(te.env_file)],
-        env=_child_env(te),
-        cwd=str(te.repo),
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        # stderr is CAPTURED, not discarded: when calibration fails it is the
-        # only thing that distinguishes "runner too slow" from "lock is broken".
-        stderr=subprocess.PIPE,
-    )
-    t0 = time.time()
+    # stderr goes to a file (see _spawn_lock): when calibration fails it is the
+    # only thing that distinguishes "runner too slow" from "lock is broken".
+    proc = _spawn_lock(te)
+    t0 = time.monotonic()
     first_shard: float | None = None
+    harness_killed = False
     try:
-        while proc.poll() is None and (time.time() - t0) < MAX_SEAM:
+        while proc.poll() is None and (time.monotonic() - t0) < WAIT_TIMEOUT:
             db = _db_path(te.home)
             if db is not None:
                 try:
@@ -356,24 +467,24 @@ def _measure_seam(tmp_path_factory: pytest.TempPathFactory) -> float:
                     n = conn.execute("SELECT count(*) FROM shards").fetchone()[0]
                     conn.close()
                     if n > 0:
-                        first_shard = time.time() - t0
+                        first_shard = time.monotonic() - t0
                         break
                 except sqlite3.Error:
                     pass
             time.sleep(0.004)
+        evidence = _evidence(proc)
+        harness_killed = first_shard is None and proc.poll() is None
     finally:
-        # communicate(), NOT wait(): stderr is a pipe, and a child that fills the
-        # ~64KB buffer blocks forever while we wait for an exit that cannot come.
-        # That would surface as returncode=-9 after the kill, which the diagnosis
-        # below would report as a PRODUCT fault — a harness deadlock blamed on
-        # the product. communicate() drains while it waits.
-        try:
-            err_bytes = proc.communicate(timeout=WAIT_TIMEOUT)[1]
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            err_bytes = proc.communicate(timeout=5)[1]
-    elapsed = time.time() - t0
-    err = (err_bytes or b"").decode("utf-8", errors="replace")
+        # Never wait for the warm-up lock to FINISH: the seam is all calibration
+        # needs, and under load that wait is exactly what outlived WAIT_TIMEOUT
+        # and raised a raw TimeoutExpired past every retry (reproduced
+        # 2026-09-13). Killing the group here also reaps helpers like
+        # `docker info` that a leader-only kill left running.
+        survived = _reap(proc)
+    if survived:
+        _fail_unkillable(proc)
+    elapsed = time.monotonic() - t0
+    err = _stderr_path(te).read_bytes().decode("utf-8", errors="replace")
 
     # The child is gone, so the rows it wrote are now stable on disk. Ask.
     # "Probe missed the write" and "lock wrote nothing" are opposite faults with
@@ -397,6 +508,8 @@ def _measure_seam(tmp_path_factory: pytest.TempPathFactory) -> float:
         returncode=proc.returncode,
         elapsed=elapsed,
         stderr=err,
+        harness_killed=harness_killed,
+        evidence=evidence,
     )
 
 
@@ -525,21 +638,155 @@ def classify(te: TrialEnv) -> DiskState:
 # ---------------------------------------------------------------------------
 
 
-def _kill_group(proc: subprocess.Popen, sig: int) -> None:
+def _stderr_path(te: TrialEnv) -> Path:
+    return te.home.parent / "stderr.log"
+
+
+def _stderr_tail(te: TrialEnv) -> str:
+    """The child's stderr for a failure message, starting at the stuck thread's stack if dumped."""
     try:
-        os.killpg(os.getpgid(proc.pid), sig)
-    except ProcessLookupError:
-        pass  # already exited — fine, just classify what's on disk.
+        text = _stderr_path(te).read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return "  stderr: (unreadable)"
+    # A faulthandler dump lists the innermost frame FIRST, per thread, and the
+    # main thread is not always first (aiosqlite's worker can precede it). Start
+    # at the thread that took the SIGABRT; a plain tail cuts exactly the line
+    # that names where the lock is stuck.
+    start = text.find("Current thread")
+    tail = text[start:][:5000] if start != -1 else text[-2000:]
+    return f"  stderr tail:\n{tail}" if tail.strip() else "  stderr: (empty)"
 
 
-def _drain(proc: subprocess.Popen) -> None:
-    if proc.poll() is None:
-        _kill_group(proc, signal.SIGKILL)
+def _spawn_lock(te: TrialEnv, env: dict[str, str] | None = None) -> subprocess.Popen:
+    """Start the real CLI in its own process group.
+
+    stderr goes to a FILE, never an unread PIPE: a chatty child that fills the
+    ~64KB pipe buffer blocks forever, and the harness would report that
+    self-inflicted wedge as a product hang. A file also keeps the tail after a
+    SIGKILL, so a rare real PARTIAL or hang arrives with the lock's own words.
+    stdin is closed so an interactive prompt can never pose as a hang.
+    """
+    with _stderr_path(te).open("wb") as err:
+        return subprocess.Popen(
+            [*_cli(), "lock", "--env", str(te.env_file)],
+            env=env if env is not None else _child_env(te),
+            cwd=str(te.repo),
+            start_new_session=True,  # own process group -> killpg hits the whole tree
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=err,
+        )
+
+
+def _kill_group(proc: subprocess.Popen, sig: int) -> None:
+    # start_new_session=True makes pgid == pid, so signal it directly. Never
+    # os.getpgid(): once the leader is a zombie that lookup fails, and the
+    # lock's helpers (`docker info`, `security`) survive to skew later trials.
+    if proc.pid <= 0:  # killpg(0) would signal the test worker's OWN group
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, sig)
+
+
+def _evidence(proc: subprocess.Popen) -> str:
+    """Facts for a timeout message — deliberately NOT a verdict.
+
+    Prototyped 2026-09-14 (170 CPU hogs on 10 cores): a spinning wedge used
+    0.11s CPU in 3s and a starved real lock 0.20s, so CPU time cannot tell
+    "hung" from "host drowning" at exactly the load where this fires. Host
+    load per core can, and the leader's live descendants show which helper was
+    stuck (a helper already reparented to init is not listed).
+    """
+    try:
+        load = f"load/cores={os.getloadavg()[0] / (os.cpu_count() or 1):.1f}"
+    except OSError:
+        load = "load/cores=unavailable"
+    try:
+        leader = psutil.Process(proc.pid)
+        members = [p.name() for p in (leader, *leader.children(recursive=True))]
+    except psutil.Error:
+        return f"{load} descendants=unavailable"
+    return f"{load} descendants={members}"
+
+
+def _dump_wedged_stack(proc: subprocess.Popen) -> None:
+    """Ask a wedged child to print its own Python stack, then give it a moment.
+
+    ``_child_env`` sets ``PYTHONFAULTHANDLER=1``, so SIGABRT makes CPython
+    write every thread's stack to stderr — the file ``_spawn_lock`` captures
+    and the hang message already tails. Called only on a hang, immediately
+    before the kill, so a timing-dependent wedge names its own blocking line
+    instead of leaving the next reader to guess (worthless-3clz).
+
+    Best effort: a child that ignores or outruns SIGABRT just gets SIGKILLed
+    as before, and the tail says "(empty)".
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGABRT)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=2)  # let faulthandler finish writing before SIGKILL
+
+
+def _reap(proc: subprocess.Popen) -> bool:
+    """SIGKILL the whole group and wait for it, bounded. True if the leader survived.
+
+    Runs even when the leader already exited: a helper that outlived it could
+    still touch disk while ``classify()`` reads it.
+
+    Never raises: it runs in ``finally`` blocks, where raising would replace a
+    failure already on its way out (the hang message, its evidence and stderr
+    tail). Callers act on the result AFTER the ``finally`` — a line that only
+    runs when nothing else is failing.
+    """
+    helpers: list[psutil.Process] = []
+    if proc.returncode is None:  # once reaped, the pid may belong to someone else
+        with contextlib.suppress(psutil.Error):
+            helpers = psutil.Process(proc.pid).children(recursive=True)
+    # ponytail: killpg after the leader was reaped can, in theory, hit a new
+    # session that reused this pid with an empty old group; tracking members by
+    # pgid across process_iter() is the upgrade if that ever shows up.
+    _kill_group(proc, signal.SIGKILL)
+    try:
         proc.wait(timeout=5)
-    if proc.stdout:
-        proc.stdout.close()
-    if proc.stderr:
-        proc.stderr.close()
+    except subprocess.TimeoutExpired:
+        return True
+    psutil.wait_procs(helpers, timeout=5)
+    return False
+
+
+def _fail_unkillable(proc: subprocess.Popen) -> None:
+    pytest.fail(f"pid {proc.pid} survived SIGKILL for 5s (stuck in the kernel?)")
+
+
+def _await_exit(
+    proc: subprocess.Popen, te: TrialEnv, what: str, timeout: float = WAIT_TIMEOUT
+) -> None:
+    """The hang guard: fail with evidence if the signalled lock outlives *timeout*."""
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        evidence = _evidence(proc)  # before the kill, while the group is alive
+        _dump_wedged_stack(proc)  # ...and before it dies, ask it where it is stuck
+        if _reap(proc):
+            evidence += "  (and it survived SIGKILL for 5s: stuck in the kernel, e.g. slow I/O)"
+        pytest.fail(
+            f"{what} — the lock did not exit within {timeout}s of the signal. Treat it "
+            "as a hang regression unless the evidence shows a drowning host (high "
+            "load/cores) or a process stuck in the kernel.\n"
+            f"  evidence: {evidence}\n{_stderr_tail(te)}"
+        )
+
+
+def _wait_until(proc: subprocess.Popen, te: TrialEnv, ready: Callable[[], bool], what: str) -> None:
+    """Poll *ready*; if the lock never gets there, fail with its own stack."""
+    deadline = time.monotonic() + WAIT_TIMEOUT
+    while not ready():
+        if proc.poll() is not None:
+            pytest.fail(f"lock exited (rc={proc.returncode}) before {what}\n{_stderr_tail(te)}")
+        if time.monotonic() > deadline:
+            _dump_wedged_stack(proc)  # stuck somewhere earlier: say where
+            pytest.fail(f"lock never reached {what} within {WAIT_TIMEOUT}s\n{_stderr_tail(te)}")
+        time.sleep(0.01)
 
 
 def _run_trial(te: TrialEnv, sig: int, delay: float, *, ready: Path | None = None) -> DiskState:
@@ -554,43 +801,30 @@ def _run_trial(te: TrialEnv, sig: int, delay: float, *, ready: Path | None = Non
     The real chaos trials deliberately pass no *ready*: for them the blind
     delay IS the variable under test, sweeping the orphan-vulnerable window.
     """
-    proc = subprocess.Popen(
-        [*_cli(), "lock", "--env", str(te.env_file)],
-        env=_child_env(te),
-        cwd=str(te.repo),
-        start_new_session=True,  # own process group -> killpg hits the whole tree
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    proc = _spawn_lock(te)
     try:
         if ready is None:
             time.sleep(delay)
         else:
-            deadline = time.monotonic() + WAIT_TIMEOUT
-            while not ready.exists():
-                if proc.poll() is not None:
-                    pytest.fail(f"wedge child exited before arming (rc={proc.returncode})")
-                if time.monotonic() > deadline:
-                    pytest.fail(f"wedge child never signalled ready within {WAIT_TIMEOUT}s")
-                time.sleep(0.01)
+            _wait_until(proc, te, ready.exists, "the armed wedge")
         _kill_group(proc, sig)
-        try:
-            proc.wait(timeout=WAIT_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-            pytest.fail(f"lock hung after sig={sig} delay={delay:.3f}s — a hang is a regression")
+        _await_exit(proc, te, f"lock hung after sig={sig} delay={delay:.3f}s")
     finally:
-        _drain(proc)
+        survived = _reap(proc)
+    if survived:
+        _fail_unkillable(proc)
     return classify(te)
 
 
-def _assert_no_partial(state: DiskState, *, n_keys: int, sig: int, delay: float) -> None:
+def _assert_no_partial(
+    state: DiskState, *, te: TrialEnv, n_keys: int, sig: int, delay: float
+) -> None:
     assert state.classification in ("clean", "locked"), (
         f"PARTIAL/ORPHAN on-disk state after interrupt — invariant violated.\n"
         f"  signal={signal.Signals(sig).name} n_keys={n_keys} jitter={delay:.3f}s\n"
         f"  {state.detail}\n"
-        f"  Expected: fully clean (rolled back) XOR fully locked. Got partial."
+        f"  Expected: fully clean (rolled back) XOR fully locked. Got partial.\n"
+        f"{_stderr_tail(te)}"
     )
 
 
@@ -618,7 +852,7 @@ class TestSigintStorm:
             delay = delays[trial % len(delays)]
             te = _make_trial_env(tmp_path, trial, n_keys)
             state = _run_trial(te, signal.SIGINT, delay)
-            _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
+            _assert_no_partial(state, te=te, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
 
 
 class TestSigtermStorm:
@@ -630,14 +864,14 @@ class TestSigtermStorm:
             delay = delays[trial % len(delays)]
             te = _make_trial_env(tmp_path, trial, n_keys)
             state = _run_trial(te, signal.SIGTERM, delay)
-            _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGTERM, delay=delay)
+            _assert_no_partial(state, te=te, n_keys=n_keys, sig=signal.SIGTERM, delay=delay)
 
 
 class TestMashedSigint:
     def test_mashed_sigint(self, tmp_path: Path, seam: float) -> None:
-        """A burst of 5 SIGINTs ~5ms apart must NOT defeat the one-shot handler.
+        """A burst of 5 SIGINTs ~5ms apart must NOT defeat the handler (it never cancels twice).
 
-        Part-1 arms a one-shot handler; a panicked operator mashing Ctrl-C must not
+        The handler cancels once; a panicked operator mashing Ctrl-C must not
         re-enter cleanup or leave a torn state. Invariant still holds.
         """
         n_keys = 2
@@ -645,14 +879,7 @@ class TestMashedSigint:
         for trial in range(TRIALS_PER_CELL):
             delay = delays[trial % len(delays)]
             te = _make_trial_env(tmp_path, trial, n_keys)
-            proc = subprocess.Popen(
-                [*_cli(), "lock", "--env", str(te.env_file)],
-                env=_child_env(te),
-                cwd=str(te.repo),
-                start_new_session=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
+            proc = _spawn_lock(te)
             try:
                 time.sleep(delay)
                 for _ in range(5):
@@ -660,16 +887,13 @@ class TestMashedSigint:
                         break
                     _kill_group(proc, signal.SIGINT)
                     time.sleep(0.005)
-                try:
-                    proc.wait(timeout=WAIT_TIMEOUT)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=5)
-                    pytest.fail(f"mashed-SIGINT hung at delay={delay:.3f}s — regression")
+                _await_exit(proc, te, f"mashed-SIGINT hung at delay={delay:.3f}s")
             finally:
-                _drain(proc)
+                survived = _reap(proc)
+            if survived:
+                _fail_unkillable(proc)
             state = classify(te)
-            _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
+            _assert_no_partial(state, te=te, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
 
 
 # ---------------------------------------------------------------------------
@@ -690,13 +914,20 @@ def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.Mo
     """
     shim = tmp_path / "wedged_cli.py"
     ready = tmp_path / "wedged_ready"
+    helper_pid = tmp_path / "helper_pid"
     # The marker is written AFTER the handlers are installed, never before: it
     # is the child asserting "I can now survive a signal". Ordering is the whole
     # point — see the ready= gate in _run_trial.
+    #
+    # The helper `sleep` stands in for the real lock's `docker info` / `security`
+    # children. It starts AFTER SIG_IGN (ignored signals survive exec), so only a
+    # group SIGKILL can reap it — a leader-only kill leaves it orphaned.
     shim.write_text(
-        "import signal, time\n"
+        "import signal, subprocess, time\n"
         "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "helper = subprocess.Popen(['sleep', '300'])\n"
+        f"open({str(helper_pid)!r}, 'w').write(str(helper.pid))\n"
         f"open({str(ready)!r}, 'w').close()\n"
         "while True:\n"
         "    time.sleep(0.05)\n"
@@ -708,9 +939,16 @@ def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.Mo
 
     te = _make_trial_env(tmp_path, 0, 1)
     started = time.monotonic()
-    with pytest.raises(pytest.fail.Exception, match=r"hung after sig="):
-        _run_trial(te, signal.SIGINT, 0.05, ready=ready)
-    elapsed = time.monotonic() - started
+    try:
+        with pytest.raises(pytest.fail.Exception, match=r"hung after sig=") as excinfo:
+            _run_trial(te, signal.SIGINT, 0.05, ready=ready)
+        elapsed = time.monotonic() - started
+        survivors = _surviving_helper(helper_pid)
+        assert survivors == [], f"hang cleanup orphaned the lock's helper process: {survivors}"
+        # Evidence, not a verdict: the reader needs the host load to judge.
+        assert "load/cores=" in str(excinfo.value)
+    finally:
+        _reap_helper(helper_pid)
 
     # Upper bound is anchored on the module timeout (600s), NOT on a hand-picked
     # margin above WAIT_TIMEOUT: `elapsed` now also covers interpreter startup
@@ -724,13 +962,134 @@ def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.Mo
     )
 
 
+def _helper_process(pid_file: Path) -> psutil.Process | None:
+    """The shim's `sleep 300` helper, if it is still alive (and still ours)."""
+    try:
+        proc = psutil.Process(int(pid_file.read_text()))
+        return proc if "sleep" in proc.name() else None
+    except (FileNotFoundError, ValueError, psutil.Error):
+        return None
+
+
+def _surviving_helper(pid_file: Path) -> list[psutil.Process]:
+    helper = _helper_process(pid_file)
+    if helper is None:
+        return []
+    # Poll, never a one-shot check: a SIGKILLed orphan is briefly a zombie
+    # until init reaps it, and that reap is scheduler-dependent under load.
+    _gone, alive = psutil.wait_procs([helper], timeout=5)
+    # A zombie is dead: in an init-less container nothing ever reaps it.
+    survivors = []
+    for proc in alive:
+        with contextlib.suppress(psutil.Error):  # gone between the wait and the check
+            if proc.status() != psutil.STATUS_ZOMBIE:
+                survivors.append(proc)
+    return survivors
+
+
+def _reap_helper(pid_file: Path) -> None:
+    helper = _helper_process(pid_file)
+    if helper is not None:
+        with contextlib.suppress(psutil.Error):
+            helper.kill()
+
+
+def test_calibration_timeout_is_retryable_and_never_blames_the_product(
+    tmp_path_factory: pytest.TempPathFactory,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe the harness had to kill must fail retryably, never as a PRODUCT fault.
+
+    Reproduced 2026-09-13 under CPU load: calibration outlived WAIT_TIMEOUT, the
+    harness SIGKILLed it, then reported "lock wrote NO shard rows — PRODUCT
+    fault" (2/6 runs). Separately, a helper child holding the stderr pipe made
+    the post-kill ``communicate()`` raise a raw ``TimeoutExpired``, which is not
+    a ``pytest.fail`` and so skipped every ``SEAM_ATTEMPTS`` retry.
+
+    The shim plants an empty ``shards`` table (so the "wrote nothing" branch is
+    reachable), starts a helper that inherits stderr, and never finishes.
+    """
+    shim = tmp_path / "stuck_lock.py"
+    helper_pid = tmp_path / "helper_pid"
+    shim.write_text(
+        "import os, sqlite3, subprocess, time\n"
+        "db = sqlite3.connect(os.path.join(os.environ['WORTHLESS_HOME'], 'probe.db'))\n"
+        "db.execute('CREATE TABLE shards (key_alias TEXT)')\n"
+        "db.commit()\n"
+        "helper = subprocess.Popen(['sleep', '300'])\n"
+        f"open({str(helper_pid)!r}, 'w').write(str(helper.pid))\n"
+        "while True:\n"
+        "    time.sleep(0.05)\n"
+    )
+    monkeypatch.setattr(f"{__name__}._cli", lambda: [sys.executable, str(shim)])
+    # Scoped to this test: _run_trial's ready deadline reads the same constant.
+    monkeypatch.setattr(f"{__name__}.WAIT_TIMEOUT", 1.0)
+
+    try:
+        with pytest.raises(pytest.fail.Exception) as excinfo:
+            _measure_seam(tmp_path_factory)
+        msg = str(excinfo.value)
+        assert "the harness SIGKILLed the probe" in msg, msg
+        assert "PRODUCT" not in msg, msg
+        assert "load/cores=" in msg, msg
+        assert "shards_after=" in msg, msg
+        # Only meaningful if the shim got far enough to start its helper before
+        # the 1s timeout; under heavy load it may not. Group reaping is proven
+        # deterministically by the ready-gated test_hang_guard_fires_with_diagnostic.
+        if helper_pid.exists():
+            assert _surviving_helper(helper_pid) == [], "calibration cleanup orphaned a helper"
+    finally:
+        _reap_helper(helper_pid)
+
+
+def test_cleanup_never_replaces_the_failure_already_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unkillable process must not erase the hang message that found it.
+
+    Drives the real ``_run_trial`` with a process that never dies. Cleanup runs
+    in ``finally``; if it raised there, the hang message with its evidence and
+    stderr tail would be lost. Separately, a process that exits on the signal
+    but whose group survives SIGKILL must still fail loudly.
+    """
+
+    class FakeLock:
+        pid = 2**22 + 7  # never a live pid; _kill_group is also stubbed out below
+        returncode = None
+
+        def __init__(self, exits_on_signal: bool) -> None:
+            self.exits_on_signal = exits_on_signal
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: float) -> int:
+            if self.exits_on_signal:  # the hang guard's wait succeeds, reaping does not
+                self.exits_on_signal = False
+                return 0
+            raise subprocess.TimeoutExpired("lock", timeout)
+
+    monkeypatch.setattr(f"{__name__}._kill_group", lambda _proc, _sig: None)
+    te = _make_trial_env(tmp_path, 0, 1)
+
+    monkeypatch.setattr(f"{__name__}._spawn_lock", lambda _te: FakeLock(exits_on_signal=False))
+    with pytest.raises(pytest.fail.Exception, match=r"lock hung after sig=") as hang:
+        _run_trial(te, signal.SIGINT, 0.0)
+    assert "survived SIGKILL for 5s" in str(hang.value)  # folded into the hang message
+
+    monkeypatch.setattr(f"{__name__}._spawn_lock", lambda _te: FakeLock(exits_on_signal=True))
+    with pytest.raises(pytest.fail.Exception, match=r"survived SIGKILL"):
+        _run_trial(te, signal.SIGINT, 0.0)
+
+
 def test_seam_calibration_retries_a_transient_miss(
     tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One missed measurement must not error the whole module.
 
-    Calibration gets MAX_SEAM seconds to observe the first shard write; a
+    Calibration gets WAIT_TIMEOUT seconds to observe the first shard write; a
     stalled runner misses it. This fixture is session-scoped and xdist runs
     those once per worker, so splitting this module across workers multiplied
     how many calibrations happen, and with it the chance one trips.
@@ -772,6 +1131,87 @@ def test_seam_calibration_still_fails_when_every_attempt_misses(
         seam.__wrapped__(tmp_path_factory)
 
 
+def test_seam_calibration_fails_fast_on_a_product_fault(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lock that exits on its own having written nothing is not retried.
+
+    Retries exist for a slow host. "Wrote NO shard rows" is the product's own
+    verdict, and retrying it lets a lock that only SOMETIMES does nothing
+    calibrate on a lucky attempt and run the storms (worthless-nqce).
+    """
+    calls: list[int] = []
+
+    def lock_wrote_nothing(_factory: pytest.TempPathFactory) -> float:
+        calls.append(1)
+        return _resolve_seam(None, shards_after=0, returncode=1, elapsed=0.2, stderr="boom")
+
+    monkeypatch.setattr(f"{__name__}._measure_seam", lock_wrote_nothing)
+    with pytest.raises(pytest.fail.Exception, match=r"wrote NO shard") as excinfo:
+        seam.__wrapped__(tmp_path_factory)
+    assert len(calls) == 1, f"a product fault was retried {len(calls)}x"
+    assert "in a row" not in str(excinfo.value)
+
+    # An empty DB after an OUTSIDE kill (OOM under load: returncode -9, no
+    # harness kill) is a host symptom, so it keeps every retry and never says
+    # PRODUCT — fast-failing it would reintroduce worthless-xk7x's false blame.
+    calls.clear()
+
+    def killed_from_outside(_factory: pytest.TempPathFactory) -> float:
+        calls.append(1)
+        return _resolve_seam(None, shards_after=0, returncode=-9, elapsed=3.0)
+
+    monkeypatch.setattr(f"{__name__}._measure_seam", killed_from_outside)
+    with pytest.raises(pytest.fail.Exception, match=rf"failed {SEAM_ATTEMPTS}x in a row") as oom:
+        seam.__wrapped__(tmp_path_factory)
+    assert len(calls) == SEAM_ATTEMPTS, "a host symptom must keep its retries"
+    assert "PRODUCT" not in str(oom.value), oom.value
+    assert "SIGKILL from OUTSIDE" in str(oom.value)
+
+    # A CRASH signal is the lock killing itself, which is exactly the fault this
+    # module hunts. Exonerating it as an "outside kill" would retry it away.
+    calls.clear()
+
+    def lock_crashed(_factory: pytest.TempPathFactory) -> float:
+        calls.append(1)
+        return _resolve_seam(None, shards_after=0, returncode=-11, elapsed=0.4)
+
+    monkeypatch.setattr(f"{__name__}._measure_seam", lock_crashed)
+    with pytest.raises(pytest.fail.Exception, match=r"died of SIGSEGV") as crash:
+        seam.__wrapped__(tmp_path_factory)
+    assert len(calls) == 1, f"a self-inflicted crash was retried {len(calls)}x"
+    assert "PRODUCT fault" in str(crash.value)
+
+    # An exit code nobody could read is a harness symptom: keep the retries
+    # rather than fast-failing on a verdict the harness cannot support.
+    calls.clear()
+
+    def exit_code_unknown(_factory: pytest.TempPathFactory) -> float:
+        calls.append(1)
+        return _resolve_seam(None, shards_after=0, returncode=None, elapsed=0.4)
+
+    monkeypatch.setattr(f"{__name__}._measure_seam", exit_code_unknown)
+    with pytest.raises(pytest.fail.Exception, match=rf"failed {SEAM_ATTEMPTS}x in a row") as unk:
+        seam.__wrapped__(tmp_path_factory)
+    assert len(calls) == SEAM_ATTEMPTS
+    assert "PRODUCT" not in str(unk.value), unk.value
+
+
+def test_sigkill_atomicity_xfail_covers_only_partial_states() -> None:
+    """Only the documented partial-state gap may be expected to fail.
+
+    Without ``raises=``, a hang, an unkillable process, or a calibration failure
+    inside the SIGKILL cells is recorded as XFAIL instead of red (worthless-7zys).
+    """
+    marks = [m for m in TestSigkillAtomicity.test_sigkill_atomicity.pytestmark if m.name == "xfail"]
+    assert len(marks) == 1
+    # The gap's OWN type, not a bare AssertionError: that would also absorb a
+    # stray assert from anywhere in the call path, e.g. the seam fixture's.
+    assert marks[0].kwargs.get("raises") is _PartialState
+    assert issubclass(_PartialState, AssertionError)
+
+
 def test_seam_calibration_refuses_to_fabricate() -> None:
     """A seam the probe could not measure must fail, not silently become 0.5.
 
@@ -790,8 +1230,20 @@ def test_seam_calibration_refuses_to_fabricate() -> None:
     # _resolve_seam(0.0) == 0.0 — it blessed the bug.)
     with pytest.raises(pytest.fail.Exception, match=r"implausible"):
         _resolve_seam(0.0)
-    with pytest.raises(pytest.fail.Exception, match=r"implausible"):
+    # A seam too LARGE is not implausible — it is a slow host or a slower lock,
+    # and the message must not pick one without evidence.
+    with pytest.raises(pytest.fail.Exception, match=r"exceeds the storm budget"):
         _resolve_seam(MAX_SEAM)
+
+    # The harness killed a probe that never wrote: never a PRODUCT verdict.
+    with pytest.raises(pytest.fail.Exception, match=r"the harness SIGKILLed the probe") as killed:
+        _resolve_seam(None, shards_after=0, returncode=-9, elapsed=15.0, harness_killed=True)
+    assert "PRODUCT" not in str(killed.value)
+
+    # Rows landed between the last poll and the kill: say so, don't claim "no row".
+    with pytest.raises(pytest.fail.Exception, match=r"row\(s\) had landed by the kill") as late:
+        _resolve_seam(None, shards_after=2, returncode=-9, elapsed=15.2, harness_killed=True)
+    assert "no shard row appeared" not in str(late.value)
 
     # No measurement + the DB HAS shards -> the lock worked, the probe missed
     # the timing. Actionable as a harness problem.
@@ -799,7 +1251,7 @@ def test_seam_calibration_refuses_to_fabricate() -> None:
         _resolve_seam(None, shards_after=2, returncode=0, elapsed=0.4)
 
     # No measurement + the DB is EMPTY -> the lock never wrote. Product or
-    # environment fault; raising MAX_SEAM would only hide it.
+    # environment fault; raising WAIT_TIMEOUT would only hide it.
     with pytest.raises(pytest.fail.Exception, match=r"wrote NO shard"):
         _resolve_seam(None, shards_after=0, returncode=1, elapsed=0.2, stderr="boom")
 
@@ -819,6 +1271,13 @@ class TestSigkillAtomicity:
         "SIGKILL allows no cleanup; only write-ordering/atomic commit prevents "
         "orphan shards. Current code may leak — documented, not hidden.",
         strict=False,
+        # ONLY the partial-state failure below is expected. Without this, a hang
+        # (pytest.fail from _await_exit), an unkillable process or a calibration
+        # failure inside these cells is recorded as XFAIL instead of red — the
+        # guard hiding the thing it guards (worthless-7zys). The gap raises its
+        # OWN type rather than a bare AssertionError, so a stray assert anywhere
+        # in the call path (e.g. the seam fixture's own) cannot slip in with it.
+        raises=_PartialState,
     )
     @pytest.mark.parametrize("n_keys", [2, 3], ids=["N2", "N3"])
     def test_sigkill_atomicity(self, tmp_path: Path, seam: float, n_keys: int) -> None:
@@ -839,8 +1298,310 @@ class TestSigkillAtomicity:
                 partials.append(f"delay={delay:.3f}s {state.detail}")
 
         rate = len(partials) / TRIALS_PER_CELL
-        assert not partials, (
-            f"SIGKILL produced {len(partials)}/{TRIALS_PER_CELL} partial states "
-            f"({rate:.0%} orphan/partial rate) for N={n_keys}.\n"
-            + "\n".join(f"  - {p}" for p in partials[:8])
+        if partials:
+            raise _PartialState(
+                f"SIGKILL produced {len(partials)}/{TRIALS_PER_CELL} partial states "
+                f"({rate:.0%} orphan/partial rate) for N={n_keys}.\n"
+                + "\n".join(f"  - {p}" for p in partials[:8])
+            )
+
+
+# ---------------------------------------------------------------------------
+# Ctrl-C after the keys are committed, on the real CLI (worthless-3clz)
+# ---------------------------------------------------------------------------
+#
+# The two real places the lock went deaf to Ctrl-C, driven end to end: the
+# up-to-15s wait for OpenClaw's gateway to reload, and the unbounded wait for
+# worthless's own lock on openclaw.json (another worthless process holding it).
+# Both come after the keys are committed, so the contract is: answer within
+# TAIL_DEADLINE, exit 130, keys stay LOCKED.
+#
+# No ``seam``: a fake ``openclaw`` (reached only via WORTHLESS_OPENCLAW_BIN,
+# never PATH) logs each call, so the test signals once the lock has provably
+# reached the step under test. Fast in-process twins live in
+# tests/test_lock_sigint_atomicity.py.
+
+# A deaf lock only exits after the ~15s reload wait (or never, on the flock), so
+# anything well under that still convicts it; 8s leaves CI teardown headroom
+# (worst measured single-SIGINT exit: 1.40s under 10 CPU hogs). Must stay under
+# WAIT_TIMEOUT so this fires before the hang guard.
+TAIL_DEADLINE = 8.0
+TAIL_TRIALS = 3
+_CLEAN_AUDIT = json.dumps(
+    {
+        "version": 1,
+        "status": "ok",
+        "filesScanned": [],
+        "summary": {"plaintextCount": 0},
+        "findings": [],
+    }
+)
+
+
+@pytest.fixture
+def proxy_port() -> Iterator[int]:
+    """A stub ``/healthz`` that satisfies lock's proxy gate; yields its port."""
+    with fake_proxy_health() as port:
+        yield port
+
+
+def _with_openclaw(te: TrialEnv, port: int) -> tuple[dict[str, str], Path]:
+    """Stage OpenClaw in the trial HOME + a fake ``openclaw``; return (env, call log).
+
+    The fake answers ``secrets audit`` clean and ``logs`` with no reload event,
+    ever — so a lock that reaches the reload wait sits in it for the full 15s.
+    Each call appends its subcommand to the call log.
+    """
+    oc = te.home / ".openclaw"
+    (oc / "workspace").mkdir(parents=True)
+    (oc / "openclaw.json").write_text('{"models": {"providers": {}}}\n')
+    calls = te.home.parent / "openclaw-calls.log"
+    fake = te.home.parent / "openclaw"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f"echo \"$1\" >> '{calls}'\n"
+        f"if [ \"$1\" = secrets ]; then echo '{_CLEAN_AUDIT}'; fi\n"
+    )
+    fake.chmod(0o755)
+    env = {**_child_env(te), "WORTHLESS_OPENCLAW_BIN": str(fake), "WORTHLESS_PORT": str(port)}
+    return env, calls
+
+
+def _call_count(calls: Path, subcommand: str) -> int:
+    """How many times the fake ``openclaw`` was called with *subcommand*."""
+    try:
+        return calls.read_text().split().count(subcommand)
+    except FileNotFoundError:
+        return 0
+
+
+def _ctrl_c_once(
+    te: TrialEnv,
+    env: dict[str, str],
+    reached: Callable[[], bool],
+    where: str,
+    sig: int = signal.SIGINT,
+) -> int:
+    """Run the real lock; send *sig* (default Ctrl-C) once ``reached()`` says it is in *where*.
+
+    Returns the exit code. Fails if the press is not answered within TAIL_DEADLINE.
+    """
+    proc = _spawn_lock(te, env)
+    try:
+        _wait_until(proc, te, reached, where)
+        time.sleep(0.3)  # settle INTO the blocking call, not merely past the marker
+        _kill_group(proc, sig)
+        _await_exit(proc, te, f"{signal.Signals(sig).name} ignored in {where}", TAIL_DEADLINE)
+    finally:
+        survived = _reap(proc)
+    if survived:
+        _fail_unkillable(proc)
+    return proc.returncode
+
+
+def _assert_answered_and_kept(te: TrialEnv, rc: int, sig: int = signal.SIGINT) -> None:
+    """The lock exited 128 + *sig* and left the keys fully LOCKED, never partial."""
+    state = classify(te)
+    assert rc == 128 + sig, f"expected exit {128 + sig} for {sig!r}, got {rc}\n{_stderr_tail(te)}"
+    assert state.classification == "locked", (
+        "the keys were already committed, so Ctrl-C must leave them LOCKED — never "
+        f"unwind rows the rewritten .env needs.\n  {state.detail}\n{_stderr_tail(te)}"
+    )
+
+
+class TestRefusedPostflightKeepsKeys:
+    def test_refused_postflight_keeps_the_key_recoverable(
+        self, tmp_path: Path, proxy_port: int
+    ) -> None:
+        """worthless-im3x, real CLI: a refused post-flight leaves a key ``unlock`` restores.
+
+        The fake reports ``.env`` itself as scanned, so the lock's own rewrite
+        always trips the post-flight re-audit (no timing race), and its second
+        audit finds new plaintext. Before the fix the rollback deleted shard-B
+        while ``.env`` held shard-A, and ``unlock`` could not restore the key.
+        """
+        te = _make_trial_env(tmp_path, 0, n_keys=1)
+        env, calls = _with_openclaw(te, proxy_port)
+        clean = json.dumps({**json.loads(_CLEAN_AUDIT), "filesScanned": [str(te.env_file)]})
+        finding = {
+            "code": "PLAINTEXT_FOUND",
+            "severity": "error",
+            "file": str(te.env_file),
+            "jsonPath": "providers.mistral.apiKey",
+            "message": "plaintext",
+            "provider": "mistral",
+        }
+        refused = json.dumps({**json.loads(clean), "findings": [finding]})
+        fake = Path(env["WORTHLESS_OPENCLAW_BIN"])
+        fake.write_text(
+            "#!/bin/sh\n"
+            f"echo \"$1\" >> '{calls}'\n"
+            'if [ "$1" = secrets ]; then\n'
+            f"  if [ \"$(grep -c secrets '{calls}')\" = 1 ]; then echo '{clean}';"
+            f" else echo '{refused}'; fi\n"
+            "fi\n"
         )
+
+        lock = subprocess.run(
+            [*_cli(), "lock", "--env", str(te.env_file)],
+            env=env,
+            cwd=te.repo,
+            capture_output=True,
+            text=True,
+            timeout=WAIT_TIMEOUT,
+        )
+        out = lock.stdout + lock.stderr
+        assert _call_count(calls, "secrets") == 2, f"post-flight never ran:\n{out}"
+        assert lock.returncode == 87, out
+
+        unlock = subprocess.run(
+            [*_cli(), "unlock", "--env", str(te.env_file)],
+            env=env,
+            cwd=te.repo,
+            capture_output=True,
+            text=True,
+            timeout=WAIT_TIMEOUT,
+        )
+        restored = te.env_file.read_text()
+        assert unlock.returncode == 0, unlock.stdout + unlock.stderr
+        assert all(s in restored for s in te.secrets), (
+            f"unlock did not restore the original key — it was destroyed:\n{unlock.stderr}"
+        )
+        assert "LOCK FAILED" in out, out
+
+
+class TestCtrlCDuringOpenclawReloadWait:
+    @pytest.mark.parametrize(
+        "sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP], ids=["SIGINT", "SIGTERM", "SIGHUP"]
+    )
+    def test_ctrl_c_during_reload_wait_is_answered(
+        self, sig: int, tmp_path: Path, proxy_port: int
+    ) -> None:
+        """A signal during the up-to-15s reload wait is answered within TAIL_DEADLINE.
+
+        SIGTERM is ``docker stop`` (exit 143, worthless-dnp9); SIGHUP is a closed
+        terminal (exit 129, worthless-v9gg).
+        """
+        for trial in range(TAIL_TRIALS):
+            te = _make_trial_env(tmp_path, trial, n_keys=1)
+            env, calls = _with_openclaw(te, proxy_port)
+            rc = _ctrl_c_once(
+                te,
+                env,
+                lambda c=calls: _call_count(c, "logs") >= 1,  # polled for a reload once
+                "the OpenClaw reload wait",
+                sig,
+            )
+            _assert_answered_and_kept(te, rc, sig)
+
+
+class TestTerminalClosedMidLock:
+    def test_closing_the_real_terminal_is_answered_with_129(
+        self, tmp_path: Path, proxy_port: int
+    ) -> None:
+        """worthless-v9gg, real pty: closing the terminal (the kernel's SIGHUP) mid-lock.
+
+        The lock runs on a pseudo-terminal and the terminal's master side is
+        closed in the reload wait, as when a window is closed. Every later write
+        to the dead terminal fails; Python exited 120 flushing stdout.
+        """
+        te = _make_trial_env(tmp_path, 0, n_keys=1)
+        env, calls = _with_openclaw(te, proxy_port)
+        pid, fd = pty.fork()
+        if pid == 0:  # pragma: no cover — the child execs the real CLI
+            # Never fall back into pytest: a forked copy of an xdist worker that
+            # returns here would write to the worker's channel and kill the node.
+            try:
+                os.chdir(str(te.repo))
+                argv = [*_cli(), "lock", "--env", str(te.env_file)]
+                os.execve(argv[0], argv, env)  # noqa: S606 — exec the real CLI, no shell
+            finally:
+                os._exit(127)
+        status = None
+        closed = False
+        seen = bytearray()  # what the lock printed, for a failure message
+        # Reaching the reload wait is setup, not the contract: a cold start on a
+        # loaded box can take a while. Answering after the close is the
+        # contract, and gets its own strict TAIL_DEADLINE below.
+        deadline = time.monotonic() + 2 * WAIT_TIMEOUT
+        try:
+            while time.monotonic() < deadline:
+                if not closed:
+                    with contextlib.suppress(OSError):
+                        if select.select([fd], [], [], 0.05)[0]:
+                            seen.extend(os.read(fd, 65536))  # drain, or the child blocks
+                    if _call_count(calls, "logs") >= 1:
+                        time.sleep(0.3)
+                        os.close(fd)  # the window closes: the kernel sends SIGHUP
+                        closed = True
+                        deadline = time.monotonic() + TAIL_DEADLINE
+                else:
+                    time.sleep(0.05)
+                wpid, st = os.waitpid(pid, os.WNOHANG)
+                if wpid == pid:
+                    status = st
+                    break
+        finally:
+            if status is None:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            if not closed:
+                os.close(fd)
+        calls_seen = calls.read_text() if calls.exists() else "(no calls)"
+        assert closed, (
+            "the lock never reached the reload wait\n"
+            f"openclaw calls: {calls_seen.split()}\n"
+            f"lock output tail: {bytes(seen[-1500:]).decode('utf-8', 'replace')}"
+        )
+        assert status is not None, "the lock outlived its closed terminal"
+        assert os.WIFEXITED(status), f"killed by a signal, not exited: status={status!r}"
+        assert os.WEXITSTATUS(status) == 129, f"exit={os.WEXITSTATUS(status)}"
+        state = classify(te)
+        assert state.classification == "locked", state.detail
+
+
+class TestSignalDuringPreflightAudit:
+    @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
+    def test_signal_during_preflight_audit_is_answered(
+        self, sig: int, tmp_path: Path, proxy_port: int
+    ) -> None:
+        """worthless-595v, real CLI: the pre-flight audit is answered, never retried.
+
+        The fake's audit sleeps (self-terminating). Before any write, so the disk
+        must stay clean and the exit is 128 + sig.
+        """
+        te = _make_trial_env(tmp_path, 0, n_keys=1)
+        env, calls = _with_openclaw(te, proxy_port)
+        fake = Path(env["WORTHLESS_OPENCLAW_BIN"])
+        fake.write_text(
+            "#!/bin/sh\n"
+            f"echo \"$1\" >> '{calls}'\n"
+            f"if [ \"$1\" = secrets ]; then sleep 5; echo '{_CLEAN_AUDIT}'; fi\n"
+        )
+        rc = _ctrl_c_once(
+            te, env, lambda: _call_count(calls, "secrets") >= 1, "the pre-flight audit", sig
+        )
+        state = classify(te)
+        assert rc == 128 + sig, f"got {rc}\n{_stderr_tail(te)}"
+        assert _call_count(calls, "secrets") == 1, "the audit was retried after the signal"
+        assert state.classification == "clean", f"{state.detail}\n{_stderr_tail(te)}"
+
+
+class TestCtrlCWhileOpenclawConfigIsLocked:
+    def test_ctrl_c_while_config_lock_is_held_is_answered(
+        self, tmp_path: Path, proxy_port: int
+    ) -> None:
+        """Ctrl-C while another worthless process holds the openclaw.json lock is answered."""
+        for trial in range(TAIL_TRIALS):
+            te = _make_trial_env(tmp_path, trial, n_keys=1)
+            env, _calls = _with_openclaw(te, proxy_port)
+            # Another process (an OpenClaw write, a second lock) holds the config lock.
+            with _file_lock(te.home / ".openclaw" / "openclaw.json"):
+                rc = _ctrl_c_once(
+                    te,
+                    env,
+                    # keys committed; the next step is the OpenClaw config write
+                    lambda t=te: _env_state(t) == "locked",
+                    "the wait for the openclaw.json lock",
+                )
+            _assert_answered_and_kept(te, rc)

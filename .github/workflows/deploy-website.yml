@@ -19,7 +19,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: "github-pages"
+  # PR runs get their own group. A fixed "github-pages" group for every event
+  # means a newly queued PR run cancels a production deploy that is still
+  # waiting its turn (GitHub keeps one running + one pending per group, and the
+  # newcomer evicts the pending one). Two PR runs were cancelled that way on
+  # 2026-06-13; a cancelled deploy is a merge that never reaches wless.io.
+  # Everything that can DEPLOY shares one lane, so two deploys never race for
+  # Pages: a push and a manual run both land in "github-pages". Pull requests
+  # never deploy, so they get their own lane — sharing it is how a queued PR run
+  # evicted the pending run on 2026-06-13.
+  group: ${{ github.event_name == 'pull_request' && format('website-pr-{0}', github.event.pull_request.number) || 'github-pages' }}
   cancel-in-progress: false
 
 jobs:
@@ -48,6 +57,13 @@ jobs:
           grep -qx 'wless.io' website/CNAME
           grep -qx 'Canonical: https://wless.io/.well-known/security.txt' website/.well-known/security.txt
           grep -qx 'Sitemap: https://wless.io/sitemap.xml' website/robots.txt
+          # No symlinks: upload-pages-artifact tars with --dereference, so a link
+          # publishes whatever it points at, while the publish-safety allowlist
+          # walks real files and never sees it. Assign first — `test -z "$(find
+          # ...)"` also passes when find itself fails, which is a guard that
+          # disappears exactly when something is wrong.
+          links=$(find website -type l -print -quit)
+          test -z "$links"
 
       - name: Set up uv + Python
         uses: ./.github/actions/setup-uv-python
@@ -68,7 +84,13 @@ jobs:
 
   deploy:
     name: Deploy to GitHub Pages
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # A manual run may also deploy, which re-publishes main's CURRENT tip: the
+    # way to recover a failed or cancelled deploy without inventing a commit,
+    # and the only such path once a run is too old to re-run. It cannot
+    # republish older content — the stale guard below still applies.
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && github.ref == 'refs/heads/main'
     needs: validate
     runs-on: ubuntu-latest
     permissions:
@@ -83,6 +105,20 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Refuse to deploy stale website content
+        # This run deploys its own commit. If main already carries newer
+        # website/ content (a later push, or someone re-running an old run —
+        # a re-run keeps the ORIGINAL commit), publishing it would silently
+        # roll wless.io backwards. Fail loudly instead; the newer run deploys.
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          if git diff --quiet "$GITHUB_SHA" FETCH_HEAD -- website; then
+            echo "OK: this commit carries main's current website/ content."
+            exit 0
+          fi
+          echo "::error::main has newer website/ content than $GITHUB_SHA; refusing to deploy stale content."
+          exit 1
 
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5

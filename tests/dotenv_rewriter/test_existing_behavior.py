@@ -60,7 +60,9 @@ def test_existing_dotenv_rewriter_test_module_still_passes() -> None:
         capture_output=True,
         text=True,
         check=False,
-        timeout=60,
+        # Under the repo-global 30s test budget so a hang fails readably here
+        # instead of the thread-method timeout killing the worker. Measured ~2s.
+        timeout=20,
     )
     assert result.returncode == 0, (
         f"legacy tests/test_dotenv_rewriter.py regressed (exit={result.returncode}):\n"

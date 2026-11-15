@@ -58,7 +58,11 @@ def test_derive_mac_secret_is_32_bytes() -> None:
 
 
 def test_derive_mac_secret_is_deterministic() -> None:
-    assert derive_mac_secret(_KAT_KEY_B64URL) == derive_mac_secret(_KAT_KEY_B64URL)
+    # Two separate derivations, the second from a fresh copy of the key: the
+    # one-line `f(x) == f(x)` form read as a self-comparison (Sonar S5863).
+    first = derive_mac_secret(_KAT_KEY_B64URL)
+    second = derive_mac_secret(bytes(bytearray(_KAT_KEY_B64URL)))
+    assert first == second
 
 
 def test_derive_mac_secret_is_not_the_input_key() -> None:

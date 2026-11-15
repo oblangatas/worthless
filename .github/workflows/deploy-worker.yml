@@ -153,9 +153,9 @@ jobs:
       # `url-smoke` / `wire-attacks` chained jobs.
       worker_url: ${{ steps.worker_url.outputs.value }}
     environment:
-      # Actions environment scopes secrets per target. Production gating
-      # by required reviewers stays at 0 for solo dev (WOR-330) but the
-      # `worthless-sh-production` env's deployment-branch rule restricts
+      # Actions environment scopes secrets per target. Production needs
+      # the maintainer's approval (required reviewer, since 2026-09-13) and
+      # the `worthless-sh-production` env's deployment-branch rule restricts
       # it to `v*` tags only — see DEPLOY.md §"Set up signed tags".
       # The preview URL cannot be templated here (`environment.url` does
       # not allow `secrets.*`); see DEPLOY.md for the actual workers.dev URL.

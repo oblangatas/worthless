@@ -39,7 +39,12 @@ app = typer.Typer(
 @error_boundary
 def _main(
     ctx: typer.Context,
-    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress non-error output"),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Hide progress output; errors, lost keys and changes to your files still show",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
     debug: bool = typer.Option(False, "--debug", help="Show full tracebacks on error"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Auto-approve prompts"),
@@ -55,7 +60,7 @@ def _main(
     """Worthless — make leaked API keys worthless."""
     install_redaction_filter()
     set_debug(debug)
-    console = WorthlessConsole(quiet=quiet, json_mode=json_output)
+    console = WorthlessConsole(quiet=quiet, json_mode=json_output, assume_yes=yes)
     set_console(console)
 
     # Show the AS-IS / no-warranty notice once per install (WOR-488).
@@ -105,12 +110,10 @@ from worthless.cli.commands.down import register_down_commands  # noqa: E402
 
 register_down_commands(app)
 
-try:
-    from worthless.cli.commands.mcp import register_mcp_commands  # noqa: E402
+# Imports no mcp code: a missing or outdated SDK is reported by the command.
+from worthless.cli.commands.mcp import register_mcp_commands  # noqa: E402
 
-    register_mcp_commands(app)
-except ImportError:
-    pass  # mcp extra not installed — worthless[mcp]
+register_mcp_commands(app)
 
 from worthless.cli.commands.revoke import register_revoke_commands  # noqa: E402
 

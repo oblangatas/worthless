@@ -8,7 +8,11 @@ test_install_docker.py (marked 'docker').
 
 from __future__ import annotations
 
+import re
+import subprocess  # noqa: S404
 from pathlib import Path
+
+import pytest
 
 from tests._install_helpers import (
     EXIT_INTEGRITY,
@@ -76,7 +80,8 @@ def test_install_succeeds_when_uv_installs_outside_home_local_bin(tmp_path: Path
     # uv installs here, and this directory is deliberately NOT on PATH.
     custom_bin = tmp_path / "uv-tools" / "bin"
     custom_bin.mkdir(parents=True)
-    write_stub(custom_bin, "worthless", 'echo "worthless 9.9.9"')
+    pin = read_install_pin()
+    write_stub(custom_bin, "worthless", f'echo "worthless {pin}"')
 
     result = run_install(bin_dir, env_extra={"UV_TOOL_BIN_DIR": str(custom_bin)})
 
@@ -85,7 +90,7 @@ def test_install_succeeds_when_uv_installs_outside_home_local_bin(tmp_path: Path
         "a successful install must not fail just because uv's bin dir is customised.\n"
         f"exit={result.returncode}\n{combined}"
     )
-    assert "9.9.9" in combined, f"must report the version of the binary uv installed.\n{combined}"
+    assert pin in combined, f"must report the version of the binary uv installed.\n{combined}"
 
 
 def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) -> None:
@@ -116,7 +121,7 @@ def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) 
     uv_stub = bin_dir / "uv"
     uv_stub.write_text(
         uv_stub.read_text(encoding="utf-8").replace(
-            'run) echo "worthless 0.3.0"', 'run) echo "worthless 0.3.9"'
+            f'run) echo "worthless {read_install_pin()}"', 'run) echo "worthless 0.3.9"'
         ),
         encoding="utf-8",
     )
@@ -127,7 +132,8 @@ def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) 
     #    reports. This is what the user runs, so this is what must be reported.
     tool_bin = tmp_path / ".local" / "bin"
     tool_bin.mkdir(parents=True, exist_ok=True)
-    write_stub(tool_bin, "worthless", 'echo "worthless 0.3.10"')
+    pin = read_install_pin()  # smoke_test refuses anything else (worthless-yeff)
+    write_stub(tool_bin, "worthless", f'echo "worthless {pin}"')
 
     result = run_install(bin_dir)
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -141,9 +147,7 @@ def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) 
         "the banner reported a `worthless` shadowing us on PATH instead of the one "
         f"uv installed — the same wrong-version bug by another route.\n{combined}"
     )
-    assert "0.3.10" in combined, (
-        f"the banner must report the version uv actually installed.\n{combined}"
-    )
+    assert pin in combined, f"the banner must report the version uv actually installed.\n{combined}"
 
 
 def test_user_override_beats_pin(tmp_path: Path) -> None:
@@ -151,6 +155,9 @@ def test_user_override_beats_pin(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_happy_path_stubs(bin_dir)
+    # The installed copy reports the overridden version (smoke_test checks it).
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    write_stub(tmp_path / ".local" / "bin", "worthless", 'echo "worthless 9.9.9"')
 
     result = run_install(bin_dir, env_extra={"WORTHLESS_VERSION": "9.9.9"})
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -397,10 +404,10 @@ def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
         '  tool) shift; case "$1" in\n'
         '    install|upgrade) echo "ok" ;;\n'
         "    list) ;;\n"
-        # smoke_test asks uv where it installed the entry point rather than
-        # guessing ~/.local/bin (worthless-dc26). Echo a path that does not
-        # exist so the fallback to `command -v` runs — this test is about env
-        # scrubbing, not about which binary answers.
+        # smoke_test asks uv where it installed the entry point (worthless-dc26).
+        # Echo a path that does not exist so it falls back to uv's default dir
+        # (worthless-alx3) — this test is about env scrubbing, not about which
+        # binary answers.
         '    dir) echo "$HOME/nonexistent-uv-bin" ;;\n'
         '    *) echo "UNHANDLED_UV_CALL (test stub gap): uv tool $*" >&2; exit 99 ;;\n'
         "  esac ;;\n"
@@ -409,6 +416,8 @@ def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
         "esac",
     )
     write_stub(bin_dir, "worthless", 'echo "worthless 0.3.7"')
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    write_stub(tmp_path / ".local" / "bin", "worthless", f'echo "worthless {read_install_pin()}"')
 
     poisoned = "http://evil.example/index"
     result = run_install(
@@ -646,8 +655,15 @@ def test_success_with_persistent_rc_shows_clean_done_message(tmp_path: Path) -> 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_happy_path_stubs(bin_dir)
-    # Simulate a zsh user whose .zshrc already adds ~/.local/bin to PATH.
+    # Simulate a zsh user whose .zshrc already adds ~/.local/bin to PATH: the
+    # `worthless` their shell finds IS the one uv installs there, not a second
+    # copy (which install.sh would rightly report as a shadow).
     (tmp_path / ".zshrc").write_text('export PATH="$HOME/.local/bin:$PATH"\n')
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    write_stub(local_bin, "worthless", f'echo "worthless {read_install_pin()}"')
+    (bin_dir / "worthless").unlink()
+    (bin_dir / "worthless").symlink_to(local_bin / "worthless")
 
     result = run_install(bin_dir)
 
@@ -1204,3 +1220,460 @@ esac""",
         f"breaks the no-op guarantee for anyone who relocates it.\n{log}\n"
         f"{result.stderr[-300:]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# worthless-52lm / worthless-2qfm — planted binaries must never run, with the
+# installer's real defences switched ON
+# ---------------------------------------------------------------------------
+
+
+def _run_install_like_a_user(home: Path, first_on_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run the real install.sh the way a user's shell would.
+
+    Deliberately NOT ``run_install``: that helper sets WORTHLESS_TRUST_PATH=1 so
+    it can inject stubs, and the escape hatch switches off exactly the defences
+    these tests exist to prove — the PATH lockdown, ``trusted_tool`` and
+    ``resolve_uv`` all defer to ``command -v`` when it is set. Every earlier test
+    of those defences ran with them disabled, which is how worthless-52lm shipped
+    with a green suite.
+
+    ``env -i`` so nothing from the developer's shell leaks in. The attacker's
+    directory is FIRST on PATH, which is the realistic position: any writable
+    directory the user already has on PATH ahead of the system dirs.
+    """
+    env = {
+        "HOME": str(home),
+        "PATH": f"{first_on_path}:/usr/bin:/bin",
+        "NO_COLOR": "1",
+        "WORTHLESS_KEYRING_BACKEND": "null",
+    }
+    return subprocess.run(  # noqa: S603
+        ["/bin/sh", str(INSTALL_SH)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("already_installed", [False, True], ids=["fresh", "already-installed"])
+def test_a_planted_uv_never_performs_the_install(tmp_path: Path, already_installed: bool) -> None:
+    """worthless-52lm: the genuine pinned uv must do the install, not a planted one.
+
+    worthless-v0tl (#580) made ensure_uv find uv through ``resolve_uv`` — a bounded
+    list of directories — rather than ``command -v``. That fixed the VERSION CHECK.
+    But when the uv it finds is already pinned, ensure_uv returns early, BEFORE the
+    line that prepends uv's directory to PATH. Every later call is a bare ``uv``
+    resolved through PATH, and the lockdown only prepends
+    /usr/bin:/bin:/usr/local/bin:~/.local/bin. So a pinned uv in ~/.cargo/bin or
+    /opt/homebrew/bin (where Homebrew puts it) loses every later call to whatever
+    is first on the caller's PATH.
+
+    Reproduced before this test existed::
+
+        LEGIT --version
+        EVIL  tool list
+        EVIL  tool install --force worthless==0.3.12
+        EVIL  tool dir --bin
+
+    The attacker's binary runs during ``curl | sh`` and decides what gets
+    installed — the outcome worthless-v0tl was filed to prevent, one step later.
+
+    Asserts the EXACT call sequence the genuine uv receives, not merely that the
+    attacker stayed silent: a bare ``uv`` can also land on a host's own
+    /opt/homebrew/bin/uv (now in the lockdown prefix), which logs nothing. A
+    missing LEGIT line catches that on every host. ``already-installed`` reaches
+    the idempotency fast-path's call site, which a fresh install never does.
+
+    Offline by construction: the genuine uv is already pinned, so the Astral
+    bootstrap (and its download) is never reached.
+    """
+    home = tmp_path / "home"
+    log = tmp_path / "uv-calls.log"
+    pin = read_install_pin()
+
+    shim = f'#!/bin/sh\\necho "worthless {pin}"\\n'
+    genuine = home / ".cargo" / "bin"
+    genuine.mkdir(parents=True)
+    write_stub(
+        genuine,
+        "uv",
+        f"""echo "LEGIT $*" >> {log}
+case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) case "$2" in
+    list) [ -x "$HOME/.local/bin/worthless" ] && echo "worthless v{pin}" ;;
+    install)
+      printf '%s' "${{UV_NO_CONFIG:-unset}}" > "$HOME/uv-no-config"
+      mkdir -p "$HOME/.local/bin"
+      printf '{shim}' > "$HOME/.local/bin/worthless"
+      chmod +x "$HOME/.local/bin/worthless" ;;
+    dir) echo "$HOME/.local/bin" ;;
+  esac ;;
+esac""",
+    )
+    # A modern pipx (>=1.7) probes `uv --version` through PATH on `pipx list`.
+    # Hosts with a system pipx or a uv in a trusted dir (e.g. Homebrew) shadow
+    # this stub, so the pipx route is also pinned statically in
+    # test_pipx_list_never_sees_the_callers_path.
+    (home / ".local" / "bin").mkdir(parents=True)
+    write_stub(home / ".local" / "bin", "pipx", "uv --version >/dev/null 2>&1; exit 0")
+    if already_installed:
+        write_stub(home / ".local" / "bin", "worthless", f'echo "worthless {pin}"')
+
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    write_stub(
+        attacker,
+        "uv",
+        f"""echo "EVIL  $*" >> {log}
+case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) case "$2" in dir) echo "$HOME/.local/bin" ;; esac ;;
+esac""",
+    )
+
+    result = _run_install_like_a_user(home, attacker)
+    calls = log.read_text() if log.exists() else ""
+
+    assert "EVIL" not in calls, (
+        "a planted uv earlier on PATH was executed during install, with the "
+        "installer's defences switched ON. The genuine pinned uv lives in "
+        "~/.cargo/bin, outside the PATH lockdown's prefix, so ensure_uv's early "
+        f"return left every later bare `uv` resolving through the caller's PATH.\n"
+        f"uv calls:\n{calls}\nstderr:\n{result.stderr[-400:]}"
+    )
+    if already_installed:
+        expected = ["--version", "tool list", "tool dir --bin", "tool dir --bin"]
+    else:
+        install = f"tool install --force worthless=={pin}"
+        expected = ["--version", "tool list", install, "tool dir --bin"]
+    if not already_installed:
+        # Brutus on this PR: ~/.config/uv/uv.toml pointed the GENUINE uv at an
+        # attacker index (UV_CONFIG_FILE is scrubbed; the user config file is not).
+        seen = (home / "uv-no-config").read_text()
+        assert seen == "1", f"uv tool install ran without UV_NO_CONFIG=1 (saw {seen!r})"
+    got = [line.removeprefix("LEGIT ") for line in calls.splitlines()]
+    assert got == expected, (
+        "the genuine pinned uv did not receive every uv call — some call site "
+        "resolved `uv` through PATH instead of the vetted absolute path.\n"
+        f"expected: {expected}\ngot:      {got}\n"
+        f"rc={result.returncode}\n{result.stdout[-300:]}\n{result.stderr[-300:]}"
+    )
+
+
+def test_an_unpinned_uv_left_after_bootstrap_never_installs(tmp_path: Path) -> None:
+    """worthless-ir3s: after bootstrapping uv, install.sh must verify the uv it
+    picked is the pinned version before using it.
+
+    The bootstrap can land the new uv somewhere ``resolve_uv`` doesn't look —
+    Astral's installer honours ``XDG_BIN_HOME``, which is not scrubbed — while an
+    older uv (e.g. Homebrew's) is still found. Before this check, that stale uv
+    silently performed ``uv tool install``, defeating the version pin.
+
+    Modelled offline: the "installer" downloads and verifies but places nothing,
+    so the only uv install.sh can find is the stale one.
+    """
+    home = tmp_path / "home"
+    bin_dir = home / "bin"
+    bin_dir.mkdir(parents=True)
+    log = tmp_path / "stale-uv.log"
+    sha = re.search(r'ASTRAL_INSTALLER_SHA256="([0-9a-f]+)"', INSTALL_SH.read_text()).group(1)
+
+    write_stub(bin_dir, "uname", "echo Darwin")
+    write_stub(bin_dir, "sw_vers", 'echo "14.5"')
+    write_stub(
+        bin_dir,
+        "uv",
+        f"""case "$1" in --version) echo "uv 0.1.0" ;; *) echo "$*" >> {log} ;; esac""",
+    )
+    # The "downloaded" Astral installer: records where it was told to put uv,
+    # places nothing.
+    fake_installer = tmp_path / "uv-installer.sh"
+    fake_installer.write_text(f'echo "$UV_INSTALL_DIR" > {home / "uv-install-dir"}\n')
+    write_stub(
+        bin_dir,
+        "curl",
+        f'for a in "$@"; do [ "$p" = --output ] && cp {fake_installer} "$a"; p="$a"; done',
+    )
+    write_stub(bin_dir, "sha256sum", f'echo "{sha}  $1"')
+
+    result = run_install(bin_dir)
+    calls = log.read_text() if log.exists() else ""
+
+    assert "tool install" not in calls, (
+        f"a stale, unpinned uv performed the install after bootstrap.\nuv calls:\n{calls}"
+    )
+    assert result.returncode == EXIT_INTERNAL, (
+        f"install must stop with EXIT_INTERNAL.\n{result.stdout}\n{result.stderr}"
+    )
+    assert "not the pinned" in result.stderr, result.stderr
+    # Brutus on PR #643: Astral's installer follows XDG_BIN_HOME / XDG_DATA_HOME.
+    # install.sh pins its target to the first dir resolve_uv searches.
+    assert (home / "uv-install-dir").read_text().strip() == str(home / ".local" / "bin")
+
+
+# worthless-oi9b — branch arms that no test executed
+# ---------------------------------------------------------------------------
+
+
+def test_a_broken_install_reports_an_error_not_success(tmp_path: Path) -> None:
+    """smoke_test's exit-40 guarantee — the last gate before "Done!".
+
+    ``main`` runs ``smoke_test`` immediately before printing the success block, and
+    its failure branch is ``die "$EXIT_INTERNAL"``. So a broken install cannot
+    print "Done!" — that is structurally impossible, not merely unobserved.
+
+    But NOTHING ASSERTED IT. The three existing EXIT_INTERNAL assertions all cover
+    version-pin and charset-validation paths. Ranked #1 on worthless-oi9b because
+    it is the final check standing between a broken install and a user being told
+    they are set up: if someone reorders ``main`` or softens that ``die`` to a
+    warning, every user with a broken install would be told it worked, and no test
+    would notice.
+
+    (An earlier draft of that bead claimed a broken install *could* print "Done!".
+    That was wrong and is corrected there — the guarantee holds today. This test
+    is what keeps it holding.)
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pinned = read_install_pin()
+    write_happy_path_stubs(bin_dir)
+    # The install "succeeds" — uv reports the pinned version installed — but the
+    # entry point does not run. Exactly the shape smoke_test exists to catch.
+    write_stub(
+        bin_dir,
+        "uv",
+        f"""case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) shift; case "$1" in
+    install|upgrade) echo "ok" ;;
+    list) ;;
+    dir) echo "${{UV_TOOL_BIN_DIR:-${{XDG_BIN_HOME:-$HOME/.local/bin}}}}" ;;
+    *) exit 1 ;;
+  esac ;;
+  run) echo "worthless {pinned}" ;;
+  *) exit 1 ;;
+esac""",
+    )
+    entry = tmp_path / ".local" / "bin" / "worthless"
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text("#!/bin/sh\nexit 1\n")
+    entry.chmod(0o755)
+    write_stub(bin_dir, "worthless", "exit 1")
+
+    result = run_install(bin_dir)
+
+    assert result.returncode == EXIT_INTERNAL, (
+        "an install whose binary does not run must exit 40, not report success. "
+        "smoke_test is the last gate before the 'Done!' block.\n"
+        f"rc={result.returncode}\n{result.stdout[-400:]}\n{result.stderr[-400:]}"
+    )
+    combined = result.stdout + result.stderr
+    assert "Done!" not in combined, (
+        f"a broken install printed the success block.\n{combined[-500:]}"
+    )
+    assert "failed to run" in combined, f"expected smoke_test's diagnostic, got:\n{combined[-400:]}"
+
+
+@pytest.mark.parametrize(
+    ("shell", "rc_name", "permanent_hint"),
+    [
+        ("/bin/bash", ".bashrc", "~/.bashrc"),
+        ("/bin/zsh", ".zshrc", "~/.zshrc"),
+        ("/usr/bin/fish", ".config/fish/config.fish", "fish_add_path"),
+    ],
+)
+def test_path_advice_matches_the_users_actual_shell(
+    tmp_path: Path, shell: str, rc_name: str, permanent_hint: str
+) -> None:
+    """Per-shell PATH advice — only the zsh arm had ever executed.
+
+    ``run_install`` hardcodes ``SHELL=/bin/zsh`` (tests/_install_helpers.py), so
+    every install test drove the zsh branch of ``path_is_persistent`` and
+    ``print_activation_hint``. The bash, fish and unknown arms were never run —
+    and most people who pipe a script into their shell are on bash.
+
+    The failure this guards is quiet and universal: tell a bash user to add a line
+    to a file they do not use, or tell someone whose PATH is already configured to
+    configure it again, and the install "works" while the advice is wrong. Nothing
+    would fail. Ranked #2 on worthless-oi9b.
+
+    Asserts the shape that matters per shell: with the rc file ALREADY configured,
+    install.sh must not tell the user to make it permanent again.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+
+    rc = home / rc_name
+    rc.parent.mkdir(parents=True, exist_ok=True)
+    rc.write_text('export PATH="$HOME/.local/bin:$PATH"\n')
+
+    result = run_install(bin_dir, env_extra={"SHELL": shell})
+    out = result.stdout + result.stderr
+
+    assert result.returncode == 0, f"install failed for {shell}:\n{out[-400:]}"
+    assert "Make permanent" not in out, (
+        f"{shell}: install.sh told a user whose {rc_name} ALREADY references "
+        f".local/bin to make it permanent again. path_is_persistent's arm for "
+        f"this shell did not fire.\n{out[-500:]}"
+    )
+    assert permanent_hint not in out, (
+        f"{shell}: emitted the make-permanent hint despite {rc_name} being "
+        f"configured.\n{out[-500:]}"
+    )
+
+
+def test_an_unknown_shell_still_gets_usable_advice(tmp_path: Path) -> None:
+    """The `*` arm: never executed, and it is the one that must not guess.
+
+    ``path_is_persistent`` returns false for anything it does not recognise, so
+    the hint always prints — deliberately conservative. ``print_activation_hint``
+    then falls through to a POSIX-ish export plus a note naming the detected
+    shell, rather than inventing rc-file advice it cannot verify.
+
+    Untested until now, so nothing stopped someone "simplifying" that arm into
+    bash-specific advice for users who are not on bash.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+
+    result = run_install(bin_dir, env_extra={"SHELL": "/opt/weird/nushell"})
+    out = result.stdout + result.stderr
+
+    assert result.returncode == 0, f"install failed on an unknown shell:\n{out[-400:]}"
+    assert "nushell" in out, (
+        f"the unknown-shell arm should name the shell it detected so the user can "
+        f"adapt the advice.\n{out[-500:]}"
+    )
+    assert "export PATH=" in out, f"expected a POSIX activation line.\n{out[-500:]}"
+    for guess in ("~/.bashrc", "~/.zshrc", "fish_add_path"):
+        assert guess not in out, (
+            f"invented rc-file advice ({guess}) for an unrecognised shell.\n{out[-500:]}"
+        )
+
+
+@pytest.mark.parametrize(
+    ("uv_dir", "installed"),
+    [("fails", True), ("fails", False), ("wrong", True), ("wrong", False)],
+    ids=[
+        "uv-fails-installed",
+        "uv-fails-missing",
+        "uv-wrong-dir-installed",
+        "uv-wrong-dir-missing",
+    ],
+)
+def test_the_smoke_test_never_runs_a_worthless_found_on_path(
+    tmp_path: Path, uv_dir: str, installed: bool
+) -> None:
+    """worthless-alx3: when uv can't say where it put the entry point, smoke_test
+    used to fall back to `command -v worthless` — the caller's PATH — and execute
+    whatever it found. A planted `worthless` earlier on PATH then ran inside the
+    installer.
+
+    Two ways uv can't say: `uv tool dir --bin` fails (which under `set -eu` also
+    killed the installer silently, exit 1, no message), or it answers a dir with
+    no entry point in it. Either way smoke_test must look only where uv installs
+    entry points (UV_TOOL_BIN_DIR, XDG_BIN_HOME, ~/.local/bin): use the real one
+    if present, fail closed with a message if not.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    log = tmp_path / "planted.log"
+    uv = (bin_dir / "uv").read_text()
+    answer = "exit 1" if uv_dir == "fails" else f'echo "{tmp_path / "elsewhere"}"; exit 0'
+    uv = uv.replace('dir) echo "${', f'dir) {answer}; echo "${{', 1)
+    if not installed:
+        uv = uv.replace('[ -e "$_d/worthless" ] ||', "true ||", 1)
+    (bin_dir / "uv").write_text(uv)
+    write_stub(bin_dir, "worthless", f'echo PLANTED >> {log}; echo "worthless 9.9.9"')
+
+    result = run_install(bin_dir)
+    ran = log.read_text() if log.exists() else ""
+
+    assert "PLANTED" not in ran, (
+        "the installer executed a `worthless` found on the caller's PATH.\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    if installed:
+        assert result.returncode == 0, result.stderr
+        assert f"worthless {read_install_pin()}" in result.stdout, result.stdout
+    else:
+        assert result.returncode == EXIT_INTERNAL, (result.returncode, result.stderr)
+        assert "failed to run" in result.stderr, result.stderr
+
+
+def test_an_installed_worthless_at_the_wrong_version_stops_the_install(
+    tmp_path: Path,
+) -> None:
+    """worthless-yeff: smoke_test ran the installed entry point and printed its
+    version, but never compared it with the version it meant to install. A stale
+    or planted `worthless` in uv's tool bin dir (UV_TOOL_BIN_DIR / XDG_BIN_HOME
+    are not scrubbed) reporting 6.6.6 passed silently and the user was told the
+    install succeeded (brutus on PR #671).
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    write_stub(planted, "worthless", 'echo "worthless 6.6.6"')
+
+    result = run_install(bin_dir, env_extra={"UV_TOOL_BIN_DIR": str(planted)})
+
+    assert result.returncode == EXIT_INTERNAL, (result.returncode, result.stdout, result.stderr)
+    assert f"6.6.6, not {read_install_pin()}" in result.stderr, result.stderr
+    assert "Done!" not in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("spelling", ["v{pin}", "V{pin}"])
+def test_a_v_prefixed_version_pin_still_installs(tmp_path: Path, spelling: str) -> None:
+    """karen on PR #674: `WORTHLESS_VERSION=v0.3.12` installs 0.3.12 (uv normalises
+    per PEP 440) and `worthless --version` reports 0.3.12. Comparing that against
+    the raw "v0.3.12" failed a correct install with exit 40.
+    """
+    pin = read_install_pin()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+
+    result = run_install(bin_dir, env_extra={"WORTHLESS_VERSION": spelling.format(pin=pin)})
+
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert f"worthless {pin}" in result.stdout, result.stdout
+
+
+def test_a_wrong_version_copy_is_repaired_not_refused_forever(tmp_path: Path) -> None:
+    """Cursor on PR #674: uv's records say the pin is installed, but the entry
+    point on disk runs and reports another version. The idempotency fast-path
+    only checked that it RUNS, so it skipped the `--force` reinstall; the new
+    smoke-test version check then refused it — on every re-run, forever.
+
+    The fast-path must also require the version to match, so this case is
+    reinstalled and the install succeeds.
+    """
+    pin = read_install_pin()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True, exist_ok=True)
+    write_stub(local_bin, "worthless", 'echo "worthless 0.3.1"')
+    uv = (bin_dir / "uv").read_text()
+    # uv claims the pin is installed, and a real reinstall overwrites the entry point.
+    uv = uv.replace("list) ;;", f'list) echo "worthless v{pin}" ;;', 1)
+    uv = uv.replace('[ -e "$_d/worthless" ] ||', "", 1)
+    (bin_dir / "uv").write_text(uv)
+
+    result = run_install(bin_dir)
+    log = (tmp_path / "uv-invocations.log").read_text()
+
+    assert "tool install --force" in log, f"the wrong-version copy was not reinstalled.\n{log}"
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert f"worthless {pin}" in result.stdout, result.stdout

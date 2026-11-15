@@ -5,15 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import os
 import pwd
+import re
 import subprocess
 
 import pytest
 
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.console import WorthlessConsole
 from worthless.cli.commands.service import launchd, systemd, templates
 from worthless.cli.commands.service._common import ServiceState, refuse_foreign_unit
 from worthless.cli.errors import ErrorCode, WorthlessError
+from tests.helpers import skip_if_root
 
 
 @pytest.fixture()
@@ -284,15 +288,18 @@ class TestSystemdBackend:
             patch.object(systemd, "resolve_worthless_binary", return_value=binary),
             patch.object(systemd, "run_cmd", side_effect=fake_run),
             patch.object(systemd, "report_proxy_health"),
-            patch.dict("os.environ", {"USER": "testuser"}, clear=False),
+            patch.object(systemd, "_session_user", return_value="testuser"),
         ):
             systemd.install(home)
 
-        assert ["loginctl", "enable-linger", "testuser"] in calls
+        assert ["loginctl", "--no-ask-password", "enable-linger", "testuser"] in calls
 
-    def test_install_raises_clean_error_when_linger_enable_fails(
+    def test_install_still_succeeds_when_linger_enable_fails(
         self, home: WorthlessHome, tmp_path: Path
     ) -> None:
+        """worthless-8kn5 reverses the old decision (raise WRTLS-119): with no local
+        login polkit refuses linger, yet the unit runs while the user is logged in.
+        Install, report lingering off, and let the banner name the admin fix."""
         binary = tmp_path / "worthless"
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
@@ -304,7 +311,7 @@ class TestSystemdBackend:
                 result.returncode = 0
                 result.stdout = "Linger=no"
                 return result
-            if args[:2] == ["loginctl", "enable-linger"]:
+            if args[0] == "loginctl" and "enable-linger" in args:
                 raise subprocess.CalledProcessError(1, args, stderr="Failed to enable linger.")
             result = MagicMock()
             result.returncode = 0
@@ -318,11 +325,10 @@ class TestSystemdBackend:
             patch.object(systemd, "report_proxy_health"),
             patch.dict("os.environ", {"USER": "testuser"}, clear=False),
         ):
-            with pytest.raises(WorthlessError) as exc_info:
-                systemd.install(home)
+            lingering = systemd.install(home)
 
-        assert exc_info.value.code == ErrorCode.SERVICE_INSTALL_FAILED
-        assert "linger" in str(exc_info.value).lower()
+        assert lingering is False
+        assert unit.is_file()
 
     def test_detect_not_installed(self, home: WorthlessHome, tmp_path: Path) -> None:
         with patch.object(systemd, "unit_path", return_value=tmp_path / "missing.service"):
@@ -425,6 +431,7 @@ class TestRefuseForeignUnit:
     def test_noop_when_unit_owned_by_home(self, home: WorthlessHome, tmp_path: Path) -> None:
         refuse_foreign_unit(_owned_launchd_plist(home, tmp_path), home)
 
+    @skip_if_root
     def test_unreadable_unit_raises_clean_error(self, home: WorthlessHome, tmp_path: Path) -> None:
         unit = _owned_systemd_unit(home, tmp_path)
         unit.chmod(0o000)
@@ -843,20 +850,300 @@ class TestReportProxyHealthIntegration:
 
 
 class TestSystemdSessionUser:
-    def test_session_user_prefers_user_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("USER", "testuser")
-        monkeypatch.delenv("LOGNAME", raising=False)
+    def test_session_user_is_the_real_account_not_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Linger is checked, turned on and advised for the account that owns the
+        unit. USER/LOGNAME can name someone else after `su`, `sudo -u` or in a
+        container (security review + Bugbot, PR #734). Still never os.getlogin():
+        CI has no tty."""
+        monkeypatch.setenv("USER", "someone-else")
         getlogin = MagicMock(side_effect=OSError(25, "Inappropriate ioctl for device"))
         monkeypatch.setattr(systemd.os, "getlogin", getlogin)
-        assert systemd._session_user() == "testuser"
+        monkeypatch.setattr(pwd, "getpwuid", lambda uid: type("P", (), {"pw_name": "realuser"})())
+        assert systemd._session_user() == "realuser"
         getlogin.assert_not_called()
 
     def test_session_user_falls_back_to_pw_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("USER", raising=False)
         monkeypatch.delenv("LOGNAME", raising=False)
         monkeypatch.setattr(systemd.os, "getlogin", MagicMock(side_effect=OSError(25)))
-        monkeypatch.setattr(systemd.os, "getuid", lambda: 1000)
+        monkeypatch.setattr(systemd.os, "geteuid", lambda: 1000)
 
         fake_passwd = type("Passwd", (), {"pw_name": "runner"})()
         monkeypatch.setattr(pwd, "getpwuid", lambda uid: fake_passwd)
         assert systemd._session_user() == "runner"
+
+
+class TestSystemdPreflight:
+    """WOR-857: WSL without systemd must say how to fix it and write nothing."""
+
+    @staticmethod
+    def _binary(tmp_path: Path) -> Path:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        return binary
+
+    def test_wsl_without_systemd_names_the_real_fix(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        unit = tmp_path / "worthless-proxy.service"
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "report_proxy_health"),
+            patch("worthless.cli.platform._read_proc_1_comm", return_value="init"),
+            patch.dict("os.environ", {"WSL_DISTRO_NAME": "Ubuntu"}, clear=False),
+            pytest.raises(WorthlessError) as excinfo,
+        ):
+            systemd.install(home)
+
+        message = str(excinfo.value)
+        assert "/etc/wsl.conf" in message
+        assert "systemd=true" in message
+        assert "linger" not in message.lower(), "linger is the symptom, not the cause"
+        # Restart only this distro; `wsl --shutdown` also kills Docker Desktop.
+        assert "wsl --terminate Ubuntu" in message
+        assert "wsl --update" in message
+        # WSL stops the distro ~15 s after the last terminal closes (proven on
+        # real WSL, WOR-853); without this the service dies with the terminal.
+        assert "instanceIdleTimeout=-1" in message
+
+    def test_wsl_without_systemd_leaves_no_orphan_unit(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """The unit used to be written before linger was checked, so a failed
+        install left a file behind. Preflight runs first now."""
+        unit = tmp_path / "worthless-proxy.service"
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "report_proxy_health"),
+            patch("worthless.cli.platform._read_proc_1_comm", return_value="init"),
+            patch.dict("os.environ", {"WSL_DISTRO_NAME": "Ubuntu"}, clear=False),
+            pytest.raises(WorthlessError),
+        ):
+            systemd.install(home)
+
+        assert not unit.exists(), "failed install must not leave a unit file behind"
+
+    def test_linux_without_systemd_does_not_mention_wsl(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        unit = tmp_path / "worthless-proxy.service"
+        env = {k: v for k, v in os.environ.items() if k not in ("WSL_DISTRO_NAME", "WSL_INTEROP")}
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "report_proxy_health"),
+            patch("worthless.cli.platform._read_proc_1_comm", return_value="init"),
+            # Pin the kernel too. is_wsl() also reads it, so without this the
+            # test would FAIL for anyone running the suite on WSL — our primary
+            # platform — because their kernel genuinely says microsoft.
+            patch("worthless.cli.platform._read_kernel_osrelease", return_value="6.8.0-45-generic"),
+            patch.dict("os.environ", env, clear=True),
+            pytest.raises(WorthlessError) as excinfo,
+        ):
+            systemd.install(home)
+
+        assert "wsl.conf" not in str(excinfo.value).lower()
+
+    def test_systemd_present_installs_normally(self, home: WorthlessHome, tmp_path: Path) -> None:
+        """Guards against over-blocking: a WSL box with systemd=true is fine."""
+        unit = tmp_path / "worthless-proxy.service"
+
+        def fake_run(args: list[str], **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "Linger=yes" if args[:2] == ["loginctl", "show-user"] else "active"
+            return result
+
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "run_cmd", side_effect=fake_run),
+            patch.object(systemd, "report_proxy_health"),
+            patch("worthless.cli.platform._read_proc_1_comm", return_value="systemd"),
+            patch.dict(
+                "os.environ", {"WSL_DISTRO_NAME": "Ubuntu", "USER": "testuser"}, clear=False
+            ),
+        ):
+            systemd.install(home)
+
+        assert unit.is_file()
+
+
+class TestWslIdleShutdownCaveat:
+    """A WSL user must be told the proxy stops ~15 s after their last window.
+
+    Measured on real WSL2 (run 35055982192): with stock settings WSL stops the
+    distro on its own, and the proxy stops with it. Saying "auto-restarts"
+    without saying that is a promise the platform does not keep.
+    """
+
+    def test_wsl_success_names_the_idle_shutdown_and_the_fix(self, capsys) -> None:
+        from worthless.cli.commands.service import _print_service_banner
+
+        console = WorthlessConsole()
+        with patch("worthless.cli.commands.service.is_wsl", return_value=True):
+            _print_service_banner(console, platform="systemd", port=8787)
+        # readouterr() drains the buffer — capture ONCE, then read both streams.
+        captured = capsys.readouterr()
+        out = re.sub(r"\s+", " ", captured.out + captured.err)
+        assert "15 s" in out or "15s" in out
+        assert "instanceIdleTimeout=-1" in out
+
+    def test_plain_linux_gets_no_wsl_caveat(self, capsys) -> None:
+        from worthless.cli.commands.service import _print_service_banner
+
+        console = WorthlessConsole()
+        with patch("worthless.cli.commands.service.is_wsl", return_value=False):
+            _print_service_banner(console, platform="systemd", port=8787)
+        captured = capsys.readouterr()
+        assert "wslconfig" not in (captured.out + captured.err).lower()
+
+
+class TestFailedActivationLeavesNothingBehind:
+    """A refused install must not leave a unit that loads at next login.
+
+    Both backends write the unit file BEFORE activating it. When activation
+    failed, the file stayed: the user was told the install failed, while a unit
+    sat on disk ready to start at next login, and `detect_status` reported
+    STOPPED rather than NOT_INSTALLED. #599 fixed the sibling case (systemd
+    absent) by ordering the preflight first; this is the one that remained.
+
+    The rollback removes the file ONLY when this call created it, so a failed
+    re-install never deletes a unit that was already working.
+    """
+
+    @staticmethod
+    def _boom(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(1, ["activate"])
+
+    def test_launchd_removes_the_plist_it_just_wrote(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        plist = tmp_path / "sh.worthless.proxy.plist"
+
+        with (
+            patch.object(launchd, "plist_path", return_value=plist),
+            patch.object(launchd, "resolve_worthless_binary", return_value=binary),
+            patch.object(launchd, "run_cmd", side_effect=self._boom),
+            patch.object(launchd, "_is_loaded", return_value=False),
+            patch.object(launchd, "report_proxy_health"),
+            patch.object(launchd.os, "getuid", return_value=501),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            launchd.install(home)
+
+        assert not plist.exists(), "a failed install left a plist that loads at next login"
+
+    def test_systemd_removes_the_unit_it_just_wrote(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        unit = tmp_path / "worthless-proxy.service"
+
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=binary),
+            patch.object(systemd, "_preflight_systemd_available"),
+            patch.object(systemd, "_ensure_linger", side_effect=self._boom),
+            patch.object(systemd, "run_cmd", side_effect=self._boom),
+            patch.object(systemd, "report_proxy_health"),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            systemd.install(home)
+
+        assert not unit.exists(), "a failed install left a unit behind"
+
+    def test_a_failed_reinstall_keeps_the_unit_that_already_worked(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Rollback must not punish someone whose service was fine before."""
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        unit = tmp_path / "worthless-proxy.service"
+        unit.write_text("[Service]\nEnvironment=WORTHLESS_SERVICE_MANAGED=1\n")
+
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=binary),
+            patch.object(systemd, "_preflight_systemd_available"),
+            patch.object(systemd, "refuse_foreign_unit"),
+            patch.object(systemd, "_ensure_linger", side_effect=self._boom),
+            patch.object(systemd, "run_cmd", side_effect=self._boom),
+            patch.object(systemd, "report_proxy_health"),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            systemd.install(home)
+
+        assert unit.exists(), "rollback deleted a unit this call did not create"
+
+
+class TestRollbackSurvivesAnInterrupt:
+    """Ctrl-C during activation must not leave the unit file behind.
+
+    Review (Cursor Bugbot, 2026-10-08): the outer handler catches
+    BaseException, so KeyboardInterrupt reaches the rollback — but the teardown
+    was wrapped in `contextlib.suppress(Exception)`, which does NOT suppress
+    KeyboardInterrupt. A second interrupt landing inside that subprocess
+    skipped the unlink.
+
+    That interacts badly with the offer gate added in the same PR: a leftover
+    unit file makes every later lock treat the service as installed and never
+    offer again. So the unlink is now unconditional once rollback starts.
+    """
+
+    @staticmethod
+    def _interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    def test_launchd_unlinks_even_when_teardown_is_interrupted(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        plist = tmp_path / "sh.worthless.proxy.plist"
+
+        with (
+            patch.object(launchd, "plist_path", return_value=plist),
+            patch.object(launchd, "resolve_worthless_binary", return_value=binary),
+            patch.object(launchd, "run_cmd", side_effect=self._interrupt),
+            patch.object(launchd, "_is_loaded", return_value=False),
+            patch.object(launchd, "report_proxy_health"),
+            patch.object(launchd.os, "getuid", return_value=501),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            launchd.install(home)
+
+        assert not plist.exists(), "an interrupted rollback left the plist behind"
+
+    def test_systemd_unlinks_even_when_teardown_is_interrupted(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        unit = tmp_path / "worthless-proxy.service"
+
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=binary),
+            patch.object(systemd, "_preflight_systemd_available"),
+            patch.object(systemd, "_ensure_linger", side_effect=self._interrupt),
+            patch.object(systemd, "run_cmd", side_effect=self._interrupt),
+            patch.object(systemd, "report_proxy_health"),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            systemd.install(home)
+
+        assert not unit.exists(), "an interrupted rollback left the unit behind"

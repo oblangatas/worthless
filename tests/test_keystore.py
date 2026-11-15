@@ -6,6 +6,7 @@ All tests should fail with ImportError until the module is implemented.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import stat
@@ -15,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
+from worthless.cli.bootstrap import ensure_home
 from worthless.cli.errors import ErrorCode, WorthlessError
 
 # Import the module under test — will fail until implemented (RED phase).
@@ -327,7 +329,9 @@ class TestReadFernetKeyCascade:
             with pytest.raises(WorthlessError) as exc_info:
                 read_fernet_key(home_dir=tmp_path)
 
-        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        # worthless-6hu7: the file EXISTS, so this is a refusal, not an absence.
+        # As KEY_NOT_FOUND the first-run mint replaced the very key it names.
+        assert exc_info.value.code == ErrorCode.KEY_REFUSED
         assert "refusing" in str(exc_info.value).lower()
 
     def test_keyring_error_with_file_allowed_under_service_managed(
@@ -386,7 +390,9 @@ class TestReadFernetKeyCascade:
         with pytest.raises(WorthlessError) as exc_info:
             read_fernet_key(home_dir=tmp_path)
 
-        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        assert (
+            exc_info.value.code == ErrorCode.KEY_REFUSED
+        )  # worthless-6hu7: a key present-but-unusable is REFUSED, never 'not found'
         assert "0o600" in exc_info.value.message
 
 
@@ -453,7 +459,9 @@ class TestIpcOnlyFernetStatGate:
         ):
             read_fernet_key(home_dir=tmp_path)
 
-        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        assert (
+            exc_info.value.code == ErrorCode.KEY_REFUSED
+        )  # worthless-6hu7: a key present-but-unusable is REFUSED, never 'not found'
         assert "0o400" in exc_info.value.message
 
 
@@ -744,6 +752,8 @@ class TestMigrateFileToKeyring:
         """File exists, keyring available and empty -> migrate and return True."""
         fernet_path = tmp_path / "fernet.key"
         fernet_path.write_bytes(b"my-secret-fernet-key")
+        # 0600 like the product writes; 0644 is refused (worthless-6hu7)
+        fernet_path.chmod(0o600)
 
         with (
             patch("worthless.cli.keystore.keyring_available", return_value=True),
@@ -815,6 +825,8 @@ class TestMigrateFileToKeyring:
         migrate must return False — the key is NOT in keyring."""
         fernet_path = tmp_path / "fernet.key"
         fernet_path.write_bytes(b"my-secret-fernet-key")
+        # 0600 like the product writes; 0644 is refused (worthless-6hu7)
+        fernet_path.chmod(0o600)
 
         with (
             patch("worthless.cli.keystore.keyring_available", return_value=True),
@@ -834,6 +846,8 @@ class TestMigrateFileToKeyring:
         """After successful migration, the fernet.key file must be deleted."""
         fernet_path = tmp_path / "fernet.key"
         fernet_path.write_bytes(b"migrate-me")
+        # 0600 like the product writes; 0644 is refused (worthless-6hu7)
+        fernet_path.chmod(0o600)
 
         with (
             patch("worthless.cli.keystore.keyring_available", return_value=True),
@@ -938,3 +952,430 @@ class TestKeyringBackendEnvOverride:
             for rec in caplog.records
             if rec.levelno >= logging.INFO
         ), "Expected INFO log when env var forces null backend"
+
+
+class TestExistingKeyIsNeverDestroyed:
+    """worthless-6hu7: a key file we refuse to READ must never be WRITTEN over.
+
+    Reproduced on main: with a fresh home (no marker, no shard rows), a
+    fernet.key at the wrong mode made ``_validate_fernet_file`` raise
+    KEY_NOT_FOUND, ``_first_run_keystore`` read that as "no key here", and the
+    mint destroyed the original — overwritten without a keyring, deleted as
+    "stale" with one, and followed through a symlink to a file outside the home.
+    """
+
+    @staticmethod
+    def _fresh_home(tmp_path: Path, *, symlink: bool) -> tuple[Path, Path, bytes]:
+        original = b"ORIGINAL-KEY-BYTES-do-not-destroy-0123456789ab"
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        key = base / "fernet.key"
+        if symlink:
+            victim = tmp_path / "outside.key"
+            victim.write_bytes(original)
+            victim.chmod(0o600)
+            key.symlink_to(victim)
+            return base, victim, original
+        key.write_bytes(original)
+        key.chmod(0o644)  # wrong mode -> refused for reading
+        return base, key, original
+
+    def test_wrong_mode_key_survives_bootstrap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No keyring (container-like): the file must not be overwritten."""
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        base, target, original = self._fresh_home(tmp_path, symlink=False)
+
+        with contextlib.suppress(WorthlessError):
+            ensure_home(base_dir=base)
+
+        assert target.read_bytes() == original, "an unreadable key must never be replaced"
+
+    def test_wrong_mode_key_survives_bootstrap_with_keyring(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With a keyring: the file must not be deleted as 'stale' either."""
+        monkeypatch.delenv("WORTHLESS_KEYRING_BACKEND", raising=False)
+        base, target, original = self._fresh_home(tmp_path, symlink=False)
+
+        with (
+            patch("worthless.cli.keystore.keyring_available", return_value=True),
+            patch("worthless.cli.keystore.keyring.set_password"),
+            contextlib.suppress(WorthlessError),
+        ):
+            ensure_home(base_dir=base)
+
+        assert target.exists(), "an unreadable key must never be deleted as stale"
+        assert target.read_bytes() == original
+
+    def test_symlinked_key_does_not_write_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A symlink at fernet.key must not become a write to its target."""
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        base, victim, original = self._fresh_home(tmp_path, symlink=True)
+
+        with contextlib.suppress(WorthlessError):
+            ensure_home(base_dir=base)
+
+        assert victim.read_bytes() == original, "must not write through a symlink"
+
+    def test_genuinely_absent_key_still_mints(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression direction: a real first run must still create a key."""
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        base = tmp_path / ".worthless"
+
+        home = ensure_home(base_dir=base)
+
+        assert home.fernet_key_path.exists(), "first run must still mint a key"
+
+
+class TestDoctorAdviceForRefusedKey:
+    """worthless-6hu7: refusing the key must not route users to a destructive fix.
+
+    doctor's broken-install path recommends ``worthless uninstall --force``,
+    which is correct for an unrecoverable install and catastrophic for a key
+    that merely has the wrong mode — the install is intact and a chmod fixes it.
+    """
+
+    def test_doctor_text_mode_does_not_recommend_uninstall(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        from worthless.cli.commands.doctor import _doctor_run
+
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        key = base / "fernet.key"
+        key.write_bytes(b"ORIGINAL")
+        key.chmod(0o644)
+        monkeypatch.setenv("WORTHLESS_HOME", str(base))
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+
+        with contextlib.suppress(SystemExit, WorthlessError):
+            _doctor_run(fix=False, yes=True, dry_run=False)
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+
+        assert "uninstall --force" not in out, "a chmod-able key must not advise uninstall"
+        assert "chmod" in out, f"the advice must name the repair; got:\n{out}"
+
+
+class TestRefusedKeyJsonAndFallback:
+    """The machine-facing path and the genuinely-broken path (worthless-6hu7)."""
+
+    @staticmethod
+    def _refused_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        key = base / "fernet.key"
+        key.write_bytes(b"ORIGINAL")
+        key.chmod(0o644)
+        monkeypatch.setenv("WORTHLESS_HOME", str(base))
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        return base
+
+    def test_json_mode_reports_refusal_not_uninstall(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        import json as _json
+
+        from worthless.cli.commands.doctor.runner import _doctor_run_json
+
+        self._refused_home(tmp_path, monkeypatch)
+
+        with contextlib.suppress(SystemExit, WorthlessError):
+            _doctor_run_json(fix=False, dry_run=False)
+        payload = _json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+        ids = [c.get("check_id") for c in payload.get("checks", [])]
+        assert "fernet_key_refused" in ids, payload
+        assert "uninstall --force" not in _json.dumps(payload)
+
+    def test_unreadable_install_still_gets_the_unrecoverable_advice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Regression direction: a genuinely broken install keeps its old advice."""
+        from worthless.cli.commands.doctor import _report_unopenable_install
+        from worthless.cli.console import get_console
+
+        exc = WorthlessError(ErrorCode.SHARD_STORAGE_FAILED, "db is toast")
+
+        _report_unopenable_install(exc, get_console())
+
+        captured = capsys.readouterr()
+        assert "uninstall --force" in captured.out + captured.err
+
+    def test_foreign_owned_key_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A key owned by someone else is refused, not replaced."""
+        base = self._refused_home(tmp_path, monkeypatch)
+        key = base / "fernet.key"
+        key.chmod(0o600)  # mode is fine; ownership is not
+        not_me = os.geteuid() + 1  # resolve BEFORE patching, or the lambda recurses
+        monkeypatch.setattr("worthless.cli.keystore.os.geteuid", lambda: not_me)
+
+        with pytest.raises(WorthlessError) as excinfo:
+            read_fernet_key(home_dir=base)
+
+        assert excinfo.value.code is ErrorCode.KEY_REFUSED
+        assert key.read_bytes() == b"ORIGINAL"
+
+    def test_json_mode_refusal_after_home_opens(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """The home opens, then the key read is refused — same honest report.
+
+        Two independent sites can surface the refusal in JSON mode (home
+        resolution and the key read); both must avoid the destructive advice.
+        """
+        import json as _json
+
+        from worthless.cli.commands.doctor import runner as _runner
+
+        base = tmp_path / ".worthless"
+        monkeypatch.setenv("WORTHLESS_HOME", str(base))
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+
+        def _refuse(*_a: object, **_k: object) -> bytearray:
+            raise WorthlessError(ErrorCode.KEY_REFUSED, "refused: chmod 0600 the key")
+
+        monkeypatch.setattr(_runner, "read_fernet_key", _refuse)
+        with contextlib.suppress(SystemExit, WorthlessError):
+            _runner._doctor_run_json(fix=False, dry_run=False)
+        payload = _json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+        assert "fernet_key_refused" in [c.get("check_id") for c in payload.get("checks", [])]
+        assert "uninstall --force" not in _json.dumps(payload)
+
+
+class TestWriteNeverFollowsSymlink:
+    """worthless-6hu7: pin O_NOFOLLOW directly, not through an upstream guard.
+
+    The end-to-end symlink test passes because KEY_REFUSED stops the mint
+    earlier — so deleting O_NOFOLLOW from _write_key_file would leave it green.
+    This exercises the writer itself.
+    """
+
+    def test_write_key_file_refuses_a_symlink(self, tmp_path: Path) -> None:
+        from worthless.cli.keystore import _write_key_file
+
+        outside = tmp_path / "outside.key"
+        outside.write_bytes(b"NOT-THE-KEY")
+        outside.chmod(0o600)
+        home = tmp_path / ".worthless"
+        home.mkdir(mode=0o700)
+        (home / "fernet.key").symlink_to(outside)
+
+        with pytest.raises(OSError):
+            _write_key_file(b"new-key-bytes", home)
+
+        assert outside.read_bytes() == b"NOT-THE-KEY", "a symlink must not redirect the write"
+
+    def test_migration_does_not_promote_a_refused_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The keyring migration must honour the same refusal (second route)."""
+        home = tmp_path / ".worthless"
+        home.mkdir(mode=0o700)
+        key = home / "fernet.key"
+        key.write_bytes(b"ORIGINAL-KEY")
+        key.chmod(0o644)  # refused
+        monkeypatch.setattr("worthless.cli.keystore.keyring_available", lambda: True)
+        monkeypatch.setattr("worthless.cli.keystore.keyring.get_password", lambda *_a, **_k: None)
+        promoted: list[str] = []
+        monkeypatch.setattr(
+            "worthless.cli.keystore.keyring.set_password",
+            lambda _s, _u, v: promoted.append(v),
+        )
+
+        assert migrate_file_to_keyring(home_dir=home) is False
+        assert promoted == [], "a refused key must never reach the keyring"
+        assert key.exists(), "the refused file must not be deleted"
+        assert key.read_bytes() == b"ORIGINAL-KEY"
+
+
+class TestKeyringFailureNeverMintsOverPresentKey:
+    """worthless-6hu7 / Bugbot: a locked keychain must not make a present key absent.
+
+    read_fernet_key raised KEY_NOT_FOUND when the keyring probe threw and a
+    fernet.key existed — and the first-run mint reads KEY_NOT_FOUND as
+    "nothing to lose", so a cancelled keychain prompt was enough to replace or
+    unlink a key that was sitting right there.
+    """
+
+    def test_keyring_failure_with_a_file_present_is_refused_not_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        home = tmp_path / ".worthless"
+        home.mkdir(mode=0o700)
+        key = home / "fernet.key"
+        key.write_bytes(b"PRESENT-KEY")
+        key.chmod(0o600)
+        monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.setattr("worthless.cli.keystore.keyring_available", lambda: True)
+
+        def _locked(*_a: object, **_k: object) -> str:
+            raise RuntimeError("keychain locked / prompt cancelled")
+
+        monkeypatch.setattr("worthless.cli.keystore.keyring.get_password", _locked)
+
+        with pytest.raises(WorthlessError) as excinfo:
+            read_fernet_key(home_dir=home)
+
+        assert excinfo.value.code is ErrorCode.KEY_REFUSED, (
+            "a present key behind a locked keyring must be REFUSED, never 'not found' — "
+            "KEY_NOT_FOUND is what the first-run mint treats as 'nothing to lose'"
+        )
+        assert key.read_bytes() == b"PRESENT-KEY"
+
+
+class TestUninstallDoesNotWipeARefusedKey:
+    """worthless-6hu7 / Bugbot: uninstall must not offer --force for a chmod-able key."""
+
+    def test_refused_key_is_not_reported_as_unrecoverable(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        import typer
+
+        from worthless.cli.commands.uninstall import _handle_broken_repo
+        from worthless.cli.console import get_console
+
+        exc = WorthlessError(ErrorCode.KEY_REFUSED, "chmod 0600 /home/you/.worthless/fernet.key")
+
+        console = get_console()  # built outside raises(): only the handler may exit
+
+        with pytest.raises(typer.Exit):
+            _handle_broken_repo(console, exc, force=False)
+
+        out = capsys.readouterr()
+        text = out.out + out.err
+        assert "--force" not in text, "never offer a wipe for a key a chmod would save"
+        assert "chmod 0600" in text, f"the repair must be shown; got:\n{text}"
+
+    def test_genuinely_broken_install_still_offers_force(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Regression direction: the unrecoverable path keeps its advice."""
+        import typer
+
+        from worthless.cli.commands.uninstall import _handle_broken_repo
+        from worthless.cli.console import get_console
+
+        exc = WorthlessError(ErrorCode.SHARD_STORAGE_FAILED, "db is toast")
+
+        console = get_console()  # built outside raises(): only the handler may exit
+
+        with pytest.raises(typer.Exit):
+            _handle_broken_repo(console, exc, force=False)
+
+        out = capsys.readouterr()
+        assert "--force" in out.out + out.err
+
+
+class TestStrictContainerModeEndToEnd:
+    """worthless-6hu7, the bead's own scenario: WORTHLESS_FERNET_IPC_ONLY=1.
+
+    Under the container's strict mode only 0o400 is accepted, so a key at
+    0o600 — perfectly normal anywhere else — is refused. Before the fix that
+    refusal read as "no key" and ensure_home minted over it. This drives the
+    real bootstrap, not the validator alone.
+    """
+
+    @pytest.mark.parametrize("mode", [0o600, 0o644, 0o440])
+    def test_fresh_home_never_replaces_a_refused_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+    ) -> None:
+        monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        monkeypatch.delenv("WORTHLESS_SIDECAR_SOCKET", raising=False)
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        key = base / "fernet.key"
+        key.write_bytes(b"ORIGINAL-STRICT-MODE-KEY")
+        key.chmod(mode)
+
+        with pytest.raises(WorthlessError) as excinfo:
+            ensure_home(base_dir=base)
+
+        assert excinfo.value.code is ErrorCode.KEY_REFUSED
+        assert "chmod 0400" in excinfo.value.message
+        assert key.read_bytes() == b"ORIGINAL-STRICT-MODE-KEY", "must not mint over it"
+
+
+class TestStaleFileDoesNotLockOutAWorkingKeychain:
+    """worthless-6hu7 / brutus: the refusal must stop REPLACEMENT, not lock users out.
+
+    A stale fernet.key at the wrong mode next to a healthy keychain key used to
+    fall through to the keychain. KEY_REFUSED made it escape ensure_home, so
+    every command — lock, up, scan, uninstall --force — failed with WRTLS-121
+    for an install whose real key was fine.
+    """
+
+    def test_keychain_key_wins_and_the_stale_file_is_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        good = b"GOOD-KEYCHAIN-KEY-good-keychain-key-0123456789="
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        (base / ".bootstrapped").write_text("")
+        stale = base / "fernet.key"
+        stale.write_bytes(b"STALE-FILE")
+        stale.chmod(0o644)  # refused
+        monkeypatch.delenv("WORTHLESS_KEYRING_BACKEND", raising=False)
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+        for target in ("worthless.cli.keystore", "worthless.cli.bootstrap"):
+            monkeypatch.setattr(f"{target}.keyring_available", lambda: True)
+        monkeypatch.setattr(
+            "worthless.cli.keystore.keyring.get_password", lambda *_a, **_k: good.decode()
+        )
+
+        home = ensure_home(base_dir=base)
+
+        assert bytes(home.fernet_key) == good, "the working keychain key must be used"
+        assert stale.read_bytes() == b"STALE-FILE", "the stale file is left exactly as it was"
+
+
+class TestKeyWritesAreAlwaysOwnerOnly:
+    """brutus: O_CREAT's mode only applies to new files; truncation kept 0644."""
+
+    def test_rewriting_a_loose_file_ends_at_0600(self, tmp_path: Path) -> None:
+        from worthless.cli.keystore import _write_key_file
+
+        home = tmp_path / ".worthless"
+        home.mkdir(mode=0o700)
+        key = home / "fernet.key"
+        key.write_bytes(b"old")
+        key.chmod(0o644)
+
+        _write_key_file(b"new-key", home)
+
+        assert stat.S_IMODE(key.stat().st_mode) == 0o600, (
+            "a written key must never stay world-readable"
+        )
+
+    def test_failing_chmod_never_leaves_an_empty_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bugbot: O_TRUNC empties the file at open — a chmod that fails BEFORE
+        the write (drvfs, bind-mounts) used to leave a zero-byte key."""
+        from worthless.cli.keystore import _write_key_file
+
+        home = tmp_path / ".worthless"
+        home.mkdir(mode=0o700)
+        key = home / "fernet.key"
+        key.write_bytes(b"old")
+        key.chmod(0o644)
+
+        def _reject(*_a: object, **_k: object) -> None:
+            raise PermissionError(1, "Operation not permitted")
+
+        monkeypatch.setattr("worthless.cli.keystore.os.fchmod", _reject)
+        _write_key_file(b"new-key", home)
+
+        assert key.read_bytes() == b"new-key", "the key must be on disk even if chmod fails"

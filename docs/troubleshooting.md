@@ -151,11 +151,18 @@ mid-revoke that deleted the DB row before unlinking shard_a.
 worthless doctor --fix
 ```
 
-**What it does:** unlinks the stranded files. Shard A alone is
-unusable without the matching Shard B row in the DB, so the file is
-guaranteed dead.
+**What it does:** removes a file only when its key has no Shard B row
+left in the DB either. Shard A alone is then unusable, so the file is
+dead.
 
-**Risk:** none.
+If the key's Shard B row is still there, the file is **kept** and
+reported as "probably still recoverable": only the key's link was
+removed (the v0.3.7–v0.3.14 doctor bug did this), and both halves still
+exist. Don't delete it and don't uninstall; an upcoming release
+re-links it. If doctor can't read the DB, it deletes nothing.
+
+**Risk:** none for files it removes. It never removes half of a key
+that can still be recovered.
 
 ## fernet_drift
 

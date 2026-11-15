@@ -532,6 +532,40 @@ class TestHeaderStripping:
             assert not key.lower().startswith("x-worthless-")
 
 
+class TestOnlyOwnCredentialHeaderForwarded:
+    """WOR-979: each adapter forwards exactly one credential header — its own.
+
+    A client may send shard-A as ``Authorization: Bearer`` and as
+    ``x-api-key``. Each adapter overwrites only its own credential header, so
+    the other one used to reach the provider too, still carrying shard-A.
+    """
+
+    SHARD_A = "sk-shard-a-not-the-real-key"
+
+    @pytest.mark.parametrize(
+        ("adapter", "own_header", "own_value"),
+        [
+            (OpenAIAdapter(), "authorization", "Bearer {key}"),
+            (AnthropicAdapter(), "x-api-key", "{key}"),
+        ],
+        ids=["openai", "anthropic"],
+    )
+    def test_other_credential_header_is_dropped(
+        self, adapter, own_header: str, own_value: str, sample_api_key: bytearray
+    ) -> None:
+        req = adapter.prepare_request(
+            body=b"{}",
+            headers={"Authorization": f"Bearer {self.SHARD_A}", "X-Api-Key": self.SHARD_A},
+            api_key=sample_api_key,
+            base_url="https://upstream.example/v1",
+        )
+
+        assert not [k for k, v in req.headers.items() if self.SHARD_A in v]
+        credential_headers = {k.lower() for k in req.headers} & {"authorization", "x-api-key"}
+        assert credential_headers == {own_header}
+        assert req.headers[own_header] == own_value.format(key=sample_api_key.decode())
+
+
 # ---------------------------------------------------------------------------
 # worthless-8rqs Phase 5: per-enrollment base_url
 # ---------------------------------------------------------------------------

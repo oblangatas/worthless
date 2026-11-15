@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
 import os
 import re
+import shlex
 import signal
 import socket
 import stat
 import subprocess  # nosec B404
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import NamedTuple, NoReturn
@@ -27,6 +31,12 @@ import typer
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
+from worthless.cli.commands.service import _backend, _print_service_banner, launchd, systemd
+from worthless.cli.commands.service._common import (
+    ServiceState,
+    current_platform_backend_name,
+    preflight_service_install,
+)
 from worthless.cli.commands.scan import (
     SCAN_TIME_BUDGET_S,
     _format_code_findings_human,
@@ -39,19 +49,28 @@ from worthless.cli.process import (
     resolve_port,
 )
 from worthless.cli.console import WorthlessConsole, get_console
+from worthless.cli.platform import _in_container, is_wsl
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
+from worthless.cli.sentinel import is_partial, read_sentinel
 from worthless.cli.dotenv_rewriter import (
+    EnvSnapshot,
+    KeyWouldSurvive,
+    copies_left_behind,
+    is_writable_value,
+    read_env_snapshot,
     rewrite_env_keys,
     scan_env_keys,
 )
 from worthless.cli.errors import (
     ErrorCode,
+    SignalInterrupt,
     UnsafeReason,
     UnsafeRewriteRefused,
     WorthlessError,
     error_boundary,
     sanitize_exception,
 )
+from worthless.cli.key_check import KEY_FIX, refuse_a_key_that_opens_no_locked_key
 from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix, is_oauth_token
 from worthless.cli.log_redaction import _redact
 from worthless._flags import fernet_ipc_only_enabled
@@ -79,7 +98,7 @@ from worthless.openclaw.unshardable_credentials import (
     detect_unshardable_credentials,
     detection_caveats,
 )
-from worthless.storage.repository import ShardRepository, StoredShard
+from worthless.storage.repository import BaseUrlRestore, ShardRepository, StoredShard
 
 logger = logging.getLogger(__name__)
 
@@ -839,7 +858,9 @@ async def _pass1_db_writes(
                 raise WorthlessError(
                     ErrorCode.SHARD_STORAGE_FAILED,
                     f"Alias {alias!r} predates format-preserving split. "
-                    "Run `worthless unlock --all` then re-lock this .env.",
+                    f"Run `worthless unlock --alias {shlex.quote(alias)} "
+                    f"--env {shlex.quote(env_str)}`, then "
+                    f"`worthless lock --env {shlex.quote(env_str)}` again.",
                 )
             stored_decrypted = await repo.decrypt_shard(db_shard)
             verify_payload = bytearray(value.encode("utf-8"))
@@ -999,47 +1020,236 @@ async def _pass1_db_writes(
             sr.zero()
 
 
+def _plan_base_url_lines(
+    planned: list[_PlannedUpdate], keys_only: bool, existing_env_keys: set[str]
+) -> dict[str, tuple[_PlannedUpdate, bool]]:
+    """Each ``*_BASE_URL`` line lock writes → (key it routes, whether it already exists)."""
+    if keys_only:
+        return {}
+    # When multiple keys share the same base_url_var slot (e.g. both
+    # OPENAI_API_KEY and API_KEY derive OPENAI_BASE_URL), the canonical
+    # <PREFIX>_API_KEY name wins regardless of file order. Without this,
+    # a non-canonical key's alias can claim the slot and the canonical
+    # key's shard-A gets routed to the wrong alias → 401. (worthless-sb8v)
+    slot_winner: dict[str, _PlannedUpdate] = {}
+    for p in planned:
+        if not p.base_url_var:
+            continue
+        existing = slot_winner.get(p.base_url_var)
+        canonical_var = p.base_url_var[: -len("_BASE_URL")] + "_API_KEY"
+        if existing is None or p.var_name == canonical_var:
+            slot_winner[p.base_url_var] = p
+
+    key_vars = {p.var_name for p in planned}
+    lines: dict[str, tuple[_PlannedUpdate, bool]] = {}
+    for slot, p in slot_winner.items():
+        if slot in existing_env_keys:
+            lines[slot] = (p, True)
+        elif slot not in key_vars:
+            lines[slot] = (p, False)
+    return lines
+
+
+def _restore_record(
+    slot: str, snapshot: EnvSnapshot, base_url_slots: set[str], key_vars: set[str]
+) -> BaseUrlRestore:
+    """What unlock writes back into *slot*: the value as written, else as parsed.
+
+    As written keeps ``${GATEWAY}/v1`` unexpanded, unless it refers to another
+    ``*_BASE_URL`` line lock rewrites, directly or through other lines: put
+    back during a partial unlock,
+    ``${OPENAI_BASE_URL}`` would expand to a still-locked key's proxy URL and
+    send the real key there, so the value it has now goes back instead
+    (WOR-1026: let unlock choose). A reference to a key variable stays as
+    written: it expands to shard-A while locked and to the key after unlock,
+    and neither a key typed into the line nor one expanded from a reference
+    may reach the record. A line that defaults
+    to itself, ``${SLOT:-...}``, reads the shell, not a line. A value that
+    holds a key, or that neither form can write back, is marked unsaved, so
+    unlock removes the line and says so (WOR-1042); a value the rewriter
+    refuses would make every unlock of this ``.env`` fail (WOR-1027: validate
+    against the quotes it goes into). The warnings show even with ``--quiet``:
+    this is the last moment the user still has the value.
+    """
+    name = _oc_audit.sanitise_for_message(slot)
+    raw = snapshot.raw.get(slot)
+    if raw is not None and snapshot.names_reached(raw) & (base_url_slots - {slot}):
+        get_console().print_file_note(
+            f"{name} refers to another line lock rewrites, so unlock will put back "
+            "the value it has now, not the reference."
+        )
+        raw = None
+    value = raw if raw is not None else snapshot.parsed.get(slot) or ""
+    if any((key := snapshot.parsed.get(var)) and key in value for var in key_vars):
+        # The record is MAC-tagged, not encrypted, so it never holds a key,
+        # whether typed into the line or expanded from a reference.
+        get_console().print_file_note(
+            f"{name}: lock won't save this value, because it holds one of your keys, "
+            "so unlock will remove the line. Set it again by hand after you unlock."
+        )
+        return BaseUrlRestore(var=slot, original=None, unsaved=True)
+    if raw is not None or is_writable_value(value):
+        return BaseUrlRestore(var=slot, original=value)
+    get_console().print_file_note(
+        f"{name}: lock can't save this value for unlock to put back (it has a quote, "
+        "a space before #, or whitespace at one end), so unlock will remove the line. "
+        "Set it again by hand after you unlock."
+    )
+    return BaseUrlRestore(var=slot, original=None, unsaved=True)
+
+
+async def _record_base_url_restores(
+    repo: ShardRepository,
+    env_str: str,
+    planned: list[_PlannedUpdate],
+    base_url_lines: dict[str, tuple[_PlannedUpdate, bool]],
+    snapshot: EnvSnapshot,
+) -> None:
+    """WOR-1013: record on each key's enrollment the line lock writes and what it replaces.
+
+    Runs before ``_batch_rewrite``, so a lock that dies after the rewrite still
+    left unlock what it needs to put a user's own line back. The values come
+    from the snapshot pass-1 validated, and the rewrite refuses a file that
+    changed since, so they are the values lock overwrites.
+    """
+    if not planned:
+        return
+    key_vars = {p.var_name for p in planned}
+    slots = set(base_url_lines)
+    records = {
+        slot: _restore_record(slot, snapshot, slots, key_vars)
+        for slot, (_, existed) in base_url_lines.items()
+        if existed
+    }
+    slot_of = {p: slot for slot, (p, _existed) in base_url_lines.items()}
+    # One key under two names has two rows, and unlock reads either one
+    # (WOR-1018), so every row of the key a line routes carries its record.
+    slot_of_alias = {p.alias: slot for p, slot in slot_of.items()}
+    restores = []
+    for p in planned:
+        slot = slot_of.get(p) or slot_of_alias.get(p.alias)
+        # No record: lock adds the line, or writes none for this key.
+        record = (records.get(slot) if slot else None) or BaseUrlRestore(var=slot, original=None)
+        restores.append((p.alias, p.var_name, p.shard_a.decode("utf-8"), record))
+    if await repo.record_base_url_restores(env_str, restores) != len(restores):
+        # A row pass-1 just wrote is gone (known cause: WOR-1017's cleanup).
+        # Rewriting now would leave a shard-A in the .env that no row can
+        # open, so stop while pass-1 can still unwind.
+        raise WorthlessError(
+            ErrorCode.SHARD_STORAGE_FAILED,
+            "Lock lost track of a key it was protecting, so it stopped before changing "
+            "your .env, which is unchanged. One known cause: a key you replaced is still "
+            "in the same .env under another name. Move or delete that copy, then run "
+            "`worthless lock` again.",
+        )
+
+
 def _batch_rewrite(
     env_path: Path,
     planned: list[_PlannedUpdate],
-    keys_only: bool,
-    existing_env_keys: set[str],
-) -> None:
-    """One ``safe_rewrite`` call for every planned update + BASE_URL changes."""
+    base_url_lines: dict[str, tuple[_PlannedUpdate, bool]],
+    snapshot: EnvSnapshot,
+) -> dict[str, str]:
+    """One ``safe_rewrite`` call for every planned update + BASE_URL changes.
+
+    Refused if the ``.env`` changed since *snapshot*: pass-1 and the BASE_URL
+    records describe that file. Returns each ``*_BASE_URL`` written, with its
+    proxy URL.
+    """
     updates: dict[str, str] = {p.var_name: p.shard_a.decode("utf-8") for p in planned}
     additions: dict[str, str] = {}
-    if not keys_only:
-        # When multiple keys share the same base_url_var slot (e.g. both
-        # OPENAI_API_KEY and API_KEY derive OPENAI_BASE_URL), the canonical
-        # <PREFIX>_API_KEY name wins regardless of file order. Without this,
-        # a non-canonical key's alias can claim the slot and the canonical
-        # key's shard-A gets routed to the wrong alias → 401. (worthless-sb8v)
-        slot_winner: dict[str, _PlannedUpdate] = {}
-        for p in planned:
-            if not p.base_url_var:
-                continue
-            existing = slot_winner.get(p.base_url_var)
-            canonical_var = p.base_url_var[: -len("_BASE_URL")] + "_API_KEY"
-            if existing is None or p.var_name == canonical_var:
-                slot_winner[p.base_url_var] = p
+    proxy_urls: dict[str, str] = {}
+    for slot, (p, existed) in base_url_lines.items():
+        proxy_urls[slot] = _proxy_base_url(p.alias)
+        if existed:
+            updates[slot] = proxy_urls[slot]
+        else:
+            additions[slot] = proxy_urls[slot]
 
-        for slot, p in slot_winner.items():
-            local_proxy = _proxy_base_url(p.alias)
-            if slot in existing_env_keys:
-                updates[slot] = local_proxy
-            elif slot not in updates:
-                additions[slot] = local_proxy
-                sys.stderr.write(
-                    f"worthless: added {slot}={local_proxy} to {env_path} (was missing)\n"
-                )
-                sys.stderr.flush()
+    try:
+        rewrite_env_keys(
+            env_path,
+            updates,
+            additions=additions or None,
+            expected_baseline_sha256=snapshot.sha256,
+            must_remove={p.var_name: snapshot.parsed.get(p.var_name) or "" for p in planned},
+            _hook_before_replace=_build_verify_hook(planned),
+        )
+    except KeyWouldSurvive as exc:
+        # Backstop for the pre-flight check in _lock_keys, on the exact bytes:
+        # never "protected" with a readable copy of a key left in the file.
+        raise _key_copies_refused(exc.names) from None
+    return proxy_urls
 
-    rewrite_env_keys(
-        env_path,
-        updates,
-        additions=additions or None,
-        _hook_before_replace=_build_verify_hook(planned),
+
+def _key_copies_refused(names: list[str]) -> WorthlessError:
+    """WRTLS-112: a key lock is replacing would stay readable on another line (WOR-1048)."""
+    shown = [_oc_audit.sanitise_for_message(n) for n in names]
+    return WorthlessError(
+        ErrorCode.INVALID_INPUT,
+        f"Lock stopped before changing your .env: it holds another copy of "
+        f"{', '.join(shown)} as plain text on a line lock won't replace, such as a quoted "
+        f"name ('{shown[0]}'=...), a comment, or another variable's value. Delete that copy, "
+        "then run `worthless lock` again. Your .env is unchanged.",
     )
+
+
+def _note_added_lines(
+    env_path: Path,
+    base_url_lines: dict[str, tuple[_PlannedUpdate, bool]],
+    proxy_urls: dict[str, str],
+    snapshot: EnvSnapshot,
+) -> None:
+    """Say which ``*_BASE_URL`` lines lock added.
+
+    Only after the commit mark: a refused rewrite added nothing, and a stderr
+    that fails must not unwind rows the rewritten ``.env`` needs. Best-effort:
+    a broken pipe must not skip the OpenClaw steps that follow either.
+    """
+    with contextlib.suppress(OSError):
+        for slot, (_p, existed) in base_url_lines.items():
+            if not existed:
+                why = _why_lock_added(slot, snapshot)
+                sys.stderr.write(
+                    f"worthless: added {slot}={proxy_urls[slot]} to {env_path} ({why})\n"
+                )
+        sys.stderr.flush()
+
+
+def _why_lock_added(slot: str, snapshot: EnvSnapshot) -> str:
+    if slot not in snapshot.parsed:
+        return "was missing"
+    if snapshot.parsed[slot] is None:
+        return "had no value"
+    return "lock can't edit the line you have for it"
+
+
+def _warn_unread_base_url_lines(env_path: Path, proxy_urls: dict[str, str]) -> None:
+    """Warn for each line lock wrote that python-dotenv doesn't read as its proxy URL.
+
+    The rewriter and python-dotenv can disagree on which line sets a name: a
+    later bare ``NAME``, a quoted ``'NAME'=...``, or another variable's quoted
+    value can hide the line lock wrote (WOR-1041). WOR-1045 tracks refusing.
+    Runs after the commit and only warns: the rewritten ``.env`` needs its rows,
+    and a broken stderr must not skip the OpenClaw steps that follow.
+    """
+    if not proxy_urls:
+        return
+    try:
+        read = read_env_snapshot(env_path).parsed
+    except (OSError, UnsafeRewriteRefused):
+        return
+    for slot, url in proxy_urls.items():
+        if read.get(slot) != url:
+            name = _oc_audit.sanitise_for_message(slot)
+            # Rich answers a broken pipe with SystemExit(1); this note isn't worth that.
+            with contextlib.suppress(OSError, SystemExit):
+                get_console().print_file_note(
+                    f"{name}: python-dotenv doesn't read the proxy address lock wrote there "
+                    f"(another {name} line, or another variable's quoted value, hides it), "
+                    "so your app's calls won't reach the proxy and will fail. Fix the .env "
+                    "so lock's line is the one read."
+                )
 
 
 async def _compensating_unwind(
@@ -1091,7 +1301,7 @@ def _fire_synthetic_request(host: str, port: int, alias: str) -> bool:
     # ``check_proxy_health`` call at ``cli/process.py``.
     url = f"http://{host}:{port}/_bind_probe/{alias}"  # NOSONAR
     try:
-        with httpx.Client(timeout=1.0) as client:
+        with httpx.Client(timeout=1.0, trust_env=False) as client:
             client.head(url)
     except (httpx.HTTPError, OSError):
         return False
@@ -1690,7 +1900,6 @@ def _finalise_openclaw_success(
     quiet: bool,
     home: WorthlessHome,
     *,
-    proxy_host: str,
     reload_since_ts: datetime,
 ) -> int:
     """WOR-658: finalise the success branch of ``_apply_openclaw``.
@@ -1759,7 +1968,13 @@ def _finalise_openclaw_success(
     # this checks proxy reachability + per-alias acknowledgment, NOT that
     # OpenClaw's rewrite is a working route (see _classify_bind_per_alias); the
     # live e2e tests prove actual routing.
-    bind_confirmation = _confirm_bind(confirmed_planned, host=proxy_host, port=resolve_port(None))
+    # Probe loopback, not WORTHLESS_PROXY_HOST: /_bind_probe answers loopback
+    # peers only (proxy/app.py), and lock enrolls shard B into the LOCAL DB,
+    # so the only proxy that can serve this alias is the local one. In Docker
+    # the advertised host is e.g. "proxy", which reaches the same proxy over a
+    # non-loopback interface → counter never ticks → false exit 91 on a
+    # working deployment (WOR-510). Same as ``worthless verify``.
+    bind_confirmation = _confirm_bind(confirmed_planned, host="127.0.0.1", port=resolve_port(None))
     # Bind-fail is a partial-success state at the trust layer:
     # lock-core wrote the .env + DB, but the OpenClaw config isn't
     # routing. ``openclaw="failed"`` (paired with ``status="partial"``)
@@ -1878,6 +2093,271 @@ def _resolve_adoption_policy(
     return AdoptionPolicy(managed_aliases=managed_aliases, adopt_unrecognized=decision)
 
 
+# 128 + the signal: Ctrl-C 130, SIGTERM (docker stop) 143, closed terminal 129.
+_INTERRUPTED_EXITS = frozenset({130, 143, 129})
+_EXIT_OPENCLAW_UNFINISHED = 73  # EX_CANTCREAT, as for any partial OpenClaw failure
+_STILL_ROLLING_BACK = "Still rolling back so nothing is left half-locked. One moment."
+_INTERRUPTED = (
+    "Interrupted. Your .env keys are locked, but OpenClaw setup was cut short,\n"
+    "so OpenClaw may still be using your real key until it is finished.\n"
+    "   Repair it:  worthless doctor\n"
+    "   Roll back:  worthless unlock"
+)
+_INTERRUPTED_NO_OPENCLAW = "Interrupted. Your .env keys are locked."
+# What a signal does at each point of the lock (see _LockInterrupts).
+_RAISE, _CANCEL, _DEFER, _OFF = "raise", "cancel", "defer", "off"
+
+
+def _leave_dead_terminal(ttys: list[int]) -> None:
+    """The terminal hung up: send its output fds to /dev/null (worthless-v9gg).
+
+    Every later write to a closed terminal fails with EIO, down to Python's own
+    stdout flush at exit, which turned the 129 into 120. *ttys* was taken when
+    the lock armed: after a hang-up Linux no longer reports the fd as a tty.
+    Captured or redirected output is never in it, so it is left alone.
+    """
+    if not ttys:
+        return
+    null = os.open(os.devnull, os.O_WRONLY)
+    try:
+        for fd in ttys:
+            os.dup2(null, fd)
+    finally:
+        os.close(null)
+
+
+class _LockInterrupts:
+    """What SIGINT, SIGTERM and SIGHUP do while ``_lock_keys`` runs (WOR-646, 3clz).
+
+    Armed once, before the pre-flight audit, and moved through phases:
+
+    * ``RAISE`` — synchronous stretches with nothing to unwind or nothing that
+      may be unwound: the pre-flight audit and proxy probe (nothing written yet,
+      worthless-595v), and the OpenClaw steps after the commit. A signal raises
+      ``KeyboardInterrupt`` right there; ``signal.signal`` also makes blocking
+      calls (``flock``, ``sleep``, ``input``) return EINTR so it lands mid-call.
+    * ``CANCEL`` — Pass-1's awaited DB writes: the first signal cancels the task
+      and the rows unwind. Later presses never cut that rollback short (user
+      ruling 2026-10-08); they are answered instead.
+    * ``DEFER`` — the ``.env`` rewrite: the signal is only recorded, and answered
+      once the atomic rename is done (worthless-f1xx). A press recorded in
+      Pass-1's last synchronous stretch is answered entering this phase, while
+      the rows can still unwind.
+    * ``OFF`` — disarmed.
+
+    The exit code is ``128 + signum`` (worthless-dnp9). After the commit the
+    rewritten ``.env`` needs the rows, so nothing rolls them back (worthless-im3x).
+    Answers use the console's ``--quiet``-proof channels.
+    """
+
+    def __init__(
+        self,
+        task: asyncio.Task | None,
+        planned: list[_PlannedUpdate],
+        console: WorthlessConsole,
+    ) -> None:
+        """Start disarmed; *planned* is the live list Pass-1 fills."""
+        self.task = task
+        self.planned = planned
+        self.console = console
+        self.phase = _OFF
+        self.signum: int | None = None  # the first signal received decides the exit code
+        self.answered = False
+        self.committed = False
+        self.signals: list[int] = []
+        self.ttys: list[int] = []  # stdout/stderr fds that were a terminal at arm time
+
+    def arm(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Install for SIGINT, SIGTERM and SIGHUP, except any the caller ignores.
+
+        A no-op off the main thread (the MCP tool's worker), where no signal is
+        delivered and ``add_signal_handler`` refuses (worthless-dqzj).
+        """
+        self.phase = _RAISE  # before installing: a signal mid-arm is recorded, not dropped
+        self.ttys = [fd for fd in (1, 2) if os.isatty(fd)]
+        wanted = [signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", None)]
+        # A signal the caller ignores (nohup, a backgrounded job, a supervisor)
+        # stays ignored: arming would turn it back on for good.
+        for sig in [
+            s for s in wanted if s is not None and signal.getsignal(s) is not signal.SIG_IGN
+        ]:
+            try:
+                loop.add_signal_handler(sig, self, sig)
+            except (NotImplementedError, RuntimeError, ValueError):
+                continue  # Windows loop, or not the main thread
+            # asyncio installed a no-op Python handler; the C handler still wakes
+            # the loop, so CANCEL keeps working while this one can raise and record.
+            signal.signal(sig, self._on_raw)
+            self.signals.append(sig)
+
+    def disarm(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Restore the default dispositions. Idempotent."""
+        self.phase = _OFF
+        while self.signals:
+            with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+                loop.remove_signal_handler(self.signals.pop())
+
+    def _on_raw(self, signum: int, _frame: object) -> None:
+        """Python-level handler: record every signal; raise one in RAISE."""
+        if self.phase == _OFF:
+            return
+        if signum == getattr(signal, "SIGHUP", None):
+            _leave_dead_terminal(self.ttys)
+        if self.signum is None:
+            self.signum = signum
+        # Raise only inside the lock's own task: a KeyboardInterrupt in the event
+        # loop's internals would escape the unwind and orphan rows (WOR-646).
+        if self.phase == _RAISE and not self.answered and asyncio.current_task() is self.task:
+            self.answered = True
+            raise KeyboardInterrupt
+
+    def __call__(self, _signum: int = signal.SIGINT) -> None:
+        """Loop-dispatched handler: cancels during CANCEL, explains during a rollback."""
+        if self.task is None or self.phase != _CANCEL:
+            return
+        if self.answered or self.committed:  # never cancel twice, never after the commit
+            if self.planned and not self.committed:
+                with contextlib.suppress(OSError):
+                    self.console.print_notice(_STILL_ROLLING_BACK)
+            return
+        self.answered = True
+        self.task.cancel()
+
+    def enter(self, phase: str) -> None:
+        """Move to *phase*; entering RAISE or DEFER answers a signal still pending."""
+        pending = self.signum is not None and not self.answered
+        self.phase = phase
+        if pending and phase in (_RAISE, _DEFER):
+            self.answered = True
+            raise KeyboardInterrupt
+
+    def rolling_back(self) -> None:
+        """A rollback started: a press now explains instead of cancelling it (3em7)."""
+        self.answered = True
+        self.phase = _CANCEL
+
+    @contextlib.contextmanager
+    def raising(self) -> Iterator[None]:
+        """RAISE for the duration (the OpenClaw steps), then back to recording."""
+        self.enter(_RAISE)
+        try:
+            yield
+        finally:
+            self.phase = _DEFER
+
+    @property
+    def exit_code(self) -> int:
+        """``128 + signum`` of the signal that stopped the lock."""
+        return 128 + (self.signum or signal.SIGINT)
+
+
+def _dead_terminal_ok(interrupted: bool) -> contextlib.AbstractContextManager:
+    """After a closed terminal (SIGHUP) printing fails; keep the 129, not exit 1 (v9gg)."""
+    return contextlib.suppress(OSError) if interrupted else contextlib.nullcontext()
+
+
+def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
+    """Final word on a lock whose OpenClaw stage did not finish; exits *code*.
+
+    Ctrl-C (130) already explained itself in :func:`_openclaw_steps`. Ctrl-C and a
+    refused post-flight (87 from :func:`_openclaw_audit_postflight`) synced the
+    Fernet key there; :func:`_apply_openclaw`'s failures still skip that sync.
+    """
+    if code not in _INTERRUPTED_EXITS:
+        console.print_failure(
+            "LOCK FAILED — .env key is split but OpenClaw integration did not complete.\n"
+            "Your agent traffic is NOT gated through the Worthless proxy.\n"
+            "Run `worthless doctor` to diagnose, `worthless unlock` to roll back."
+        )
+    raise typer.Exit(code=code)
+
+
+_UNFINISHED_DETAIL = {
+    "openclaw.interrupted": "interrupted before OpenClaw setup finished",
+    "openclaw.postflight_refused": "OpenClaw files changed mid-lock; setup was refused",
+}
+
+
+def _record_openclaw_unfinished(
+    home: WorthlessHome, planned: list[_PlannedUpdate], code: str
+) -> None:
+    """Keys are locked but OpenClaw is not wired: ``worthless status`` must say so."""
+    _write_lock_sentinel(
+        home,
+        status="partial",
+        openclaw="failed",
+        alias_count=len(planned),
+        events=({"code": code, "level": "error", "detail": _UNFINISHED_DETAIL[code]},),
+    )
+
+
+def _openclaw_left_unfinished(home: WorthlessHome) -> bool:
+    """Did the last lock stop before OpenClaw setup finished? Codes: _UNFINISHED_DETAIL."""
+    sentinel = read_sentinel(home.base_dir)
+    if sentinel is None or not is_partial(sentinel):
+        return False
+    return any(e.get("code") in _UNFINISHED_DETAIL for e in sentinel.get("events") or [])
+
+
+def _openclaw_steps(
+    planned: list[_PlannedUpdate],
+    *,
+    gate: _oc_audit.AuditGateHandle | None,
+    proxy_base_url: str,
+    interrupts: _LockInterrupts,
+    openclaw_present: bool,
+    managed_aliases: set[str] | None,
+    adopt: bool,
+    console,  # noqa: ANN001 — Console type is opaque from this layer
+    quiet: bool,
+    home: WorthlessHome,
+) -> int:
+    """Post-flight re-audit + adoption prompt + OpenClaw wiring, answering Ctrl-C.
+
+    Returns the exit code. All synchronous, all after the commit: the re-audit
+    (a subprocess, retried once), the adoption prompt, worthless's own lock on
+    openclaw.json (unbounded; OpenClaw itself never takes it) and a reload
+    wait of up to 15s. Ctrl-C stops them, keeps the keys (see
+    :class:`_LockInterrupts`), records the same partial/failed sentinel as any
+    OpenClaw failure, and exits ``128 + signum``. Without
+    OpenClaw there is nothing unfinished to report (worthless-y4fn).
+    """
+    try:
+        with interrupts.raising():
+            if gate is not None:
+                try:
+                    _openclaw_audit_postflight(gate, managed_aliases, proxy_base_url)
+                except typer.Exit as refused:
+                    if refused.exit_code != 87:
+                        raise
+                    _record_openclaw_unfinished(home, planned, "openclaw.postflight_refused")
+                    _sync_fernet_after_lock(home)  # keys stay locked: keep them usable
+                    return refused.exit_code
+            adoption_policy = _resolve_adoption_policy(
+                planned,
+                managed_aliases=managed_aliases,
+                adopt=adopt,
+                console=console,
+                quiet=quiet,
+            )
+            return _apply_openclaw(planned, console, quiet, home, adoption_policy)
+    except (KeyboardInterrupt, typer.Abort):
+        # click's confirm (the adoption prompt) turns Ctrl-C and Ctrl-D into
+        # typer.Abort, a RuntimeError the caller's rollback would otherwise catch.
+        # Record first, print last: after a closed terminal (SIGHUP) the print
+        # fails, and the record and Fernet sync must not depend on it (v9gg).
+        if openclaw_present:
+            _record_openclaw_unfinished(home, planned, "openclaw.interrupted")
+        else:
+            _write_lock_sentinel(home, status="ok", openclaw="absent", alias_count=0, events=())
+        # The keys ARE locked, so keep them usable by a service-run proxy. Done
+        # here, while a further press is still inert, so it cannot be skipped.
+        _sync_fernet_after_lock(home)
+        with contextlib.suppress(OSError):
+            console.print_failure(_INTERRUPTED if openclaw_present else _INTERRUPTED_NO_OPENCLAW)
+        return interrupts.exit_code
+
+
 def _apply_openclaw(
     planned: list[_PlannedUpdate],
     console,  # noqa: ANN001 — Console type is opaque from this layer
@@ -1920,7 +2400,7 @@ def _apply_openclaw(
     # Also honour WORTHLESS_PROXY_HOST so all-container Docker deployments
     # write the Docker-internal service name (e.g. "proxy") instead of
     # 127.0.0.1, which is unreachable inside the openclaw container.
-    _proxy_host, proxy_base_url = _openclaw_proxy_base_url()
+    _, proxy_base_url = _openclaw_proxy_base_url()
     # WOR-796: the *_API_KEY var name holding shard-A for each alias, so
     # scrub_agent_auth_stores() can point the agent-cache SecretRef at it.
     env_var_by_alias = {p.alias: p.var_name for p in planned}
@@ -1963,7 +2443,6 @@ def _apply_openclaw(
             console,
             quiet,
             home,
-            proxy_host=_proxy_host,
             reload_since_ts=reload_since_ts,
         )
 
@@ -2014,6 +2493,11 @@ _CI_ENV_VARS = (
     "TEAMCITY_VERSION",  # TeamCity (attaches a real PTY — must be checked explicitly)
     "CIRCLECI",  # CircleCI (sets CI=true too, belt-and-suspenders)
 )
+
+
+# Set in the environment of commands an AI coding agent runs (verified for
+# Claude Code: CLAUDECODE=1, AI_AGENT). Used only by the service offer.
+_AGENT_ENV_VARS = ("CLAUDECODE", "AI_AGENT")
 
 
 def _scan_prompt_is_tty() -> bool:
@@ -2182,8 +2666,12 @@ def _print_lock_result(
     home_base_dir: Path,
     openclaw_failed: bool = False,
     oauth_skipped: bool = False,
+    interrupted: bool = False,
 ) -> None:
     """Emit the post-lock user-facing summary (called only when quiet=False).
+
+    ``interrupted`` (worthless-3clz): the user pressed Ctrl-C, so skip the
+    optional source scan — it can run 30s and end in a "Scan now?" prompt.
 
     ``openclaw_failed`` (WOR-779 honesty): on a partial OpenClaw failure the
     ``.env`` IS split, but agent traffic is NOT gated — so the derived verdict
@@ -2230,7 +2718,9 @@ def _print_lock_result(
             )
         if relock_count:
             noun = "key" if relock_count == 1 else "keys"
-            console.print_success(f"[OK] {relock_count} {noun} still protected.")
+            # Locked, yes; "protected" only when the verdict was earned (worthless-im3x).
+            state = "still protected" if verdict_earned else "still locked in .env"
+            console.print_success(f"[OK] {relock_count} {noun} {state}.")
         env_home = os.environ.get("WORTHLESS_HOME")
         if env_home and home_base_dir.resolve() != (Path.home() / ".worthless").resolve():
             typer.echo(
@@ -2250,7 +2740,8 @@ def _print_lock_result(
         # worthless-7jn2: same for a skipped OAuth token still in the file.
         if verdict_earned:
             console.print_hint("Check anytime with `worthless status`.")
-        _maybe_prompt_code_scan(Path.cwd())
+        if not interrupted:
+            _maybe_prompt_code_scan(Path.cwd())
     elif oauth_skipped:
         # worthless-7jn2: keys WERE found here. They were classified as Claude
         # Code OAuth tokens and deliberately skipped above — the file is not
@@ -2344,13 +2835,11 @@ def _openclaw_audit_postflight(
     Raises typer.Exit(87) if new blocking findings appeared since pre-flight,
     indicating the OpenClaw config was modified between the two audit passes.
 
-    Recovery note: if this raises, ``_batch_rewrite`` has already committed
-    shard-A values to the .env, but ``_compensating_unwind`` (in the caller's
-    except block) rewinds the DB rows. The .env may therefore contain shard-A
-    values while DB rows are gone. Re-running ``worthless lock`` recovers: the
-    next pre-flight will see the same shard-A values as a PLAINTEXT_FOUND for
-    ``worthless-openai`` (allowlisted) and proceed normally once the user
-    fixes the OpenClaw plaintext that caused this exit.
+    Runs after ``_batch_rewrite`` committed shard-A to the .env, so the keys
+    stay locked (worthless-im3x: unwinding deleted shard-B and lost the key):
+    :func:`_openclaw_steps` reports the 87 like any OpenClaw failure and
+    OpenClaw is never wired. Recovery: fix the plaintext, then
+    ``worthless unlock`` and ``worthless lock``.
     """
     post_hashes = _oc_audit.snapshot_hashes(gate.pre_hashes.keys())
     if post_hashes == gate.pre_hashes:
@@ -2377,7 +2866,8 @@ def _openclaw_audit_postflight(
         detail = _oc_audit.format_gate_error_message(post_class.blocking)
         typer.echo(
             f"worthless lock: state changed between pre-flight and post-flight "
-            f"— new plaintext detected, re-run worthless lock.\n{detail}",
+            f"— new plaintext detected. Fix it, then run `worthless unlock` and "
+            f"`worthless lock`.\n{detail}",
             err=True,
         )
         raise typer.Exit(code=87)
@@ -2389,6 +2879,8 @@ def _sync_fernet_after_lock(home: WorthlessHome) -> None:
     Skipped under Docker IPC-only (sidecar owns ``fernet.key``; proxy cannot
     overwrite) and when on-disk ``fernet.key`` disagrees with the canonical
     key already loaded for this lock (WOR-464 — never auto-pick a side).
+    Also skipped when ``WORTHLESS_FERNET_KEY`` is set: a shell's key must never
+    become the service's key, or every older project goes dark (saaz).
 
     Uses the ``home.fernet_key`` cache so lock does not fire a second
     keyring read (HF2 contract).
@@ -2397,13 +2889,24 @@ def _sync_fernet_after_lock(home: WorthlessHome) -> None:
         return
     if fernet_ipc_only_enabled():
         return
+    shell_key = os.environ.get("WORTHLESS_FERNET_KEY", "").strip().encode()
+    if shell_key:
+        # Quiet unless it matters: no file means no service key to diverge from.
+        on_disk = _fernet_file_bytes(home.fernet_key_path)
+        if on_disk is not None and not hmac.compare_digest(on_disk, shell_key):
+            get_console().print_warning(
+                "WORTHLESS_FERNET_KEY differs from the background service's key file, "
+                "so the service can't use keys locked with it. The file was left alone."
+            )
+        return
 
     key = home.fernet_key
     try:
         on_disk = _fernet_file_bytes(home.fernet_key_path)
-        if on_disk is not None and on_disk != key:
-            logger.debug(
-                "Skipping post-lock fernet sync — file bytes differ from canonical key (WOR-464)"
+        if on_disk is not None and not hmac.compare_digest(on_disk, key):
+            get_console().print_warning(
+                "fernet.key differs from the key this lock used, so the background "
+                f"service may not unlock these keys. {KEY_FIX}"
             )
             return
         sync_fernet_for_launchd(home.base_dir, key=key)
@@ -2425,16 +2928,20 @@ def _print_unshardable_credentials_warning(console: WorthlessConsole) -> None:
         console.print_warning(
             f"[WARN] {n} OAuth/token credential{'s' if n != 1 else ''} found that lock "
             "CANNOT protect (the proxy is not load-bearing for these) — run "
-            "`worthless doctor --fix` to clear the ones you don't need."
+            "`worthless doctor --json` to review them before clearing any you don't need."
         )
     # WOR-797 (Gap 1, second surface): a Linux/WSL scan cannot inspect the two
     # macOS-keychain surfaces. Surface that caveat here — exactly as `doctor`
     # does — so a partial scan on the target platform never reads as a clean
-    # bill of health. Runs on both the has-keys and zero-keys paths.
+    # bill of health. Runs on both the has-keys and zero-keys paths. Only
+    # `doctor --json` runs this check; plain `doctor` can say "No issues found."
     caveats = detection_caveats() + probe_caveats
     if caveats:
         console.print_hint(
-            "[NOTE] " + "; ".join(caveats) + " — run `worthless doctor` for a full check."
+            "[NOTE] "
+            + "; ".join(caveats)
+            + " — run `worthless doctor --json` to list the logins it finds"
+            " and the places it couldn't check."
         )
 
 
@@ -2466,6 +2973,8 @@ def _lock_keys(
     # matches the up.py/wrap.py placement (after validation, before key
     # material touches memory).
     disable_core_dumps()
+    # saaz: never seal with a key that opens none of the existing locked keys.
+    refuse_a_key_that_opens_no_locked_key(home)
 
     # c5kc-61tw: same fail-closed contract the CLI scan uses — bounded per-file
     # read + wall-clock deadline so a hostile / oversized source file can't hang
@@ -2555,8 +3064,7 @@ def _lock_keys(
         oauth_skipped: bool = False
 
     async def _lock_async() -> _LockResult:
-        from dotenv import dotenv_values  # noqa: PLC0415 — local import keeps test surface tight
-
+        """Pass-1, the .env rewrite, then the OpenClaw steps, with Ctrl-C armed throughout."""
         async with open_repo(home) as repo:
             await repo.initialize()
 
@@ -2582,6 +3090,11 @@ def _lock_keys(
             env_str = str(env_path.resolve())
             all_enrollments = await repo.list_enrollments()
 
+            # Snapshot .env BEFORE scanning it: pass-1 pulls *_BASE_URL values from
+            # the snapshot, and the rewrite refuses a file that changed since this
+            # read, so an edit after it (even one the scan below sees) is caught
+            # instead of locking a key from a different file than the one rewritten.
+            snapshot = read_env_snapshot(env_path)
             raw_scanned = scan_env_keys(env_path)
 
             # WOR-837: a Claude Code OAuth token (sk-ant-oat/ort) collides with
@@ -2615,15 +3128,19 @@ def _lock_keys(
                 env_str,
             )
             if not scanned:
+                # Every key is already locked. If the last lock never finished
+                # OpenClaw setup (refused or interrupted), it still hasn't: never
+                # call that "protected" (worthless-im3x). Not any partial status:
+                # a finished lock that left an entry un-adopted is partial too.
+                unfinished = _openclaw_left_unfinished(home)
                 return _LockResult(
                     total=len(raw_scanned),
                     fresh_count=0,
-                    openclaw_exit=0,
+                    openclaw_exit=_EXIT_OPENCLAW_UNFINISHED if unfinished else 0,
                     oauth_skipped=bool(oauth_skipped),
                 )
 
-            # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
-            env_values = dict(dotenv_values(env_path))
+            env_values = snapshot.parsed
 
             # worthless-ftmg: refuse to lock an already-locked .env BEFORE any
             # state mutation. The legitimate idempotent re-lock case (same key
@@ -2654,113 +3171,68 @@ def _lock_keys(
                 (var_name, value, provider_override or detected_provider)
                 for var_name, value, detected_provider in scanned
             ]
-            existing_env_keys = set(env_values.keys())
-
-            # #210 OpenClaw secrets-audit gate: pre-flight runs BEFORE any
-            # DB/.env write so blocking plaintext findings abort the lock with
-            # zero side effects (gate-before-write). Orthogonal to the
-            # sidecar-IPC repo above — placement here is load-bearing.
-            _oc_gate = _openclaw_audit_preflight(managed_aliases, oc_proxy_base_url)
-
-            # F7 (WOR-648 / WOR-621 AC5): proxy health gate, alongside the
-            # audit gate above — BEFORE any DB or .env write. Gated on
-            # ``_openclaw_integration.detect().present`` because non-OpenClaw
-            # users follow a documented ``worthless lock`` → ``worthless wrap``
-            # flow: lock writes ``*_BASE_URL`` pointing at the chosen port,
-            # then ``wrap`` binds that same port and forwards (the v0.3.4
-            # magic-moment contract, pinned by
-            # tests/user_flows/test_wrap_magic_moment.py). Requiring the proxy
-            # up at lock time would break that journey. For OpenClaw users
-            # the gate IS load-bearing: if the proxy is down, the lock
-            # would write the OpenClaw provider's baseUrl at a dead proxy
-            # and OpenClaw would route there permanently — a half-locked
-            # state that strands the key. Aborting here keeps .env, DB, and
-            # ~/.openclaw/openclaw.json byte-for-byte unchanged.
-            #
-            # KNOWN LIMITATION: ``detect()`` can false-negative on hosts
-            # that actually do have OpenClaw (foreign-owned ~/.openclaw in
-            # Docker shared-vol mode, non-standard home, container off at
-            # lock time). Tracked separately — harden detect() or add a
-            # raw-fs fallback so the gate fires even when detect() misses.
-            if _openclaw_integration.detect().present:
-                _probe_port = resolve_port(None)
-                if not check_proxy_health(_probe_port)["healthy"]:
-                    raise WorthlessError(
-                        ErrorCode.PROXY_NOT_RUNNING,
-                        f"Worthless proxy is not responding on port {_probe_port}. "
-                        "Nothing was changed — your .env, database, and "
-                        "~/.openclaw/openclaw.json are untouched. Start the proxy "
-                        "(`worthless up`) and re-run `worthless lock`.",
-                    )
+            # WOR-1048: refuse before any DB write. After pass-1 the unwind
+            # would delete the rows of a key this .env had already locked.
+            replaced = {var_name for var_name, _value, _provider in candidates}
+            if not keys_only:
+                replaced |= {_derive_base_url_var(v, prov) for v, _value, prov in candidates}
+            left_behind = copies_left_behind(
+                env_path, {var_name: value for var_name, value, _p in candidates}, replaced
+            )
+            if left_behind:
+                raise _key_copies_refused(left_behind)
 
             planned: list[_PlannedUpdate] = []
 
-            # WOR-646: arm SIGINT/SIGTERM BEFORE Pass-1's first DB write so an
-            # interrupt mid-lock unwinds the rows it already created instead of
-            # orphaning them. We use the asyncio-native ``add_signal_handler``
-            # (NOT ``signal.signal``) because we're inside ``asyncio.run``: a
-            # C-level handler would race the loop's wakeup fd and the
-            # cancellation wouldn't be seen until an unrelated wakeup — the same
-            # reason ``sidecar/__main__.py`` uses ``add_signal_handler``. The
-            # handler cancels THIS task, so a ``CancelledError`` surfaces at the
-            # next ``await`` inside the try below and is caught alongside
-            # ordinary failures, routing through ``_compensating_unwind``.
-            #
-            # On 3.11+ ``asyncio.Runner`` installs its own SIGINT handler; our
-            # ``add_signal_handler`` cleanly overrides it for the lock window
-            # and never touches SIGTERM (which the Runner ignores) — so this is
-            # the only uniform SIGINT+SIGTERM path across 3.10–3.13.
+            # WOR-646 / worthless-595v: arm SIGINT, SIGTERM and SIGHUP before the
+            # pre-flight audit, so a press there is answered (it is synchronous:
+            # on 3.11+ asyncio.Runner's own handler only cancelled the task, the
+            # audit child died and was retried, and the lock exited 87). The
+            # phases are documented on _LockInterrupts. ``finally`` disarms.
             loop = asyncio.get_running_loop()
-            this_task = asyncio.current_task()
-            installed_signals: list[int] = []
-            interrupted = False
-
-            def _request_unwind() -> None:
-                # One-shot: cancel on the FIRST signal only. The handler stays
-                # installed (but inert) through the rollback below, so a mashed
-                # Ctrl-C lands here as a no-op instead of re-cancelling the task
-                # — or, worse, hitting the default SIGINT disposition that
-                # ``remove_signal_handler`` would restore and raising
-                # KeyboardInterrupt mid-unwind, orphaning the rows we're
-                # deleting. Disarm happens only in ``finally``.
-                nonlocal interrupted
-                if interrupted or this_task is None:
-                    return
-                interrupted = True
-                this_task.cancel()
-
-            def _disarm_signals() -> None:
-                # Idempotent: pop so calling from both the except clause AND the
-                # finally (or a partial install) is a safe no-op the second time.
-                while installed_signals:
-                    sig = installed_signals.pop()
-                    try:
-                        loop.remove_signal_handler(sig)
-                    except (NotImplementedError, RuntimeError, ValueError):
-                        pass
-
-            for _sig in (signal.SIGINT, signal.SIGTERM):
-                try:
-                    loop.add_signal_handler(_sig, _request_unwind)
-                except (NotImplementedError, RuntimeError):
-                    # Signal-driven cancellation is unavailable here:
-                    #   * Windows ProactorEventLoop (NotImplementedError), or
-                    #   * a non-main-thread event loop (RuntimeError) — e.g. the
-                    #     MCP ``worthless_lock`` tool runs ``_lock_keys`` via
-                    #     ``run_in_executor`` (mcp/server.py).
-                    # Python delivers SIGINT/SIGTERM ONLY to the process main
-                    # thread, so a worker-thread lock receives NO interrupt at all
-                    # — it is NOT true that "default SIGINT → KeyboardInterrupt
-                    # still applies" off the main thread. On these paths
-                    # crash-safety rests on the atomic Pass-1 transaction
-                    # (WOR-646 Part 2), not the signal handler. Real mid-lock
-                    # interrupt safety for the MCP path is tracked in worthless-dqzj.
-                    # Record only the signals that actually installed so cleanup
-                    # can't leak a handler when one of the two raises.
-                    continue
-                installed_signals.append(_sig)
+            on_signal = _LockInterrupts(asyncio.current_task(), planned, console)
 
             try:
+                on_signal.arm(loop)  # inside: a signal right after arming still gets 128 + signum
+                # #210 OpenClaw secrets-audit gate: pre-flight runs BEFORE any
+                # DB/.env write so blocking plaintext findings abort the lock with
+                # zero side effects (gate-before-write). Orthogonal to the
+                # sidecar-IPC repo above — placement here is load-bearing.
+                _oc_gate = _openclaw_audit_preflight(managed_aliases, oc_proxy_base_url)
+
+                # F7 (WOR-648 / WOR-621 AC5): proxy health gate, alongside the
+                # audit gate above — BEFORE any DB or .env write. Gated on
+                # ``_openclaw_integration.detect().present`` because non-OpenClaw
+                # users follow a documented ``worthless lock`` → ``worthless wrap``
+                # flow: lock writes ``*_BASE_URL`` pointing at the chosen port,
+                # then ``wrap`` binds that same port and forwards (the v0.3.4
+                # magic-moment contract, pinned by
+                # tests/user_flows/test_wrap_magic_moment.py). Requiring the proxy
+                # up at lock time would break that journey. For OpenClaw users
+                # the gate IS load-bearing: if the proxy is down, the lock
+                # would write the OpenClaw provider's baseUrl at a dead proxy
+                # and OpenClaw would route there permanently — a half-locked
+                # state that strands the key. Aborting here keeps .env, DB, and
+                # ~/.openclaw/openclaw.json byte-for-byte unchanged.
+                #
+                # KNOWN LIMITATION: ``detect()`` can false-negative on hosts
+                # that actually do have OpenClaw (foreign-owned ~/.openclaw in
+                # Docker shared-vol mode, non-standard home, container off at
+                # lock time). Tracked separately — harden detect() or add a
+                # raw-fs fallback so the gate fires even when detect() misses.
+                oc_present = _openclaw_integration.detect().present
+                if oc_present:
+                    _probe_port = resolve_port(None)
+                    if not check_proxy_health(_probe_port)["healthy"]:
+                        raise WorthlessError(
+                            ErrorCode.PROXY_NOT_RUNNING,
+                            f"Worthless proxy is not responding on port {_probe_port}. "
+                            "Nothing was changed — your .env, database, and "
+                            "~/.openclaw/openclaw.json are untouched. Start the proxy "
+                            "(`worthless up`) and re-run `worthless lock`.",
+                        )
+
+                on_signal.enter(_CANCEL)  # Pass-1 awaits: a press cancels and unwinds
                 if not quiet:
                     # HF2 UX: name the keys so the user knows exactly which env
                     # vars are being touched — prior "Protecting N key(s)..."
@@ -2772,6 +3244,12 @@ def _lock_keys(
                 await _pass1_db_writes(
                     repo, candidates, env_str, token_budget_daily, planned, env_values
                 )
+                base_url_lines = _plan_base_url_lines(planned, keys_only, snapshot.assigned)
+                await _record_base_url_restores(repo, env_str, planned, base_url_lines, snapshot)
+                # A press after Pass-1's last await was never dispatched: answer it
+                # now, while the rows can still unwind. Then record-only until the
+                # rename is done (worthless-f1xx).
+                on_signal.enter(_DEFER)
                 if not planned:
                     return _LockResult(
                         total=0,
@@ -2779,23 +3257,28 @@ def _lock_keys(
                         openclaw_exit=0,
                         oauth_skipped=bool(oauth_skipped),
                     )
-                _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
-                if _oc_gate is not None:
-                    _openclaw_audit_postflight(_oc_gate, managed_aliases, oc_proxy_base_url)
+                proxy_urls = _batch_rewrite(env_path, planned, base_url_lines, snapshot)
+                on_signal.committed = True  # .env now needs these rows: never unwind on a press
+                _note_added_lines(env_path, base_url_lines, proxy_urls, snapshot)
+                _warn_unread_base_url_lines(env_path, proxy_urls)
                 # Phase 2.b: OpenClaw magic. Per L1 in
                 # engineering/research/openclaw/WOR-431-phase-2-spec.md, this
                 # NEVER rolls back lock-core success. Per L2 (revised 2026-05-08
                 # by the verification gauntlet): detected+failed returns non-zero
                 # openclaw_exit so the caller can raise typer.Exit(openclaw_exit)
                 # AFTER lock-core's .env/DB writes are fully committed.
-                adoption_policy = _resolve_adoption_policy(
+                openclaw_exit = _openclaw_steps(
                     planned,
+                    gate=_oc_gate,
+                    proxy_base_url=oc_proxy_base_url,
+                    interrupts=on_signal,
+                    openclaw_present=oc_present,
                     managed_aliases=managed_aliases,
                     adopt=adopt,
                     console=console,
                     quiet=quiet,
+                    home=home,
                 )
-                openclaw_exit = _apply_openclaw(planned, console, quiet, home, adoption_policy)
                 fresh_count = sum(1 for p in planned if p.was_fresh_enroll)
                 return _LockResult(
                     total=len(planned),
@@ -2804,38 +3287,33 @@ def _lock_keys(
                     oauth_skipped=bool(oauth_skipped),
                 )
             except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
-                # The signal handler is one-shot and stays installed here, so the
-                # rollback below runs uninterrupted by a mashed Ctrl-C; ``finally``
-                # disarms it. The interrupt types are caught EXPLICITLY (not a
-                # bare ``except BaseException``) so ``SystemExit`` keeps
-                # propagating. ``typer.Exit`` is a ``RuntimeError`` (an
-                # ``Exception``), so — exactly as before this change — it is
-                # caught and DOES unwind: the pre-existing post-flight recovery
-                # contract (``_openclaw_audit_postflight`` rewinds the DB rows
-                # after a ``.env`` commit for a recoverable re-lock). The
-                # ``isinstance`` guard below converts ONLY a genuine signal
-                # cancellation to ``KeyboardInterrupt``, leaving other exit codes
-                # (``typer.Exit`` 73/87, ``WorthlessError``) intact.
-                if planned:
+                # Never roll back after the commit: the rewritten .env needs these
+                # rows (worthless-im3x). _LockInterrupts' handler stays installed so
+                # a mashed Ctrl-C cannot cut the rollback short, and ``finally``
+                # disarms it. The interrupt types are caught
+                # EXPLICITLY (not a bare ``except BaseException``) so ``SystemExit``
+                # keeps propagating. A signal (a cancel or a raise) leaves as
+                # ``SignalInterrupt(signum)``; other exit codes (``typer.Exit``
+                # 73/87, ``WorthlessError``) pass through intact.
+                if planned and not on_signal.committed:
+                    on_signal.rolling_back()  # a press now explains, never cancels (3em7)
                     unwind_errors = await _compensating_unwind(repo, planned)
                     if unwind_errors:
                         console.print_warning(
                             f"Database may contain {len(unwind_errors)} stale row(s); "
-                            "run `worthless unlock --all` to reconcile."
+                            f"run `worthless lock --env {shlex.quote(env_str)}` again to finish."
                         )
-                if isinstance(exc, asyncio.CancelledError):
-                    # Surface the signal-driven cancellation as a conventional
-                    # interrupt so the CLI exits cleanly instead of dumping an
-                    # asyncio ``CancelledError`` traceback — ``error_boundary``
-                    # handles ``Exception`` but not ``BaseException``.
-                    raise KeyboardInterrupt from None
+                if isinstance(exc, asyncio.CancelledError | KeyboardInterrupt):
+                    # Surface a signal as a conventional interrupt carrying its
+                    # number, so error_boundary exits 128 + signum (dnp9) instead
+                    # of dumping an asyncio ``CancelledError`` traceback.
+                    raise SignalInterrupt(on_signal.signum or signal.SIGINT) from None
                 raise
             finally:
-                # Idempotent backstop: removes handlers on the paths the except
-                # clause never runs (success, or an uncaught ``typer.Exit``).
-                _disarm_signals()
+                # The only disarm, and it comes after the wipe.
                 for p in planned:
-                    p.zero()
+                    p.zero()  # before disarming: a late press cannot skip the wipe
+                on_signal.disarm(loop)
 
     result = asyncio.run(_lock_async())
     relock_count = result.total - result.fresh_count
@@ -2849,15 +3327,27 @@ def _lock_keys(
             env_path.chmod(current & ~(stat.S_IRWXG | stat.S_IRWXO))
 
     if not quiet:
-        _print_lock_result(
-            console,
-            result.fresh_count,
-            relock_count,
-            env_path,
-            home.base_dir,
-            openclaw_failed=bool(result.openclaw_exit),
-            oauth_skipped=result.oauth_skipped,
-        )
+        with _dead_terminal_ok(result.openclaw_exit in _INTERRUPTED_EXITS):
+            _print_lock_result(
+                console,
+                result.fresh_count,
+                relock_count,
+                env_path,
+                home.base_dir,
+                openclaw_failed=bool(result.openclaw_exit),
+                oauth_skipped=result.oauth_skipped,
+                interrupted=result.openclaw_exit in _INTERRUPTED_EXITS,
+            )
+        # WOR-853: same guard as the "Next:" hint above — only offer when the
+        # lock actually succeeded. A partial failure has no business installing
+        # anything.
+        #
+        # The post-lock Fernet sync runs FIRST, just below, and the order is
+        # load-bearing: the offer is an optional extra, and anything it raised
+        # used to skip WOR-748's sync entirely on a lock that had committed.
+        if result.fresh_count and not result.openclaw_exit:
+            _sync_fernet_after_lock(home)
+            _offer_service_after_lock(console, home=home, port=resolve_port(None))
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
     # detected on this host AND the integration stage failed, the user is
@@ -2870,13 +3360,12 @@ def _lock_keys(
     # LOCK FAILED line disambiguates the mixed [FAIL]+[OK] output so the
     # user cannot mistake a partial failure for overall success (WOR-551).
     if result.openclaw_exit:
-        console.print_failure(
-            "LOCK FAILED — .env key is split but OpenClaw integration did not complete.\n"
-            "Your agent traffic is NOT gated through the Worthless proxy.\n"
-            "Run `worthless doctor` to diagnose, `worthless unlock` to roll back."
-        )
-        raise typer.Exit(code=result.openclaw_exit)
+        _exit_openclaw_failed(console, result.openclaw_exit)
 
+    # Also here, for the paths the branch above does not cover: a quiet lock, a
+    # re-lock with no fresh keys (a failed OpenClaw stage exited above). Syncing twice
+    # is harmless — it copies the same canonical key and no-ops when the bytes
+    # already match.
     _sync_fernet_after_lock(home)
     return result.fresh_count + relock_count
 
@@ -2894,6 +3383,7 @@ def _enroll_single(
     """
     if not _ALIAS_RE.match(alias):
         raise WorthlessError(ErrorCode.SCAN_ERROR, f"Invalid alias: {alias!r}")
+    refuse_a_key_that_opens_no_locked_key(home)  # saaz
 
     try:
         prefix = detect_prefix(key, provider)
@@ -2947,6 +3437,214 @@ def _enroll_single(
 
     console = get_console()
     console.print_success(f"Enrolled {alias} ({provider}).")
+
+
+def install_service_for_offer(home: WorthlessHome, *, port: int) -> bool | None:
+    """Install the background service. Separate so the offer can stub it in tests.
+
+    Returns whether lingering is on (systemd), or None (launchd).
+    """
+    preflight_service_install(home)
+    return _backend().install(home, port=port)
+
+
+def _offer_declined_hint() -> str:
+    """What to print when the offer is declined, or never asked.
+
+    WSL gets different words for the same reason `_offer_question()` does: the
+    plain version promises the proxy keeps running after the terminal closes,
+    and WSL does not honour that. It matters more here than in the question —
+    on a piped lock this hint is the ONLY thing printed, and on a declined
+    prompt it lands one line under the honest question and contradicts it.
+    (Review, defect 11, 2026-10-08.)
+    """
+    if is_wsl():
+        return (
+            "Want a background service? `worthless service install` — on WSL it also "
+            "needs instanceIdleTimeout=-1 in %USERPROFILE%\\.wslconfig to outlive "
+            "your last terminal."
+        )
+    return "Want it to keep running after you close this terminal? `worthless service install`"
+
+
+def _tilde(path: Path) -> str:
+    """Show a path the way the user would type it."""
+    home = str(Path.home())
+    text = str(path)
+    return "~" + text[len(home) :] if text.startswith(home + "/") else text
+
+
+def _offer_question(port: int, home: WorthlessHome) -> str:
+    """The question to ask, which must be true on the platform asking it.
+
+    WOR-859 ruling (2026-10-10): off by default, asked explicitly. A one-line
+    "installs a user service" let people agree to a login item and a key file
+    without knowing either existed. So the question names what it adds, the
+    trade-off, and the undo — and tells anyone unsure to say no.
+
+    On WSL the plain promise is one WSL does not keep: measured on real WSL2
+    (WOR-853), the default config stops the distro — and the proxy with it —
+    about 15 s after the last WSL terminal closes. So WSL is told in the
+    question, before answering it.
+
+    Say when it starts, never "survives a restart": that is what the unit is
+    configured to do, while reboot survival is still unproven (WOR-725).
+
+    systemd enables lingering, which starts the user manager at BOOT, not at
+    login, and `service uninstall` deliberately leaves it on (worthless-fzas).
+    Uninstall also leaves the key file. The question says both up front:
+    consent given before the irreversible step, not in a banner after it.
+
+    typer.confirm prints plain text, so the terminal does the wrapping. Every
+    line is kept under 80 columns by hand.
+    """
+    pad = " " * 17  # aligns continuation lines under the column after the labels
+    on_wsl = is_wsl()
+    systemd_extra = ""
+    if current_platform_backend_name() == "launchd":
+        adds = "a macOS login item that starts Worthless when you log in"
+        unit = launchd.plist_path()
+    else:
+        unit = systemd.unit_path()
+        if on_wsl:
+            adds = "a systemd user service that starts with this WSL distro"
+        else:
+            adds = (
+                "a systemd user service set to start when this computer starts\n"
+                f"{pad}(it tries to turn on lingering for your account)"
+            )
+        systemd_extra = f"{pad}then `loginctl disable-linger` if nothing else needs it\n"
+    if on_wsl:
+        headline = (
+            "\nInstall a background service for Worthless?\n"
+            "On WSL it still stops about 15 seconds after your last WSL terminal\n"
+            "closes, unless you also set instanceIdleTimeout=-1 in\n"
+            "%USERPROFILE%\\.wslconfig (shown next if you say yes)."
+        )
+    else:
+        headline = (
+            "\nInstall a background service so Worthless keeps protecting your keys\n"
+            "after this terminal closes?"
+        )
+    return (
+        f"{headline}\n"
+        f"  What it adds:  {adds}\n"
+        f"{pad}{_tilde(unit)}\n"
+        "  Trade-off:     your master key is kept in a file only you can read\n"
+        f"{pad}({_tilde(home.fernet_key_path)}), so it can start without you\n"
+        "  Undo anytime:  worthless service uninstall (the key file stays)\n"
+        f"{systemd_extra}"
+        "  Not sure what a background service is? Say no. Your keys stay locked\n"
+        "  either way; you just run `worthless up` when you need the proxy.\n"
+        f"Install the background service on port {port}?"
+    )
+
+
+def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> bool:
+    """Offer to keep the proxy alive after this terminal closes (WOR-853).
+
+    ``lock`` is the first moment a Fernet key exists, so it is the earliest
+    point the service CAN be installed — ``install.sh`` cannot, because
+    ``preflight_service_install`` refuses without a key.
+
+    Returns True only if a service was actually installed.
+    """
+    if console.json_mode:
+        return False
+
+    # Containers first: no systemd and no login session, so the install can only
+    # fail — and the generic hint would send the user to `service install`,
+    # which fails the same way. Docker Desktop and Codespaces terminals are real
+    # TTYs, so the gate below does not catch them (WOR-859 premortem).
+    if _in_container():
+        console.print_hint(
+            "Inside a container, run the proxy as the container's main process, "
+            "or start it with `worthless up`."
+        )
+        return False
+
+    # The terminal gate comes BEFORE --yes, and the order is the point.
+    # Installing the service also runs `loginctl enable-linger`, which
+    # `worthless service uninstall` does not reverse — account-level state. A
+    # blanket --yes in someone's Dockerfile or CI job previously created it with
+    # no prompt at all (confirmed live, 2026-10-05). --yes auto-approves
+    # PROMPTS; where nobody can see a prompt there is nothing to approve.
+    if not _scan_prompt_is_tty():
+        console.print_hint(_offer_declined_hint())
+        return False
+
+    # Nothing to offer if one is already installed. install() rewrites the unit
+    # and on launchd boots out the running agent first, so re-running it over a
+    # working service risks stopping it — and rollback would not restore it,
+    # because the file it would delete is not one this call created. A second
+    # lock with new keys used to ask again and do exactly that.
+    # (Cursor Bugbot, 2026-10-08.)
+    try:
+        if _backend().detect_status(home, port).state is not ServiceState.NOT_INSTALLED:
+            return False
+    except (WorthlessError, subprocess.CalledProcessError, OSError):
+        # Cannot tell. Saying nothing beats crashing a lock that worked, and
+        # beats installing over something we failed to inspect.
+        return False
+
+    # WOR-859 ruling: only a typed "y" installs. --yes means "don't stop to
+    # ask", not "agree to what I didn't read", and an AI agent at a pty is not
+    # the person whose account gets a startup item. Both get the hint; typing
+    # `worthless service install` is the explicit way in. Not a security wall
+    # (an agent can drop the markers): it stops a question nobody human sees.
+    if console.assume_yes or any(os.environ.get(v) for v in _AGENT_ENV_VARS):
+        console.print_hint(_offer_declined_hint())
+        return False
+
+    try:
+        accepted = typer.confirm(_offer_question(port, home), default=False)
+    except (typer.Abort, EOFError):
+        # Ctrl-C or Ctrl-D at a real terminal. The gate above already excluded
+        # the captured-stdin case, which raises OSError rather than EOFError.
+        console.print_hint(_offer_declined_hint())
+        return False
+
+    if not accepted:
+        console.print_hint(_offer_declined_hint())
+        return False
+
+    try:
+        lingering = install_service_for_offer(home, port=port)
+    except (WorthlessError, subprocess.CalledProcessError, OSError) as exc:
+        # The keys are already protected by the time we ask, so a service that
+        # will not install is NOT a reason to report that lock failed.
+        # WorthlessError alone was not enough: run_cmd uses check=True, so a
+        # failing `launchctl bootstrap` or `systemctl enable` raises
+        # CalledProcessError, which escaped to @error_boundary and printed
+        # WRTLS-199 "internal error" on a lock that had already succeeded.
+        console.print_warning(f"Could not install the service: {exc}")
+        console.print_hint("Your keys are still protected. Try `worthless service install`.")
+        return False
+    except BaseException:
+        # Ctrl-C during the install, most likely inside report_proxy_health's
+        # 45 s wait — the one place _common.py documents operators interrupting.
+        # KeyboardInterrupt is not an Exception, so it used to escape this
+        # handler entirely and exit 130 on a lock that had fully committed,
+        # which is precisely what the comment above says must never happen.
+        # Absorbed deliberately. The message does not claim the install failed,
+        # because activation may well have finished before the wait began.
+        console.print_warning("Service install interrupted.")
+        console.print_hint(
+            "Your keys are still protected. The service may be installed — "
+            "check with `worthless service status`."
+        )
+        return False
+
+    # Same banner as `worthless service install`, so WSL users get the
+    # idle-shutdown warning here too.
+    _print_service_banner(
+        console,
+        platform=current_platform_backend_name(),
+        port=port,
+        after_install=True,
+        lingering=lingering is not False,  # launchd and test stubs return None
+    )
+    return True
 
 
 def register_lock_commands(app: typer.Typer) -> None:

@@ -17,8 +17,10 @@
 # That hook is the ONLY thing stopping a suppression from living forever.
 #
 # ARCHITECTURE: every reachability argument below was measured on **amd64**.
-# These rules match on `package.name` + `type` with no version pin, so they
-# apply to the arm64 image too — but the evidence behind them does not. arm64
+# Most rules match on `package.name` + `type`; the libstdc++ pair below also
+# pins an exact `version`. Either way they apply to the arm64 image too — a
+# name and type are arch-independent, and Debian ships one version string
+# across arches — but the evidence behind them does not. arm64
 # was scanned once (2026-08-06) and carried the identical findings; nothing
 # keeps that true. WOR-873 added a weekly arm64 scan so divergence surfaces on
 # a Monday rather than at a release tag. Re-MEASURE per-arch before extending.
@@ -52,6 +54,35 @@ ignore:
     # scans are what would surface divergence. Re-measure before extending.
     reason: "zlib gz_vacate() overflow reachable only via gzprintf/gzvprintf; 951 binaries in the image reference neither, and CPython's zlib exposes no gz* API. Unfixed in every Debian release including sid (bug 1146895). Tracking worthless-tw1g."
     expiry: "2026-12-08"
+
+  - vulnerability: CVE-2026-76844
+    package:
+      name: zlib1g
+      type: deb
+    # High, fix=not-fixed. Same zlib gzFile-API class as CVE-2026-85091 above.
+    # Hidden on main until 2026-11-06: the fixed-only gate failed first, so
+    # the "Unmapped High/Critical findings" step never ran (WOR-1109).
+    #
+    # The flaw: gz_write() returns after a failed write() without resetting
+    # strm.next_in, and a later gz* write overflows the heap. That is zlib's
+    # gzip FILE api (gzopen/gzdopen/gzwrite), not the deflate/inflate stream
+    # api that HTTP content-encoding and CPython's zlib module use.
+    #
+    # MEASURED 2026-11-06 inside main's image (4b4da0cf, amd64), every ELF
+    # under /usr /lib /bin /sbin /opt /app /home searched for gzwrite, gzopen,
+    # gzdopen, gzprintf, gzputs:
+    #   - libz itself, dpkg-deb and libapt-pkg reference them; nothing else
+    #   - CPython's zlib.cpython-313 module references none
+    #   - zlib1g 1:1.3.dfsg+really1.3.1-1+b1
+    # Unlike CVE-2026-85091, the calls ARE present, in the package manager.
+    # Nothing runs dpkg or apt at runtime: /entrypoint.sh doesn't, and
+    # src/worthless never invokes either. A `docker exec` user who runs dpkg
+    # by hand already has a shell in the container.
+    #
+    # Re-measure at expiry with the same sweep; delete when Debian ships a
+    # fixed zlib1g, or the day anything at runtime calls dpkg or apt.
+    reason: "zlib gz_write() overflow reachable only via the gzFile API. Measured 2026-11-06 in the image: only libz, dpkg-deb and libapt-pkg reference it; CPython's zlib module does not, and nothing runs dpkg/apt at runtime. Debian fix=not-fixed. Tracking WOR-1109."
+    expiry: "2026-12-08"  # same re-measure date as CVE-2026-85091; do not blind-extend.
 
   - vulnerability: CVE-2026-15308
     package:
@@ -107,12 +138,219 @@ ignore:
     reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
     expiry: "2026-12-08"
 
+  # ── tempfile.TemporaryDirectory cleanup race (worthless-11ix) ───────
+  # A race in TemporaryDirectory's cleanup: an attacker who can modify the
+  # tree mid-cleanup swaps a directory for a symlink, so files OUTSIDE the
+  # temp dir get deleted, or their permissions and flags reset.
+  #
+  # Grype lists the fix as 3.15.0. 3.15 has been stable since 2026-10-09,
+  # but the image can't leave 3.13 yet (see the CVE-2026-82049 note below),
+  # and the advisory records no 3.13 backport, so there is nowhere to
+  # upgrade — the base image already runs 3.13.18 (repinned 2026-10-30), the
+  # newest 3.13 there is.
+  #
+  # MEASURED 2026-10-05 against the built image, not asserted:
+  #   1. `tempfile.TemporaryDirectory` — the vulnerable class — appears
+  #      ZERO times in src/. Worthless uses mkdtemp and mkstemp, which have
+  #      no auto-cleanup and so never reach the racing finalizer.
+  #   2. We do call shutil.rmtree on mkdtemp dirs (openclaw/skill.py,
+  #      cli/sidecar_lifecycle.py), which is the same underlying path the
+  #      advisory names. In this image that path is the SAFE one:
+  #      shutil.rmtree.avoids_symlink_attacks is True on Linux 3.13.16 and
+  #      3.13.18 (re-read 2026-10-30), read from inside the container. The
+  #      advisory's own caveat applies only where that flag is False.
+  #   3. The residual on all platforms is file-flag reset, a BSD/macOS
+  #      chflags concern that does not exist on this Linux image.
+  #
+  # The attacker also needs concurrent write access inside the container's
+  # temp tree — they are already executing there.
+  #
+  # To close: drop this when CPython backports to 3.13.x, or when 3.15 is
+  # stable and worthless-jsx6 moves the base image.
+  - vulnerability: CVE-2026-12345
+    package: {name: python, type: binary}
+    reason: "Race in tempfile.TemporaryDirectory cleanup: a directory swapped for a symlink mid-cleanup deletes or re-permissions files outside the temp tree. Fix listed as 3.15.0; the image can't leave 3.13 yet (worthless-epnw), and no 3.13 backport exists — the image already runs 3.13.18 (repinned 2026-10-30), the newest 3.13. Measured 2026-10-05 on the built image: TemporaryDirectory appears zero times in src/ (worthless uses mkdtemp/mkstemp, which have no auto-cleanup finalizer), and where we do call shutil.rmtree on those dirs, shutil.rmtree.avoids_symlink_attacks reads True inside the container, which is the condition the advisory says removes the deletion attack. Remaining file-flag reset is a BSD/macOS chflags concern, absent on Linux. Tracking worthless-11ix."
+    expiry: "2026-12-31"
+
+  # ── libstdc++ erase_if, nothing here links it (worthless-11ix) ──────
+  # A use-after-free in libstdc++: erase_if on a binary heap priority queue
+  # reallocates storage without updating the internal entry pointer. Debian
+  # has no fix in ANY release — gcc-12, 14, 15 and 16 are all marked
+  # vulnerable, unfixed, on the security tracker (read 2026-10-05), so
+  # fix=not-fixed is the real upstream state, not a stale grype record.
+  #
+  # MEASURED 2026-10-05, not assumed. Installed requirements.txt into
+  # python:3.13-slim-trixie (amd64, Python 3.13.15) and read every compiled
+  # extension's dynamic section:
+  #   44 packages, 11 .so files, 0 linking libstdc++
+  # The interpreter does not link it either. libstdc++ is present only
+  # because the base image ships the gcc runtime; no Worthless code path
+  # reaches a C++ priority queue, so erase_if is never called.
+  #
+  # SCOPED BY TYPE + VERSION, not by name, and the expiry hook is why. It
+  # rejects any package name holding a regex activator, because grype turns
+  # such a name into a full-match regex and the ignore then silences packages
+  # it never named. `libstdc++6` carries two `+`, and escaping them adds `\` —
+  # also an activator — so there is no spelling of that name the hook accepts.
+  #
+  # An earlier revision of these two entries therefore carried NO `package`
+  # key at all, and said so, calling the cost "tolerable". It was not: an empty
+  # scope USED TO make check_grype_unmapped_findings return True for the CVE id
+  # on EVERY package in every ecosystem, including a future first-party one
+  # nobody measured. It now matches nothing instead. That gap
+  # — the one the old comment here described and deferred to worthless-11ix —
+  # is now CLOSED: check_grype_ignore_expiry rejects a rule with no package
+  # scope, and rejects a `type`-only scope that carries no `version`.
+  #
+  # WHAT THE SCOPE ACTUALLY BOUNDS, stated precisely, because the two gates
+  # read it differently:
+  #   - grype honours `version`. MEASURED by contrast (grype 0.114.0, this
+  #     image): the rule at 14.2.0-19 suppresses 3 of 3 matches; at 99.9.9-99
+  #     it suppresses 0 of 3. So the blocking image scan stops suppressing the
+  #     day Debian bumps the package — the waiver cannot outlive the fix.
+  #   - check_grype_unmapped_findings compares name and type and honours
+  #     `version` as well (added alongside this entry); without that it read
+  #     the scope as "any deb" and the pin bought nothing on the gate that
+  #     actually blocks.
+  # Residual breadth, stated without flattering it: `type: deb` at that exact
+  # version covers ANY Debian package whose version string is 14.2.0-19. Not
+  # "any package built from gcc-14" — covers() compares type and version and
+  # enforces no provenance whatsoever, so a wholly unrelated deb that happened
+  # to carry that version string would match. In this image only the three
+  # reported gcc-14 binaries do, and a future gcc-14-sourced addition
+  # (libgomp1 via numpy, say) would be silently covered for these two CVE ids.
+  # Narrower than a name would be is not available here; narrower than
+  # "everything" it certainly is.
+  #
+  # To close: drop this when Debian ships a fixed gcc, or when the base image
+  # stops shipping the gcc runtime at all.
+  - vulnerability: CVE-2026-102010
+    package:
+      type: deb
+      version: 14.2.0-19
+    reason: "Use-after-free in libstdc++ erase_if on a binary heap priority queue; hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05), so there is nowhere to upgrade. Measured 2026-10-05 on the built image: 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. Base-image gcc runtime only; no Worthless code path reaches a C++ priority queue. Tracking worthless-11ix. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version: the rule at 14.2.0-19 suppressed 3 of 3 matches, at 99.9.9-99 it suppressed 0 of 3. Both gates honour the version: grype by its own matching, and check_grype_unmapped_findings because `version` is carried into the scope and compared there too — without that the pin bound nothing on the gate that actually blocks, since the grype step runs only-fixed and never sees a not-fixed finding. Residual breadth: this still covers any Debian package at exactly 14.2.0-19, which today is only the three gcc-14 binaries reported, but would silently cover a future gcc-14-sourced addition."
+    expiry: "2027-01-31"
+
+  # Second advisory, same libstdc++, same measurement. An integer overflow in
+  # the aligned `operator new`: a large enough request wraps and under-allocates,
+  # so the caller writes past the block. `operator new` is the C++ allocation
+  # operator — only C++ code calls it, and nothing here is C++. Debian is again
+  # unfixed across gcc-12/14/15/16 (tracker read 2026-10-05).
+  #
+  # RE-MEASURED 2026-10-05 on the REPINNED image (Python 3.13.16), not carried
+  # over from the entry above: 11 compiled extensions, 0 linking libstdc++,
+  # interpreter 0. RE-MEASURED again 2026-10-30 on Python 3.13.18 (#750),
+  # amd64 and arm64, with `ldd` over every site-packages .so and the
+  # interpreter: same result, and gcc-14-base, libgcc-s1 and libstdc++6 are
+  # still at 14.2.0-19.
+  - vulnerability: CVE-2026-95619
+    package:
+      type: deb
+      version: 14.2.0-19
+    reason: "Integer overflow in libstdc++'s aligned operator new: a large request wraps to an undersized allocation, so the caller writes past the block. Hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05). Re-measured 2026-10-05 inside the repinned image (Python 3.13.16) and again 2026-10-30 on Python 3.13.18 (amd64 and arm64): 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. operator new is the C++ allocation operator and no Worthless code is C++; the gcc runtime is present only because the base image ships it. Tracking worthless-11ix. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version: the rule at 14.2.0-19 suppressed 3 of 3 matches, at 99.9.9-99 it suppressed 0 of 3. Both gates honour the version: grype by its own matching, and check_grype_unmapped_findings because `version` is carried into the scope and compared there too — without that the pin bound nothing on the gate that actually blocks, since the grype step runs only-fixed and never sees a not-fixed finding. Residual breadth: this still covers any Debian package at exactly 14.2.0-19, which today is only the three gcc-14 binaries reported, but would silently cover a future gcc-14-sourced addition."
+    expiry: "2027-01-31"
+
+  # CVE-2026-82049 (CPython tarfile extraction filters) was suppressed here
+  # and is now DELETED rather than extended. Repinning the base image to
+  # Python 3.13.16 retired it: measured 2026-10-06 against the built image
+  # with ignores disabled, the finding is absent entirely. This file's rule
+  # is to delete a suppression once its finding is gone, not to leave it
+  # sitting there silencing nothing. The reachability argument it carried
+  # (nothing EXTRACTS archives; tarfile is imported via keyring ->
+  # jaraco.context but jaraco.context.tarball has no callers) is preserved
+  # in tests/test_archive_reachability.py, which still guards the three
+  # older tarfile suppressions below (grype no longer matches them on the
+  # shipped image; WOR-1096 decides whether they go). Its second block
+  # (deleted 2026-10-30, #750) recorded why the image is not on 3.14, and
+  # that still holds, for 3.15 too: 3.14's
+  # pathlib swallows EACCES in Path.is_file(), so an unreadable credential
+  # surface reports clean with no caveat (worthless-epnw), and the
+  # Dockerfile copies the python3.13 site-packages path by name.
+
+
   - vulnerability: CVE-2026-15806
     package:
       name: python
       type: binary
     reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
     expiry: "2026-12-08"
+
+  # socket.getaddrinfo() truncates a host or port at a null byte, which can
+  # slip an attacker-chosen address past an allowlist. Turned main's required
+  # `scan` red on 2026-11-05 (first seen on 4b4da0cf).
+  #
+  # MEASURED 2026-11-06 (grype 0.114.0, DB of 2026-11-05) on main's image,
+  # amd64: python 3.13.18 binary, Medium. Upstream, checked via the CPython
+  # repo the same day: fixed on main by GH-160899 (2026-10-29); backports to
+  # 3.14 (GH-160926) and 3.15 (GH-160925) merged 2026-11-06; the 3.13
+  # backport GH-160974 is still OPEN, and no released 3.13.x carries it.
+  #
+  # RETIRING THIS ENTRY: grype's record is NVD's "< 3.16.0", so a fixed
+  # 3.13.19 would STILL match (the CVE-2026-4360 trap, documented below).
+  # At expiry, re-measure: delete when grype stops matching the shipped
+  # image, or when the image's interpreter contains GH-160974 and the range
+  # is shown to be stale. The version pin makes a base-image bump re-fire it.
+  #
+  # Reachability: every upstream call goes through httpx, which refuses a NUL
+  # in the host or port before any lookup (httpx.InvalidURL). The proxy only
+  # dials the stored or registered base_url plus a fixed path; no request
+  # header, body or path reaches the host or port. Pinned by
+  # tests/test_upstream_host_reachability.py and test_proxy.py's
+  # test_request_input_never_steers_the_upstream_host.
+  #
+  # NOT covered: the CLI installed outside this image runs the user's own
+  # Python, which is just as affected; this scan says nothing about it. And
+  # whoever can edit .env, providers.toml or the DB already chooses where
+  # the key goes, so a NUL there adds nothing.
+  - vulnerability: CVE-2026-116566
+    package:
+      name: python
+      version: 3.13.18
+      type: binary
+    reason: "getaddrinfo() null-byte truncation in CPython. Measured 2026-11-06: image python 3.13.18 affected; 3.13 backport GH-160974 still open (3.14/3.15 backports merged 2026-11-06); NVD's '< 3.16.0' range will match even a fixed 3.13.x. Unreachable: httpx refuses a NUL in host/port before lookup, and host/port come only from the stored or registered base_url (tests/test_upstream_host_reachability.py, test_proxy.py). Tracking WOR-1108."
+    expiry: "2026-12-08"  # re-measure; see RETIRING above. Do not blind-extend.
+
+  # ── perl's POD formatter, base-image only (WOR-934) ─────────────────
+  # Arrived with the grype DB refresh of 2026-09-2x and turned main red. It is
+  # fix=not-fixed, so `only-fixed: true` drops it and the fixed-only gate never
+  # sees it — check_grype_unmapped_findings.py is what caught it, which is the
+  # job that hook exists to do.
+  #
+  # The flaw (MEASURED from grype's own record, 2026-09-27): Pod::Text before
+  # 6.1.1 exhausts CPU and memory formatting a POD document whose `=over`
+  # nesting drives the margin to the output width — the line-splitting
+  # substitution then matches the empty string and the loop never consumes
+  # input. Reaching it requires FORMATTING AN ATTACKER-SUPPLIED POD DOCUMENT.
+  #
+  # Reachability, MEASURED IN THE BUILT IMAGE 2026-09-27 — and the honest
+  # answer is stronger than "we don't call it". The vulnerable module is NOT
+  # PRESENT:
+  #
+  #   dpkg -l | grep "^ii  perl"    ->  perl-base only (no perl, no
+  #                                     perl-modules-5.40)
+  #   find / -name Text.pm -path '*Pod*'  ->  empty
+  #   command -v perldoc / pod2text       ->  absent, both
+  #
+  # grype matched the perl-base VERSION, not vulnerable code on disk. Pod::Text
+  # ships in perl-modules, which this image does not install. There is no
+  # perldoc or pod2text to run even by hand after `docker exec`.
+  #
+  # An earlier version of this entry argued from `grep -rl perl` over our
+  # entrypoint and deploy scripts. That was weaker AND rots: it says nothing
+  # about the Python package, a future subprocess call, or the healthcheck.
+  # File existence does not rot.
+  #
+  # Debian has no fixed version, so there is nothing to bump to — and nothing
+  # to wait for either. Re-measure at expiry by re-running the three commands
+  # above: this entry dies the day perl-modules appears in the image (then it
+  # is really reachable and needs a fix), or the day grype stops matching
+  # perl-base for it.
+  - vulnerability: CVE-2026-82560
+    package:
+      name: perl-base
+      type: deb
+    reason: "Pod::Text <6.1.1 CPU/memory exhaustion when formatting an attacker-supplied POD document. THE MODULE IS NOT IN THE IMAGE: measured 2026-09-27, only perl-base is installed (no perl-modules-5.40), `find / -name Text.pm -path '*Pod*'` is empty, and perldoc/pod2text do not exist. Grype matched the perl-base version, not vulnerable code on disk. Debian fix=not-fixed, so there is nothing to upgrade to. Re-measure by re-running those commands; this dies when perl-modules appears. Tracking WOR-934."
+    expiry: "2026-12-31"  # no fix exists; re-measure for a fixed perl-base, do not blind-extend.
 
   # ── CPython tarfile, base-image only (WOR-852 Track B) ──────────────
   # All three are tarfile bugs in the digest-pinned python:3.13-slim-bookworm
@@ -507,11 +745,19 @@ ignore:
   # waited on (Debian marking bookworm not-affected) is outside our control, so
   # the likely December outcome is "nothing changed, re-measure and extend".
   #
-  # Narrowing by version is NOT possible here yet. grype's IgnoreRule schema
-  # accepts package.version, but the check that actually fired on this finding,
-  # scripts/hooks/check_grype_unmapped_findings.py, builds its scope from name
-  # and type only and silently discards a version key — so a pin would buy
-  # nothing until that hook is taught to carry it. Tracked separately.
+  # Narrowing by version IS possible now, and this entry could use it. It was
+  # not when this note was first written: check_grype_unmapped_findings built
+  # its scope from name and type only and silently discarded a version key, so
+  # a pin bought nothing on the check that actually fires here. That hook now
+  # carries and compares `version` (see the libstdc++ pair above), so adding a
+  # pin would genuinely bound this waiver to the affected OpenSSL build.
+  #
+  # Deliberately NOT added in the same breath. A name already pins this to one
+  # package, which is what `type: deb` + version is a substitute for when the
+  # name is regex-unsafe. Adding a version on top would buy one further thing —
+  # auto-expiry the moment Debian bumps the package — which is worth having, but
+  # it is a behaviour change to a waiver this PR is not otherwise touching and
+  # it wants its own measurement.
   #
   # Measured on BOTH architectures: the arm64 resolution of this digest also
   # reports 3.0.20 with zero QUIC symbols, and grype emits the same package

@@ -16,8 +16,10 @@ from cryptography.fernet import Fernet
 
 from worthless.cli import bootstrap as boot
 from worthless.cli.bootstrap import (
+    _DOCKER_TRAVERSE_GROUP,
     WorthlessHome,
     _init_db,
+    _is_docker_group_traverse_dir,
     _shard_rows_present,
     acquire_lock,
     check_stale_lock,
@@ -90,6 +92,101 @@ class TestEnsureHome:
         home = ensure_home(base_dir=tmp_path / ".worthless")
         mode = home.fernet_key_path.stat().st_mode
         assert stat.S_IMODE(mode) == 0o600
+
+    def test_docker_group_traverse_mode_survives(self, tmp_path: Path):
+        """0710 on the home dir MUST survive ensure_home (worthless-agmg).
+
+        deploy/start.py sets /data to 0710 in the Docker split-uid topology so
+        the sidecar (worthless-crypto, group worthless) can traverse into
+        /data/run/<pid>/. ensure_home used to chmod 0700 unconditionally, so a
+        later ``docker exec --user root <container> worthless ...`` — the very
+        command doctor's SIDECAR_NOT_READY hint recommends — cut the sidecar
+        off. The privdrop env signal is set inside entrypoint.sh only and is
+        invisible to a docker exec session, so the mode itself is the signal.
+        """
+        base = tmp_path / ".worthless"
+        ensure_home(base_dir=base)
+        base.chmod(0o710)  # what deploy/start.py does in Docker
+
+        with patch("worthless.cli.bootstrap._grp.getgrgid") as fake_grp:
+            fake_grp.return_value.gr_name = "worthless"  # the container's group
+            ensure_home(base_dir=base)
+
+        assert stat.S_IMODE(base.stat().st_mode) == 0o710, (
+            "ensure_home must not narrow the Docker group-traverse mode"
+        )
+
+    def test_foreign_group_cannot_keep_group_traverse(self, tmp_path: Path):
+        """0710 owned by someone else's group is NOT ours — tighten it.
+
+        Otherwise anyone who pre-creates WORTHLESS_HOME at 0710 with a group
+        they control keeps traverse into it forever, since ensure_home's mkdir
+        is exist_ok and never chowns.
+        """
+        base = tmp_path / ".worthless"
+        ensure_home(base_dir=base)
+        base.chmod(0o710)
+
+        with patch("worthless.cli.bootstrap._grp.getgrgid") as fake_grp:
+            fake_grp.return_value.gr_name = "attacker"
+            ensure_home(base_dir=base)
+
+        assert stat.S_IMODE(base.stat().st_mode) == 0o700
+
+    def test_unresolvable_group_fails_closed(self, tmp_path: Path):
+        """A gid with no group entry must TIGHTEN, not keep 0710.
+
+        Real lookup, no mock: the other tests patch ``_grp.getgrgid``, so this
+        is the one that exercises the actual gid -> name path and its failure
+        branch (KeyError -> False -> chmod runs).
+        """
+        base = tmp_path / ".worthless"
+        ensure_home(base_dir=base)
+        base.chmod(0o710)
+
+        with patch("worthless.cli.bootstrap.Path.stat") as fake_stat:
+            fake_stat.return_value = os.stat_result(
+                (0o040710, 0, 0, 1, 0, 2**31 - 1, 0, 0, 0, 0)  # gid that owns nothing
+            )
+            resolved = _is_docker_group_traverse_dir(base)
+
+        assert resolved is False, "an unresolvable group must not keep group traverse"
+
+    def test_traverse_group_matches_the_dockerfile(self):
+        """The group we trust is the group the image actually creates.
+
+        Nothing else ties the constant to ``groupadd`` — renaming the group in
+        the Dockerfile would silently turn the carve-out off and bring the
+        narrowing bug back.
+        """
+        dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
+
+        assert f"groupadd -r -g 10001 {_DOCKER_TRAVERSE_GROUP}" in dockerfile.read_text(), (
+            f"Dockerfile no longer creates group {_DOCKER_TRAVERSE_GROUP!r}"
+        )
+
+    def test_loose_home_mode_is_still_tightened(self, tmp_path: Path):
+        """Anything looser than the two modes we set ourselves is still fixed."""
+        base = tmp_path / ".worthless"
+        ensure_home(base_dir=base)
+        for loose in (0o755, 0o770, 0o777):
+            base.chmod(loose)
+
+            ensure_home(base_dir=base)
+
+            assert stat.S_IMODE(base.stat().st_mode) == 0o700, (
+                f"ensure_home must tighten {loose:#o} back to 0o700"
+            )
+
+    def test_shard_dir_is_always_owner_only(self, tmp_path: Path):
+        """shard_a holds the shares; nothing widens it, 0710 included."""
+        base = tmp_path / ".worthless"
+        home = ensure_home(base_dir=base)
+        home.shard_a_dir.chmod(0o710)
+
+        ensure_home(base_dir=base)
+
+        assert stat.S_IMODE(home.shard_a_dir.stat().st_mode) == 0o700
 
     def test_idempotent(self, tmp_path: Path):
         base = tmp_path / ".worthless"

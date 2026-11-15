@@ -19,6 +19,7 @@ from worthless.cli.commands.service._common import (
     report_proxy_health,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
+from tests.helpers import skip_if_root
 
 
 @pytest.fixture()
@@ -73,9 +74,57 @@ class TestResolveWorthlessBinary:
         assert exc_info.value.code == ErrorCode.BOOTSTRAP_FAILED
 
 
+def _record_fernet_copies(monkeypatch: pytest.MonkeyPatch) -> list[bytearray]:
+    """Record every Fernet key copy handed out (fernet_key returns a fresh copy per read)."""
+    handed_out: list[bytearray] = []
+    real = WorthlessHome.fernet_key
+
+    def recording(self: WorthlessHome) -> bytearray:
+        buf = real.fget(self)
+        handed_out.append(buf)
+        return buf
+
+    monkeypatch.setattr(WorthlessHome, "fernet_key", property(recording))
+    return handed_out
+
+
+def _assert_all_wiped(handed_out: list[bytearray]) -> None:
+    assert handed_out, "preflight never read the Fernet key"
+    leaked = [buf for buf in handed_out if any(buf)]
+    assert not leaked, f"{len(leaked)} Fernet key copy/copies left in memory after preflight"
+
+
 class TestPreflightAndHealth:
-    def test_preflight_zeroes_key(self, home: WorthlessHome) -> None:
+    def test_preflight_zeroes_key(
+        self, home: WorthlessHome, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        handed_out = _record_fernet_copies(monkeypatch)
+
         preflight_service_install(home)
+
+        _assert_all_wiped(handed_out)
+
+    def test_preflight_zeroes_key_when_launchd_sync_fails(
+        self, home: WorthlessHome, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The wipe lives in `finally`: a failed key sync must not leave the key behind.
+        handed_out = _record_fernet_copies(monkeypatch)
+        monkeypatch.setattr(
+            "worthless.cli.commands.service._common.current_platform_backend_name",
+            lambda: "launchd",
+        )
+
+        def failing_sync(*_args: object, **_kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(
+            "worthless.cli.commands.service._common.sync_fernet_for_launchd", failing_sync
+        )
+
+        with pytest.raises(OSError, match="disk full"):
+            preflight_service_install(home)
+
+        _assert_all_wiped(handed_out)
 
     def test_preflight_missing_fernet(self, tmp_path: Path) -> None:
         base = tmp_path / ".worthless"
@@ -179,6 +228,7 @@ class TestUnitFileMatchesHome:
         )
         assert unit_file_matches_home(unit, home)
 
+    @skip_if_root
     def test_unreadable_unit_raises_clean_error(self, home: WorthlessHome, tmp_path: Path) -> None:
         unit = tmp_path / "worthless-proxy.service"
         unit.write_text(
@@ -258,7 +308,11 @@ class TestHealthReportHonesty:
         """The wording must not assert something failed when nothing did."""
         with patch("worthless.cli.commands.service._common.poll_health", return_value=False):
             report_proxy_health(8787, timeout=0.01)
-        out = " ".join((capsys.readouterr().err + capsys.readouterr().out).split()).lower()
+        cap = capsys.readouterr()
+        out = " ".join((cap.err + cap.out).split()).lower()
+        assert "has not answered" in out, (
+            f"warning not captured — absence of failure words would pass vacuously:\n{out}"
+        )
         for lie in ("failed", "did not respond within"):
             assert lie not in out, (
                 f"still asserts failure ({lie!r}) on a successful install:\n{out}"
@@ -270,7 +324,8 @@ class TestHealthReportHonesty:
         """Name the established fact, then the open question, then the next step."""
         with patch("worthless.cli.commands.service._common.poll_health", return_value=False):
             report_proxy_health(8787, timeout=0.01)
-        out = " ".join((capsys.readouterr().err + capsys.readouterr().out).split()).lower()
+        cap = capsys.readouterr()
+        out = " ".join((cap.err + cap.out).split()).lower()
         assert "installed" in out or "started" in out, f"must state what succeeded:\n{out}"
         assert "worthless service status" in out, f"must give the next step:\n{out}"
 
@@ -278,7 +333,9 @@ class TestHealthReportHonesty:
         """No warning when the proxy answered — silence is the success signal."""
         with patch("worthless.cli.commands.service._common.poll_health", return_value=True):
             report_proxy_health(8787, timeout=0.01)
-        out = (capsys.readouterr().err + capsys.readouterr().out).lower()
+        cap = capsys.readouterr()
+        out = " ".join((cap.err + cap.out).split()).lower()
+        assert "waiting up to" in out, f"hint not captured — silence check would be vacuous:\n{out}"
         assert "status" not in out, f"clean install should not nag:\n{out}"
 
     def test_default_wait_exceeds_the_observed_cold_start(self) -> None:

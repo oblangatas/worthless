@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,12 +13,18 @@ import pytest
 
 pytest.importorskip("mcp", reason="mcp extra not installed")
 
+from mcp.client import Client  # noqa: E402
+
+from worthless.cli.commands.status import _status_verdict  # noqa: E402
 from worthless.mcp.server import (  # noqa: E402
+    mcp,
     worthless_lock,
     worthless_scan,
     worthless_spend,
     worthless_status,
 )
+
+from tests.helpers import fake_key  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +47,9 @@ def _make_home(tmp_path: Path) -> Path:
     (home / "shard_a").mkdir(mode=0o700)
     key = Fernet.generate_key()
     (home / "fernet.key").write_bytes(key)
+    # 0600 is what the product writes; the default 0644 is REFUSED
+    # (worthless-6hu7), which would fail these tests for setup reasons.
+    (home / "fernet.key").chmod(0o600)
     return home
 
 
@@ -187,6 +197,26 @@ class TestWorthlessStatus:
         assert "isn't worthless" in result["header"]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("survives", [True, False], ids=["service-running", "no-service"])
+    async def test_editor_says_the_same_thing_about_restarts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, survives: bool
+    ) -> None:
+        """WOR-860: the editor's green header carries the same restart fact as
+        `worthless status`. Drop the survives_restart pass-through in the MCP
+        tool and the service-running case reads "protected now ... not after a
+        restart" — the CLI and editor disagree again."""
+        home = _make_home(tmp_path)
+        keys = [{"alias": "openai", "provider": "openai", "status": "PROTECTED"}]
+        self._stub_status(monkeypatch, keys=keys, healthy=True)
+        monkeypatch.setattr("worthless.cli.commands.status.survives_restart", lambda *_a: survives)
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_status())
+
+        _, expected_header = _status_verdict(keys, True, False, True, survives_restart=survives)
+        assert result["header"] == expected_header
+        assert result["survives_restart"] is survives
+
+    @pytest.mark.asyncio
     async def test_editor_verdict_matches_the_cli_for_identical_inputs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -196,8 +226,6 @@ class TestWorthlessStatus:
         for the same inputs — so a future change can't quietly reintroduce a
         second, divergent notion of "protected" here.
         """
-        from worthless.cli.commands.status import _status_verdict
-
         home = _make_home(tmp_path)
         keys = [{"alias": "openai", "provider": "openai", "status": "PROTECTED"}]
         self._stub_status(monkeypatch, keys=keys, healthy=False)
@@ -317,6 +345,69 @@ class TestWorthlessScan:
         assert result["summary"]["unprotected"] >= 1
 
     @pytest.mark.asyncio
+    async def test_scan_oauth_token_is_unshardable_not_unprotected(self, tmp_path: Path) -> None:
+        """worthless-p55g: lock refuses a Claude Code OAuth token by design, so
+        counting it as unprotected sends an agent to run lock in a loop."""
+        token = fake_key("sk-ant-oat01-", "p55g-mcp")
+        env_file = _make_env_file(tmp_path, f"ANTHROPIC_API_KEY={token}\n")
+
+        result = json.loads(await worthless_scan(paths=[str(env_file)]))
+
+        [finding] = result["findings"]
+        assert finding["is_protected"] is False
+        assert finding["is_unshardable"] is True, finding
+        assert "sk-ant-api03" in finding["remediation"], finding
+        # Additive contract: "unprotected" keeps its meaning (not protected), so
+        # an agent checking unprotected == 0 never reads this file as clean.
+        # "unshardable" is the subset lock can't fix.
+        summary = result["summary"]
+        assert summary["unprotected"] == 1, summary
+        assert summary["unshardable"] == 1, summary
+        assert summary["total"] == summary["protected"] + summary["unprotected"], summary
+
+    @pytest.mark.asyncio
+    async def test_scan_tells_the_agent_which_older_commit_holds_the_env(
+        self, tmp_path: Path
+    ) -> None:
+        """worthless-87rb: a passing token whose .env an older commit holds
+        reaches the agent as data, not only as prose."""
+        env_file = _make_env_file(
+            tmp_path, f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', '87rb-mcp')}\n"
+        )
+        git = ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t"]
+        git += ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"]
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S607
+        subprocess.run([*git, "add", ".env"], check=True)  # noqa: S603
+        subprocess.run([*git, "commit", "-q", "-m", "x"], check=True)  # noqa: S603
+        leaked = subprocess.run(  # noqa: S603
+            [*git, "rev-parse", "--short", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        subprocess.run([*git, "rm", "-q", "--cached", ".env"], check=True)  # noqa: S603
+        subprocess.run([*git, "commit", "-q", "-m", "untrack"], check=True)  # noqa: S603
+
+        result = json.loads(await worthless_scan(paths=[str(env_file)]))
+
+        [finding] = result["findings"]
+        assert finding["is_unshardable"] is True, finding
+        assert finding["committed_before"] == leaked, finding
+        assert leaked in finding["remediation"], finding
+        assert result["summary"]["unshardable"] == 1, result["summary"]
+
+    @pytest.mark.asyncio
+    async def test_scan_token_outside_env_is_told_to_revoke(self, tmp_path: Path) -> None:
+        """A login token outside a local .env is exposed; the agent is told to
+        revoke it, never to run lock."""
+        src = tmp_path / "settings.py"
+        src.write_text(f'ANTHROPIC_API_KEY = "{fake_key("sk-ant-oat01-", "p55g-mcp-src")}"\n')
+
+        result = json.loads(await worthless_scan(paths=[str(src)]))
+
+        [finding] = result["findings"]
+        assert finding["is_unshardable"] is False, finding
+        assert "revoke" in finding["remediation"].lower(), finding
+        assert result["summary"]["unshardable"] == 0, result["summary"]
+
+    @pytest.mark.asyncio
     async def test_scan_no_paths_defaults(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -345,7 +436,7 @@ class TestWorthlessScan:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """c5kc / CodeRabbit follow-up: scan_files is synchronous and runs for
-        up to 30 s; calling it inline would block the FastMCP event loop and
+        up to 30 s; calling it inline would block the MCPServer event loop and
         starve other concurrent MCP tools. This test pins that the MCP tool
         actually offloads to a worker thread.
 
@@ -633,3 +724,40 @@ class TestWorthlessSpend:
             result = json.loads(await worthless_spend(alias="openai-abc"))
         assert len(result["spend"]) == 1
         assert result["spend"][0]["alias"] == "openai-abc"
+
+
+# ---------------------------------------------------------------------------
+# What an agent sees when a tool fails (WOR-929)
+# ---------------------------------------------------------------------------
+
+
+class TestToolErrorsSeenByAgent:
+    """mcp 2.x hides the text of any tool exception except its own ToolError.
+
+    Driven through the SDK's in-memory client, so the assertions are on the
+    CallToolResult an agent receives, not on the Python exception.
+    """
+
+    @pytest.mark.asyncio
+    async def test_agent_reads_the_worthless_error_message(self, tmp_path: Path) -> None:
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(tmp_path / "no-home")}):
+            async with Client(mcp) as client:
+                result = await client.call_tool("worthless_spend", {})
+
+        assert result.is_error is True
+        assert result.content[0].text == (
+            "Error executing tool worthless_spend: WRTLS-100: "
+            "Worthless is not initialized. Run `worthless lock` first."
+        )
+
+    @pytest.mark.asyncio
+    async def test_agent_never_reads_crash_details(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _crash() -> None:
+            raise RuntimeError("/Users/victim/.worthless/shard_a leaked")
+
+        monkeypatch.setattr("worthless.mcp.server._require_home", _crash)
+        async with Client(mcp) as client:
+            result = await client.call_tool("worthless_spend", {})
+
+        assert result.is_error is True
+        assert result.content[0].text == "Error executing tool worthless_spend"

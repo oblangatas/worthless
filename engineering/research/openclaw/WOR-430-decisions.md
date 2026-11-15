@@ -25,7 +25,7 @@
 
 **Test impact.**
 - RESPX-backed adapter test (`tests/test_proxy_streaming.py`): mid-stream cap trip emits `event: error` with `code: cap_exceeded`, then EOF. Assert downstream client sees both frames.
-- Snapshot test (Syrupy): exact wire bytes of the truncation event match the documented Anthropic shape.
+- Snapshot test (Syrupy): exact wire bytes of the truncation event match the documented Anthropic shape. (Not built yet; syrupy was dropped from the test dependencies in PR #629, so re-add it to both `test` lists in pyproject.toml first.)
 - Live test against `tests/openclaw/docker-compose.yml`: set cap to $0.001, send a long-streaming request, verify Claude Code surfaces a user-visible error rather than hanging.
 
 ---

@@ -47,7 +47,14 @@ TODAY = dt.date(2026, 8, 1)
 def test_current_ignore_passes(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path,
-        'ignore:\n  - vulnerability: CVE-2026-11940\n    expiry: "2026-08-31"\n',
+        (
+            "ignore:\n"
+            "  - vulnerability: CVE-2026-11940\n"
+            "    package:\n"
+            "      name: libfake1\n"
+            "      type: deb\n"
+            '    expiry: "2026-08-31"\n'
+        ),
     )
     assert _load().check(cfg, TODAY) == []
 
@@ -55,7 +62,14 @@ def test_current_ignore_passes(tmp_path: Path) -> None:
 def test_expired_ignore_is_reported(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path,
-        'ignore:\n  - vulnerability: CVE-2026-11940\n    expiry: "2020-01-01"\n',
+        (
+            "ignore:\n"
+            "  - vulnerability: CVE-2026-11940\n"
+            "    package:\n"
+            "      name: libfake1\n"
+            "      type: deb\n"
+            '    expiry: "2020-01-01"\n'
+        ),
     )
     problems = _load().check(cfg, TODAY)
     assert len(problems) == 1
@@ -65,7 +79,16 @@ def test_expired_ignore_is_reported(tmp_path: Path) -> None:
 
 def test_undated_ignore_is_reported(tmp_path: Path) -> None:
     """An ignore with no expiry never gets revisited — that is the failure mode."""
-    cfg = _write(tmp_path, "ignore:\n  - vulnerability: CVE-2026-11940\n")
+    cfg = _write(
+        tmp_path,
+        (
+            "ignore:\n"
+            "  - vulnerability: CVE-2026-11940\n"
+            "    package:\n"
+            "      name: libfake1\n"
+            "      type: deb\n"
+        ),
+    )
     problems = _load().check(cfg, TODAY)
     assert len(problems) == 1
     assert "no `expiry`" in problems[0]
@@ -74,7 +97,14 @@ def test_undated_ignore_is_reported(tmp_path: Path) -> None:
 def test_malformed_expiry_is_reported(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path,
-        'ignore:\n  - vulnerability: CVE-2026-11940\n    expiry: "next tuesday"\n',
+        (
+            "ignore:\n"
+            "  - vulnerability: CVE-2026-11940\n"
+            "    package:\n"
+            "      name: libfake1\n"
+            "      type: deb\n"
+            '    expiry: "next tuesday"\n'
+        ),
     )
     problems = _load().check(cfg, TODAY)
     assert len(problems) == 1
@@ -85,7 +115,14 @@ def test_expiry_boundary_is_inclusive(tmp_path: Path) -> None:
     """Expiring today is still valid; it lapses tomorrow."""
     cfg = _write(
         tmp_path,
-        'ignore:\n  - vulnerability: CVE-2026-11940\n    expiry: "2026-08-01"\n',
+        (
+            "ignore:\n"
+            "  - vulnerability: CVE-2026-11940\n"
+            "    package:\n"
+            "      name: libfake1\n"
+            "      type: deb\n"
+            '    expiry: "2026-08-01"\n'
+        ),
     )
     mod = _load()
     assert mod.check(cfg, TODAY) == []
@@ -99,7 +136,15 @@ def test_no_ignores_is_fine(tmp_path: Path) -> None:
 @pytest.mark.parametrize("stamp", ["2026-08-31", '"2026-08-31"'])
 def test_yaml_date_and_string_forms_both_parse(tmp_path: Path, stamp: str) -> None:
     """Unquoted YAML dates arrive as datetime.date, quoted ones as str."""
-    cfg = _write(tmp_path, f"ignore:\n  - vulnerability: CVE-2026-11940\n    expiry: {stamp}\n")
+    cfg = _write(
+        tmp_path,
+        "ignore:\n"
+        "  - vulnerability: CVE-2026-11940\n"
+        "    package:\n"
+        "      name: libfake1\n"
+        "      type: deb\n"
+        f"    expiry: {stamp}\n",
+    )
     assert _load().check(cfg, TODAY) == []
 
 
@@ -136,11 +181,27 @@ def test_missing_file_is_not_check_s_job(tmp_path: Path) -> None:
 def test_secondary_config_location_is_checked(tmp_path: Path) -> None:
     """An undated ignore in .grype/config.yaml must NOT slip through."""
     mod = _load()
-    primary = _write(tmp_path, 'ignore:\n  - vulnerability: CVE-1\n    expiry: "2026-08-31"\n')
+    primary = _write(
+        tmp_path,
+        (
+            "ignore:\n"
+            "  - vulnerability: CVE-1\n"
+            "    package:\n"
+            "      name: libfake1\n"
+            "      type: deb\n"
+            '    expiry: "2026-08-31"\n'
+        ),
+    )
     nested = tmp_path / ".grype"
     nested.mkdir()
     secondary = nested / "config.yaml"
-    secondary.write_text("ignore:\n  - vulnerability: CVE-2026-11940\n")
+    secondary.write_text(
+        "ignore:\n"
+        "  - vulnerability: CVE-2026-11940\n"
+        "    package:\n"
+        "      name: libfake1\n"
+        "      type: deb\n"
+    )
 
     problems = mod.check_all((primary, secondary), TODAY)
     assert len(problems) == 1
@@ -843,7 +904,12 @@ def test_gate_jobs_are_unconditional_and_time_limited() -> None:
 def _dated(tmp_path: Path, expiry: dt.date) -> Path:
     return _write(
         tmp_path,
-        f'ignore:\n  - vulnerability: CVE-2026-11940\n    expiry: "{expiry.isoformat()}"\n',
+        "ignore:\n"
+        "  - vulnerability: CVE-2026-11940\n"
+        "    package:\n"
+        "      name: libfake1\n"
+        "      type: deb\n"
+        f'    expiry: "{expiry.isoformat()}"\n',
     )
 
 
@@ -1123,3 +1189,148 @@ def test_the_exporter_and_the_badge_agree_on_where_it_lives() -> None:
         "writes to. It was moved by hand rather than regenerated by the hook, "
         "so its contents may not match the current lockfile."
     )
+
+
+def test_a_waiver_without_a_package_scope_is_rejected(tmp_path: Path) -> None:
+    """An ignore naming a CVE but no package silences that CVE EVERYWHERE.
+
+    This is not a style preference. check_grype_unmapped_findings._is_argued
+    returns True on an empty scope ("rule named no package: covers everything"),
+    so one argument written about a Debian gcc runtime would also excuse the
+    same CVE id in a first-party wheel nobody measured. The sibling hook
+    already refuses the mirror-image mistake — a rule with a package and no
+    CVE — and refuses a regex-unsafe package name because it "silences packages
+    it never named". An unscoped CVE is the same failure with a wider blast
+    radius, and until this check existed nothing caught it: two such entries
+    reached main.
+    """
+    config = tmp_path / ".grype.yaml"
+    config.write_text(
+        "ignore:\n"
+        "  - vulnerability: CVE-2026-99999\n"
+        '    reason: "argued for the base image gcc runtime only"\n'
+        '    expiry: "2099-01-01"\n'
+    )
+
+    problems = _load().check(config, TODAY)
+
+    assert problems, "an ignore with no package scope was accepted"
+    assert any("no `package`" in p for p in problems), problems
+
+
+def test_a_type_scope_with_a_version_is_accepted(tmp_path: Path) -> None:
+    """Type + exact version is legitimate, and sometimes the only form available.
+
+    A package whose name contains a regex activator (`libstdc++6`) cannot be
+    named at all — REGEX_ACTIVATORS rejects it and escaping adds a backslash,
+    also an activator. Scoping by type plus an exact version is then the
+    narrowest form the tooling permits, so requiring `name` would leave no
+    legal way to argue such a finding.
+    """
+    config = tmp_path / ".grype.yaml"
+    config.write_text(
+        "ignore:\n"
+        "  - vulnerability: CVE-2026-99999\n"
+        "    package:\n"
+        "      type: deb\n"
+        "      version: 14.2.0-19\n"
+        '    reason: "scoped by type because the package name is regex-unsafe"\n'
+        '    expiry: "2099-01-01"\n'
+    )
+
+    assert _load().check(config, TODAY) == []
+
+
+def test_the_repos_own_config_scopes_every_waiver() -> None:
+    """The real .grype.yaml, not a fixture. Guards against a merge reintroducing
+    an unscoped entry — which is exactly how this got onto main."""
+    problems = _load().check(REPO / ".grype.yaml", TODAY)
+
+    unscoped = [p for p in problems if "no `package`" in p]
+    assert unscoped == [], unscoped
+
+
+def test_the_libstdcpp_waivers_stay_version_pinned() -> None:
+    """These two cannot be scoped by name, so the version pin is their only bound.
+
+    `libstdc++6` contains a `+`, so naming it is rejected; the entries are scoped
+    `type: deb` plus an exact version instead. MEASURED by contrast on grype
+    0.114.0 that grype honours the version — the rule at 14.2.0-19 suppressed 3
+    of 3 matches, at 99.9.9-99 it suppressed 0 of 3. That is what stops the
+    waiver outliving the fix: it goes silent the moment Debian bumps the package.
+
+    Drop the `version` and the entry silently becomes an open-ended suppression
+    of that CVE across every Debian package, expiry date notwithstanding. This
+    pins the bound so that edit fails loudly instead.
+    """
+    rules = yaml.safe_load((REPO / ".grype.yaml").read_text())["ignore"]
+    by_cve = {r.get("vulnerability"): r for r in rules if isinstance(r, dict)}
+
+    for cve in ("CVE-2026-102010", "CVE-2026-95619"):
+        rule = by_cve.get(cve)
+        assert rule, f"{cve} is no longer waived — delete this test with the entry"
+        pkg = rule.get("package") or {}
+        assert pkg.get("type") == "deb", f"{cve}: lost its type scope: {pkg!r}"
+        assert pkg.get("version"), (
+            f"{cve}: lost its `version` pin. Without it this waiver suppresses the CVE "
+            f"on every Debian package for as long as the expiry allows, including after "
+            f"Debian ships a fix. Re-pin it, or argue the entry afresh."
+        )
+
+
+def test_a_type_scope_without_a_version_is_rejected(tmp_path: Path) -> None:
+    """Bare `type:` is not a scope — it is every package of that ecosystem.
+
+    `type: deb` alone covers ~100 Debian packages in this base image. The type
+    escape hatch exists only for a name grype would treat as a regex, and it is
+    only narrow when a version bounds it. A previous revision of this check
+    accepted bare `type:` while its own error message promised "plus a version":
+    the message was the contract and the code did not keep it.
+    """
+    config = tmp_path / ".grype.yaml"
+    config.write_text(
+        "ignore:\n"
+        "  - vulnerability: CVE-2026-99999\n"
+        "    package:\n"
+        "      type: deb\n"
+        '    reason: "argued for one gcc runtime, not for every deb"\n'
+        '    expiry: "2099-01-01"\n'
+    )
+
+    problems = _load().check(config, TODAY)
+
+    assert problems, "a type-only scope with no version was accepted"
+    assert any("no `version`" in p for p in problems), problems
+
+
+def test_a_waiver_using_a_qualifier_this_gate_cannot_evaluate_is_rejected(tmp_path: Path) -> None:
+    """Grype honours more package qualifiers than our matcher reads.
+
+    grype 0.114.0 also constrains `package.language`, `package.location` and
+    `package.upstream-name`. scope_of reads name/type/version only, so a waiver
+    written with one of the others would be read MORE LOOSELY here than by
+    grype: a rule meant to excuse one npm package at one location would, to
+    this gate, excuse that package anywhere. That is the fail-open direction,
+    and it is the same drift — a waiver able to say more than the gate reads —
+    that this whole module exists to prevent.
+
+    Rejecting is the honest option. Implementing location/language matching
+    would mean inventing an answer for artifacts whose SARIF records carry no
+    such field, and a gate that guesses is worse than one that refuses.
+    """
+    config = tmp_path / ".grype.yaml"
+    config.write_text(
+        "ignore:\n"
+        "  - vulnerability: CVE-2026-99999\n"
+        "    package:\n"
+        "      name: lodash\n"
+        "      type: npm\n"
+        "      location: /app/node_modules/lodash\n"
+        '    reason: "argued for one copy at one path"\n'
+        '    expiry: "2099-01-01"\n'
+    )
+
+    problems = _load().check(config, TODAY)
+
+    assert problems, "a waiver using an unevaluable qualifier was accepted"
+    assert any("location" in p for p in problems), problems

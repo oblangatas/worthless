@@ -169,6 +169,7 @@ def test_spawn_sidecar_passes_close_fds_and_empty_pass_fds(
     fake_proc = MagicMock()
     fake_proc.pid = 12345
     fake_proc.poll.return_value = None
+    fake_proc.stderr = None
 
     def fake_popen(*_args: object, **kwargs: object) -> MagicMock:
         captured_kwargs.update(kwargs)
@@ -469,6 +470,7 @@ def test_spawn_sidecar_passes_preexec_fn_when_service_uids_set(
     fake_proc = MagicMock()
     fake_proc.pid = 12345
     fake_proc.poll.return_value = None
+    fake_proc.stderr = None
 
     def fake_popen(*_args: object, **kwargs: object) -> MagicMock:
         captured_kwargs.update(kwargs)
@@ -512,6 +514,7 @@ def test_spawn_sidecar_omits_preexec_fn_when_service_uids_is_none(
     fake_proc = MagicMock()
     fake_proc.pid = 12345
     fake_proc.poll.return_value = None
+    fake_proc.stderr = None
 
     def fake_popen(*_args: object, **kwargs: object) -> MagicMock:
         captured_kwargs.update(kwargs)
@@ -534,6 +537,40 @@ def test_spawn_sidecar_omits_preexec_fn_when_service_uids_is_none(
     assert preexec is None, (
         f"WOR-310 C2: bare-metal path (service_uids=None) must not set preexec_fn; got {preexec!r}"
     )
+
+
+@pytest.mark.parametrize(
+    ("service_uids", "expected"),
+    [
+        (ServiceUids(proxy_uid=10001, crypto_uid=10002, worthless_gid=10001), 10002),
+        (None, os.getuid()),
+    ],
+    ids=["docker", "bare-metal"],
+)
+def test_spawn_sidecar_handle_names_the_uid_the_sidecar_runs_as(
+    _share_files: ShareFiles, tmp_path: Path, service_uids: ServiceUids | None, expected: int
+) -> None:
+    """WOR-1078: clients refuse a sidecar socket served by any other uid.
+
+    The handle is how each spawner learns which uid to hand its proxy, so it
+    must name the uid the sidecar was started as, not the proxy's.
+    """
+    fake_proc = MagicMock(pid=12345, stderr=None)
+    fake_proc.poll.return_value = None
+
+    with (
+        patch.object(_sidecar_lifecycle.subprocess, "Popen", lambda *_a, **_kw: fake_proc),
+        patch.object(_sidecar_lifecycle, "_wait_for_ready", return_value=True),
+        patch.object(_sidecar_lifecycle, "_verify_socket_inode", lambda _p: None),
+    ):
+        handle = spawn_sidecar(
+            socket_path=tmp_path / "s.sock",
+            shares=_share_files,
+            allowed_uid=10001,
+            service_uids=service_uids,
+        )
+
+    assert handle.sidecar_uid == expected
 
 
 # ---------------------------------------------------------------------------
@@ -1232,6 +1269,7 @@ def test_property_spawn_sidecar_accepts_any_valid_uid_triple(
     fake_proc = MagicMock()
     fake_proc.pid = 12345
     fake_proc.poll.return_value = None
+    fake_proc.stderr = None
 
     with (
         patch.object(_sidecar_lifecycle.subprocess, "Popen", return_value=fake_proc),
@@ -1773,7 +1811,7 @@ def test_spawn_sidecar_lstats_socket_after_ready_and_rejects_symlink(
     monkeypatch.setattr(
         _sidecar_lifecycle.subprocess,
         "Popen",
-        lambda *_a, **_kw: MagicMock(pid=12345, poll=lambda: None),
+        lambda *_a, **_kw: MagicMock(pid=12345, poll=lambda: None, stderr=None),
     )
 
     try:
@@ -1817,7 +1855,7 @@ def test_spawn_sidecar_lstat_passes_when_socket_is_real_socket(
     monkeypatch.setattr(
         _sidecar_lifecycle.subprocess,
         "Popen",
-        lambda *_a, **_kw: MagicMock(pid=12345, poll=lambda: None),
+        lambda *_a, **_kw: MagicMock(pid=12345, poll=lambda: None, stderr=None),
     )
 
     try:
@@ -1850,6 +1888,7 @@ def test_spawn_sidecar_accepts_when_proxy_and_crypto_share_gid(
     fake_proc = MagicMock()
     fake_proc.pid = 12345
     fake_proc.poll.return_value = None
+    fake_proc.stderr = None
 
     with (
         patch.object(_sidecar_lifecycle.subprocess, "Popen", return_value=fake_proc),

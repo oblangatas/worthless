@@ -35,6 +35,14 @@ from pathlib import Path
 
 import yaml
 
+# _grype_scope is a sibling module. Pre-commit runs this file as a script, which
+# puts scripts/hooks on sys.path[0] and makes a bare import work — but the tests
+# load this file through importlib.spec_from_file_location, where it does not.
+# Adding our own directory explicitly makes the import resolve under both.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _grype_scope import covers, scope_of
+
 REPO = Path(__file__).resolve().parents[2]
 
 # Both locations grype auto-discovers, same as check_grype_ignore_expiry.py.
@@ -61,7 +69,21 @@ def argued_cves(configs: tuple[Path, ...]) -> dict[str, list[dict[str, str]]]:
     CVE surfacing in python — dropping the scope here would let one written
     argument silently excuse every future package it never examined.
 
-    An empty scope list means the rule named no package, so it covers any.
+    `version` is carried too, and that matters more than it looks. A waiver
+    scoped `{type: deb, version: 14.2.0-19}` exists because its package name
+    (`libstdc++6`) is regex-unsafe and cannot be named; the version is the only
+    thing keeping it from meaning "every deb". Reading name and type alone made
+    this gate treat that as exactly "every deb" — and since the blocking grype
+    step runs `only-fixed: true`, not-fixed findings reach ONLY this gate, so
+    the pin bound nothing where it counted. Worse, it meant the waiver kept
+    suppressing after Debian shipped a fix: grype's own ignore stops matching
+    on the version bump, the finding re-fires, and this gate excused it again.
+
+    An empty scope list means the rule named no package. That USED TO mean it
+    covered everything; covers() now matches nothing on an empty scope, so such
+    a rule excuses no finding at all. Nothing legitimate relies on either
+    behaviour — check_grype_ignore_expiry rejects unscoped rules outright — but
+    failing closed is the safe direction for one that slips past it.
     Whether the date is still valid is check_grype_ignore_expiry.py's job;
     duplicating it would mean two places to fix when the contract changes.
     """
@@ -73,35 +95,23 @@ def argued_cves(configs: tuple[Path, ...]) -> dict[str, list[dict[str, str]]]:
         for rule in data.get("ignore") or []:
             if not (isinstance(rule, dict) and rule.get("vulnerability")):
                 continue
-            pkg = rule.get("package") or {}
-            scope = {
-                k: str(pkg[k]) for k in ("name", "type") if isinstance(pkg, dict) and pkg.get(k)
-            }
-            argued.setdefault(str(rule["vulnerability"]), []).append(scope)
+            argued.setdefault(str(rule["vulnerability"]), []).append(scope_of(rule))
     return argued
 
 
 def _is_argued(cve: str, artifact: dict, argued: dict[str, list[dict[str, str]]]) -> bool:
     """True only if an argument covers this CVE *on this package*.
 
-    ponytail: plain equality, not grype's regex matching. This gate only ever
-    narrows what is excused, so being stricter than grype here is the safe
-    direction — a scope we fail to match stays gating rather than slipping past.
+    The scope contract — which fields a scope may constrain, and what matching
+    one means — lives in _grype_scope so this hook and the expiry hook cannot
+    drift apart. They did: this one read name and type while the validator
+    accepted a `version`, so a version pin added to bound a waiver bound nothing
+    here, on the gate that actually blocks for not-fixed findings.
     """
     scopes = argued.get(cve)
     if scopes is None:
         return False
-    name = str(artifact.get("name") or "")
-    ptype = str(artifact.get("type") or "")
-    for scope in scopes:
-        if not scope:
-            return True  # rule named no package: covers everything
-        if "name" in scope and scope["name"] != name:
-            continue
-        if "type" in scope and scope["type"] != ptype:
-            continue
-        return True
-    return False
+    return any(covers(scope, artifact) for scope in scopes)
 
 
 def unmapped_findings(

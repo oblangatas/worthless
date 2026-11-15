@@ -1,6 +1,6 @@
 [project]
 name = "worthless"
-version = "0.3.12"
+version = "0.3.16"
 description = "Split-key reverse proxy that makes leaked API keys worthless"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
@@ -21,19 +21,48 @@ classifiers = [
 ]
 
 dependencies = [
+    # These minimums are all that install.sh, `pip install worthless` and uvx
+    # get: none of them read uv.lock (only the Docker image does). So for an
+    # advisory against a runtime dependency, transitive ones included, raise or
+    # add its floor here, not just the lock. The user-facing contract is in
+    # docs/install-security.md under "Dependencies" (WOR-1077).
+    #
     # Floor is 50.0.0, not 48.0.1: PYSEC-2026-3552 affects everything below it.
     # A floor of 48 let a fresh `uv lock` land on 49.0.0 and fail uv-audit at
     # push time, which is how this surfaced. Raise the floor, not just the lock.
     "cryptography>=50.0.0",
     "aiosqlite>=0.22.1",
     "httpx>=0.28",
+    # Floor is 2026.10.23, not unpinned: certifi below 2026.10.18 trusts the
+    # emSign root above the compromised eMudhra intermediate keys
+    # (GHSA-6q48-6c7w-9gw2, PYSEC-2026-4320), and httpx verifies the proxy's
+    # provider calls against this bundle. Never imported; declared only for
+    # the floor, because pip keeps an existing env's certifi otherwise.
+    # 2026.10.23 also drops emSign Root CA - C1 and ECC Root CA - C3, which
+    # 2026.10.19 kept.
+    "certifi>=2026.10.23",
     "fastapi>=0.115.12",
+    # Floor is 2.14.2: below it, extra data gets past validation through
+    # aliased fields in TypedDicts and dataclasses (GHSA-3r8g-cqwr-jr29) and,
+    # from 2.13, through extra keys in JSON model validation
+    # (GHSA-qpmf-fgh3-ff25). fastapi brings pydantic in; never imported here,
+    # declared only for the floor.
+    "pydantic>=2.14.2",
     "uvicorn[standard]>=0.34",
+    # Floor is 17.4: below it, unbounded empty fragments can exhaust memory
+    # (GHSA-6m5v-9gmr-5665). uvicorn[standard] brings websockets in; never
+    # imported here, declared only for the floor. 17.x needs Python 3.11, so
+    # on 3.10 the lock stays on 16.1.1, which is still affected.
+    "websockets>=17.4; python_version >= '3.11'",
     "typer>=0.15",
     "python-dotenv>=1.0",
     "psutil>=5.9",
     "keyring>=25.0",
-    "msgpack>=1.0",
+    # Floor is 1.2.4, not 1.0: CVE-2026-114613 (GHSA-j586-36cw-2gc2, fixed in
+    # 1.2.3) leaks on the default strict_map_key=True path ipc/framing.py
+    # decodes with, and GHSA-j8c6-9vc5-hj6x (fixed in 1.2.4) lets a 5 KB frame
+    # preallocate ~513 MiB of containers.
+    "msgpack>=1.2.4",
     # TOML reader for the provider registry (worthless-8rqs). Stdlib `tomllib`
     # is 3.11+; for 3.10 we fall back to the `tomli` backport at runtime.
     "tomli>=2.0; python_version < '3.11'",
@@ -42,12 +71,6 @@ dependencies = [
 
 [project.scripts]
 worthless = "worthless.cli.app:app"
-docs-generate = "worthless.dev.docs:generate_docs"
-test-unit = "worthless.testing.runners:unit"
-test-docker = "worthless.testing.runners:docker"
-test-live = "worthless.testing.runners:live"
-test-openclaw = "worthless.testing.runners:openclaw"
-test-all = "worthless.testing.runners:all_tests"
 
 [project.urls]
 Homepage = "https://github.com/oblangatas/worthless"
@@ -56,11 +79,17 @@ Issues = "https://github.com/oblangatas/worthless/issues"
 
 [project.optional-dependencies]
 mcp = [
-    # Ceiling, not a floor raise (WOR-864): mcp 2.0.0 renamed
-    # mcp.server.fastmcp -> mcp.server.mcpserver with no shim, which breaks
-    # src/worthless/mcp/server.py. Floor stays at 1.0 so users already
-    # resolved on an older 1.x are untouched; the lock takes the newest 1.x.
-    "mcp>=1.0,<2",
+    # 2.x only (WOR-929). The server imports mcp.server.mcpserver, which 1.x
+    # does not have, so the floor is load-bearing. The ceiling is too: uvx
+    # resolves this extra fresh (ignoring uv.lock), so an unbounded range
+    # would pick up the next breaking major the day it ships (WOR-864).
+    "mcp>=2.1,<3",
+    # Floor is 1.45.2: up to 1.45.1, parsing a crafted traceparent takes
+    # quadratic time (GHSA-mf5v-w3w3-f6cg). mcp's server middleware parses the
+    # traceparent in every request's _meta, with or without tracing set up.
+    # The proxy turns fastapi's tracing off, so only this extra needs the
+    # floor. Never imported here; declared only for the floor.
+    "opentelemetry-api>=1.45.2",
 ]
 dev = [
     "deptry>=0.22",
@@ -72,6 +101,7 @@ dev = [
 ]
 test = [
     "anthropic>=0.40",
+    "httpx2>=2.12",
     "hypothesis>=6.0",
     "openai>=1.54",
     "pytest>=8.0",
@@ -85,7 +115,6 @@ test = [
     "pytest-xdist>=3.6",
     "respx>=0.22",
     "scipy>=1.12",
-    "syrupy>=4.8",
     "tomli>=2.0; python_version < '3.11'",
 ]
 qa = [
@@ -117,6 +146,7 @@ dev = [
 ]
 test = [
     "anthropic>=0.40",
+    "httpx2>=2.12",
     "hypothesis>=6.0",
     "openai>=1.54",
     "pytest>=8.0",
@@ -130,7 +160,6 @@ test = [
     "pytest-xdist>=3.6",
     "respx>=0.22",
     "scipy>=1.12",
-    "syrupy>=4.8",
     "tomli>=2.0; python_version < '3.11'",
 ]
 
@@ -286,7 +315,9 @@ optional_dependencies_dev_groups = ["dev", "test", "qa", "fuzz"]
 DEP001 = ["tomllib"]
 # uvicorn: runtime ASGI server invoked via CLI, never imported
 # python-dotenv: planned refactor to replace custom parser (worthless-ic6)
-DEP002 = ["uvicorn", "python-dotenv"]
+# certifi, pydantic, websockets, opentelemetry-api: never imported; declared
+# only for their advisory floors
+DEP002 = ["uvicorn", "python-dotenv", "certifi", "pydantic", "websockets", "opentelemetry-api"]
 # starlette: transitive dep of fastapi, but we import ASGI types directly
 # rich: transitive dep of typer (bundled in typer>=0.12), but we import directly for console output
 DEP003 = ["starlette", "rich"]
