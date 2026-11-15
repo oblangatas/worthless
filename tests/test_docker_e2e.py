@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -414,6 +416,87 @@ class TestBuild:
             ]
         )
         assert result.returncode == 0
+
+    def test_image_holds_exactly_the_locked_runtime_set(self, docker_image: str) -> None:
+        """Every package in the image is the one uv.lock pins, and nothing else (WOR-1077).
+
+        The check lives in scripts/check_image_matches_lock.py so `scan`, a
+        required check, can run it on every PR. This wrapper is how the publish
+        smoke in publish-docker.yml runs it against the image users pull.
+        """
+        result = _run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "check_image_matches_lock.py"),
+                docker_image,
+            ]
+        )
+        assert "match uv.lock" in result.stdout
+
+    def test_lock_check_refuses_two_records_of_one_package(self, docker_image: str) -> None:
+        """A second install record for a locked package fails the check (WOR-1077).
+
+        `pip install --ignore-installed` leaves the old dist-info next to the new
+        one. The check read whichever came last, so a record at the locked
+        version could vouch for files from another release.
+        """
+        tag = f"worthless-test:lock-dup-{uuid.uuid4().hex[:8]}"
+        dockerfile = (
+            f"FROM {docker_image}\n"
+            'RUN sp="$(python -c \'import sysconfig; print(sysconfig.get_path("purelib"))\')"'
+            " \\\n"
+            '    && mkdir "$sp/msgpack-0.0.1.dist-info" \\\n'
+            "    && printf 'Metadata-Version: 2.1\\nName: msgpack\\nVersion: 0.0.1\\n' \\\n"
+            '       > "$sp/msgpack-0.0.1.dist-info/METADATA"\n'
+        )
+        _run(["docker", "build", "-q", "-t", tag, "-"], input=dockerfile)
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts" / "check_image_matches_lock.py"), tag],
+                capture_output=True,
+                text=True,
+                env=_docker_env(),
+                check=False,
+            )
+        finally:
+            subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "more than one install record: msgpack" in proc.stderr, proc.stderr
+
+    def test_lock_check_refuses_a_runtime_version_the_audit_never_sees(
+        self, docker_image: str, tmp_path: Path
+    ) -> None:
+        """The image's lock set must be one the audit checks (WOR-1077).
+
+        The required audit exports uv.lock with the dev group; the image installs
+        the export without it. A dev-group conflict can resolve a package to one
+        version in each, so the image would run a version no required audit
+        checked. A wrapper `uv` stands in for such a lock: it gives websockets a
+        different version only in the export that includes the dev group.
+        """
+        real_uv = shutil.which("uv")
+        assert real_uv, "uv is not on PATH"
+        fake = tmp_path / "uv"
+        fake.write_text(
+            "#!/bin/sh\n"
+            f'case " $* " in *" --no-dev "*) exec "{real_uv}" "$@" ;; esac\n'
+            f'"{real_uv}" "$@" | sed "s/^websockets==[^ ;]*/websockets==0.0.1/"\n'
+        )
+        fake.chmod(0o755)
+        env = _docker_env({"PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"})
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "check_image_matches_lock.py"),
+                docker_image,
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "the audit doesn't check: websockets==" in proc.stderr, proc.stderr
 
     def test_runs_as_non_root(self, container: tuple[str, int]) -> None:
         """The runtime PROCESSES (uvicorn + sidecar) must run as non-root.
