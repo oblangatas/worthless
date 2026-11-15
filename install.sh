@@ -36,7 +36,14 @@ trap 'trap - EXIT INT HUP; cleanup; kill -INT $$; exit 130' INT
 trap 'trap - EXIT TERM HUP; cleanup; exit 143' TERM
 trap 'trap - EXIT HUP; cleanup; exit 129' HUP
 
-UV_VERSION="0.11.7"
+UV_VERSION="0.13.7"
+# The Python `uv tool install` builds worthless's environment on (WOR-1116).
+# Unrequested, uv 0.13 picks 3.15, where PyYAML has no wheel and builds from
+# source with unpinned setuptools/Cython and the caller's CC; 3.14 has a wheel
+# for every dependency. The floor is 3.14.10, whose ssl rejects the compromised
+# eMudhra keys: a bare "3.14" kept an older uv-managed 3.14 (verified: 3.14.4).
+# uv >= 0.13.6 can download 3.14.10.
+TOOL_PYTHON=">=3.14.10,<3.15"
 
 # Default worthless version: the latest release already on PyPI, hand-bumped
 # per release (release-sync-check.yml fails if it falls behind). We install
@@ -48,7 +55,7 @@ UV_VERSION="0.11.7"
 WORTHLESS_VERSION_PIN="0.3.16"
 
 # SHA256 of https://astral.sh/uv/${UV_VERSION}/install.sh — bump with UV_VERSION.
-ASTRAL_INSTALLER_SHA256="efed99618cb5c31e4e36a700ab7c3698e83c0ae0f3c336714043d0f932c8d32c"
+ASTRAL_INSTALLER_SHA256="d263ee68314cf5bea36b08e6bd9e2c4563240d7adb73756cf33af5c199b92db4"
 
 ASTRAL_INSTALLER_URL="https://astral.sh/uv/${UV_VERSION}/install.sh"
 DOCS_URL="https://docs.wless.io"
@@ -407,7 +414,7 @@ install_or_upgrade_worthless() {
     # `.XXXXXX` template: BSD and GNU mktemp -t both accept it quietly.
     uv_install_err="$(mktemp 2>/dev/null || mktemp -t worthless-uv-install-err.XXXXXX)"
 
-    if ! "$UV" tool install --force "$spec" >/dev/null 2>"$uv_install_err"; then
+    if ! "$UV" tool install --force --python "$TOOL_PYTHON" "$spec" >/dev/null 2>"$uv_install_err"; then
         err "Failed to install ${spec}."
         if [ -s "$uv_install_err" ]; then
             printf "\n       uv tool install reported:\n" >&2
