@@ -37,6 +37,7 @@ from worthless.cli.platform import (
     popen_platform_kwargs,
 )
 from worthless.cli.process import (
+    create_liveness_pipe,
     build_proxy_env,
     check_pid,
     cleanup_stale_pid,
@@ -607,24 +608,33 @@ def _start_foreground_locked(
 
         for note in ignored_upstream_env_notes():
             console.print_warning(note)
+        # worthless-yfxm: the proxy exits when this pipe hits EOF. We hold the
+        # write end while we supervise; if we die, even by kill -9, the kernel
+        # closes it. Created after the sidecar spawn, so the sidecar never holds it.
+        read_fd, write_fd = create_liveness_pipe()
         try:
-            proxy, actual_port = spawn_proxy(env=proxy_env, port=port)
-        except Exception as exc:
-            console.print_error(
-                WorthlessError(
-                    ErrorCode.PROXY_UNREACHABLE,
-                    sanitize_exception(exc, generic="failed to start proxy"),
+            try:
+                proxy, actual_port = spawn_proxy(env=proxy_env, port=port, liveness_fd=read_fd)
+            except Exception as exc:
+                console.print_error(
+                    WorthlessError(
+                        ErrorCode.PROXY_UNREACHABLE,
+                        sanitize_exception(exc, generic="failed to start proxy"),
+                    )
                 )
-            )
-            raise typer.Exit(code=1) from exc
+                raise typer.Exit(code=1) from exc
+            finally:
+                os.close(read_fd)  # the proxy has its own copy
 
-        _supervise_proxy_with_sidecar(
-            proxy=proxy,
-            handle=handle,
-            actual_port=actual_port,
-            pid_file=pid_file,
-            console=console,
-        )
+            _supervise_proxy_with_sidecar(
+                proxy=proxy,
+                handle=handle,
+                actual_port=actual_port,
+                pid_file=pid_file,
+                console=console,
+            )
+        finally:
+            os.close(write_fd)
     except BaseException:
         # Tear down on any failure: ``handle is None`` means spawn_sidecar
         # itself raised — we still have shares on disk to clean up. SR-02:
