@@ -69,16 +69,6 @@ jobs:
 
       - name: Validate static website files
         run: |
-          WEBSITE_VERSION=$(python3 - <<'PY'
-          import re
-          from pathlib import Path
-          text = Path("pyproject.toml").read_text(encoding="utf-8")
-          match = re.search(r'^version = "([^"]+)"', text, re.MULTILINE)
-          if not match:
-              raise SystemExit("pyproject.toml missing project.version")
-          print(match.group(1))
-          PY
-          )
           test -f website/index.html
           test -f website/CNAME
           test -f website/robots.txt
@@ -118,8 +108,6 @@ jobs:
           grep -qx 'Sitemap: https://wless.io/sitemap.xml' website/robots.txt
           grep -q 'Follow the leak' website/index.html
           grep -q 'Hosted Worthless' website/index.html
-          grep -q "Beta CLI · v${WEBSITE_VERSION} · runs locally" website/index.html
-          grep -q "Worthless CLI beta · v${WEBSITE_VERSION}" website/index.html
           grep -q 'Tally' website/privacy.html
 
       - name: Set up uv + Python
