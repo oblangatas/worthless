@@ -589,18 +589,20 @@ async def _halves_of_stored_keys(
     decrypted at most once, and only when a value starts with its prefix.
     """
     found: list[tuple[str, str]] = []
-    decrypted: list[tuple[str, object, object]] = []
+    # (alias, prefix, charset, decrypted shard)
+    decrypted: list[tuple[str, str, str, StoredShard]] = []
     try:
         for alias in await repo.list_keys():
             encrypted = await repo.fetch_encrypted(alias)
             if encrypted is None or encrypted.prefix is None or encrypted.charset is None:
                 continue
-            if not any(value.startswith(encrypted.prefix) for _v, value, _p in scanned):
+            prefix, charset = encrypted.prefix, encrypted.charset
+            if not any(value.startswith(prefix) for _v, value, _p in scanned):
                 continue
-            decrypted.append((alias, encrypted, await repo.decrypt_shard(encrypted)))
+            decrypted.append((alias, prefix, charset, await repo.decrypt_shard(encrypted)))
         for var_name, value, _provider in scanned:
-            for alias, encrypted, stored in decrypted:
-                if not value.startswith(encrypted.prefix):
+            for alias, prefix, charset, stored in decrypted:
+                if not value.startswith(prefix):
                     continue
                 shard_a = bytearray(value.encode("utf-8"))
                 reconstructed: bytearray | None = None
@@ -610,8 +612,8 @@ async def _halves_of_stored_keys(
                         stored.shard_b,
                         stored.commitment,
                         stored.nonce,
-                        encrypted.prefix,
-                        encrypted.charset,
+                        prefix,
+                        charset,
                     )
                     found.append((var_name, alias))
                     break
@@ -622,7 +624,7 @@ async def _halves_of_stored_keys(
                     if reconstructed is not None:
                         zero_buf(reconstructed)
     finally:
-        for _alias, _encrypted, stored in decrypted:
+        for _alias, _prefix, _charset, stored in decrypted:
             stored.zero()
     return found
 
