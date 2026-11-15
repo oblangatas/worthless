@@ -153,11 +153,21 @@ def test_kill_9_on_wrap_takes_its_proxy_with_it(sandbox: tuple[Path, dict[str, s
             time.sleep(0.2)
         assert "proxy" in kids, "wrap never started its proxy"
         assert child_up, "wrap never started its child"
+        port = next(
+            c.laddr.port
+            for c in kids["proxy"].net_connections(kind="tcp")
+            if c.status == psutil.CONN_LISTEN
+        )
+        run_dir = home / "w" / "run" / str(wrap.pid)
+        assert (run_dir / "share_a.bin").exists()
 
         wrap.send_signal(signal.SIGKILL)
         wrap.wait(timeout=5)
 
         kids["proxy"].wait(timeout=2)
+        assert not poll_health(port, timeout=0.5), "the port still answers after wrap died"
+        assert _wait_gone(run_dir, 2.0), f"shares left behind: {sorted(run_dir.iterdir())}"
+        kids["sidecar"].wait(timeout=8)
     finally:
         _kill_all(wrap, *kids.values())
         for p in psutil.process_iter(["cmdline"]):  # wrap's orphaned child

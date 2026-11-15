@@ -8,6 +8,7 @@ the read end as ``WORTHLESS_LIVENESS_FD``. When the supervisor dies, even by
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
 
@@ -65,6 +66,7 @@ async def test_proxy_ignores_a_liveness_fd_that_is_not_a_pipe(
     kind: str,
     monkeypatch: pytest.MonkeyPatch,
     kills: list[tuple[int, int]],
+    caplog: pytest.LogCaptureFixture,
     tmp_path,  # type: ignore[no-untyped-def]
 ) -> None:
     """A stale or bogus value must not stop a healthy proxy or fail its startup.
@@ -87,9 +89,11 @@ async def test_proxy_ignores_a_liveness_fd_that_is_not_a_pipe(
         raw = "not-a-number"
     monkeypatch.setenv("WORTHLESS_LIVENESS_FD", raw)
     try:
-        assert proxy_app._watch_liveness_fd() is None
+        with caplog.at_level(logging.WARNING, logger=proxy_app.logger.name):
+            assert proxy_app._watch_liveness_fd() is None
         await asyncio.sleep(0.05)
         assert kills == []
+        assert any("ignoring WORTHLESS_LIVENESS_FD" in r.getMessage() for r in caplog.records)
     finally:
         if fd >= 0:
             os.close(fd)

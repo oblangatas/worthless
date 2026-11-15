@@ -56,6 +56,7 @@ from worthless.proxy.rules import (
 from worthless.proxy.upstream import build_upstream_client, warn_ignored_env
 from worthless.storage.schema import SCHEMA, migrate_db
 from worthless.cli.log_redaction import install_redaction_filter
+from worthless.cli.process import read_pid
 from worthless.storage.shard_reader import ShardReader
 from worthless.storage.sqlite import open_connection
 from worthless.storage.spend_ledger import SpendLedger
@@ -185,9 +186,10 @@ def _forget_pid_file() -> None:
     home = os.environ.get("WORTHLESS_HOME")
     if not home:
         return
-    pid_file = Path(home) / "proxy.pid"  # cli.process.pid_path; format "pid\nport"
-    with contextlib.suppress(OSError, ValueError, IndexError):
-        if int(pid_file.read_text().split()[0]) == os.getpid():
+    pid_file = Path(home) / "proxy.pid"
+    entry = read_pid(pid_file)
+    if entry is not None and entry[0] == os.getpid():
+        with contextlib.suppress(OSError):
             pid_file.unlink()
 
 
