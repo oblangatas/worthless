@@ -147,6 +147,49 @@ def dockerfile_final_stage(dockerfile_text: str) -> str:
     return dockerfile_text[from_indices[-1] :]
 
 
+# WOR-1077: every command in the Dockerfile that installs Python packages, in
+# order. See TestDockerfile.test_builder_installs_exactly_the_audited_lock.
+_LOCKED_INSTALL = [
+    "uv export --quiet --locked --no-dev --no-emit-project --format requirements-txt"
+    " -o /tmp/requirements.lock.txt",
+    "pip install --no-cache-dir --require-hashes --only-binary :all: -r /tmp/requirements.lock.txt",
+    "pip install --no-cache-dir --no-deps .",
+    "pip check",
+]
+# A command that can put Python packages on disk: pip in any spelling
+# (pip3, pip3.13, `python -m pip`, ensurepip), uv/uvx, easy_install, setup.py.
+_INSTALLER = re.compile(r"\b(?:pip[\d.]*|ensurepip|uvx?|easy_install|setup\.py)\b")
+
+
+def _instructions(dockerfile_text: str) -> str:
+    """The Dockerfile as Docker parses it: one instruction per line.
+
+    Comment lines go first, as Docker drops them: one inside a continued
+    instruction would otherwise end the join and hide everything after it. Then
+    continuations are joined and leading whitespace dropped, so an indented or
+    wrapped instruction can't slip past a `^INSTRUCTION` match. Match with re.I:
+    Docker reads `run` as RUN.
+    """
+    text = re.sub(r"^\s*#.*\n", "", dockerfile_text, flags=re.MULTILINE)
+    text = re.sub(r"\\\n", " ", text)
+    return re.sub(r"^[ \t]+", "", text, flags=re.MULTILINE)
+
+
+def _run_commands(dockerfile_text: str) -> list[str]:
+    """Each `&&`-joined shell command the Dockerfile's RUN instructions execute.
+
+    Exec-form RUN, and a heredoc anywhere in a RUN (`RUN sh <<EOF` too), can't
+    be split this way, so they are refused, not skipped.
+    """
+    text = _instructions(dockerfile_text)
+    hidden = re.findall(r"^RUN\s+(?:--\S+\s+)*\[|^RUN\s[^\n]*<<", text, re.M | re.I)
+    assert not hidden, "exec-form or heredoc RUN hides its commands from this parser"
+    commands: list[str] = []
+    for match in re.finditer(r"^RUN\s+(.*)$", text, re.M | re.I):
+        commands += [" ".join(part.split()) for part in match.group(1).split("&&")]
+    return commands
+
+
 def _split_image_ref(image: str) -> tuple[str, str, str, str]:
     """Split ``registry/owner/name:tag`` into its four parts (WOR-553).
 
@@ -788,14 +831,6 @@ class TestDockerfile:
             "Debian 12 is end-of-life — its CVEs have no fix. Use slim-trixie."
         )
 
-    def test_pinned_digest(self, dockerfile_text: str):
-        """Base image must be pinned by SHA256 digest for reproducibility.
-
-        Tag-only references (python:3.13-slim) can silently change content.
-        Pinning the digest ensures identical builds.
-        """
-        assert "@sha256:" in dockerfile_text
-
     def test_multi_stage_build(self, dockerfile_text: str):
         """Must use multi-stage build to minimize final image size."""
         from_count = len(re.findall(r"^FROM\s", dockerfile_text, re.MULTILINE))
@@ -1067,11 +1102,47 @@ class TestDockerfile:
         if user_lines:
             assert user_lines[-1] != "root", "Final USER must not be root"
 
-    def test_no_cache_pip_install(self, dockerfile_text: str):
-        """pip install must use --no-cache-dir to minimize image size."""
-        pip_lines = re.findall(r"pip install.*", dockerfile_text)
-        for line in pip_lines:
-            assert "--no-cache-dir" in line, f"pip install missing --no-cache-dir: {line}"
+    def test_builder_installs_exactly_the_audited_lock(self, dockerfile_text: str):
+        """Every package in the image comes from uv.lock, hash-checked (WOR-1077).
+
+        The commands that install Python packages are pinned exactly, because
+        an allowlist of flags let `pip3`, `uv pip sync`, `--index-url=` and a
+        dropped `--only-binary` through. scripts/check_image_matches_lock.py
+        checks what the built image holds; this checks what the text can't show
+        there: the hashes, `--locked` and wheels-only.
+        """
+        text = _instructions(dockerfile_text)
+        assert re.search(r"^COPY\s[^\n]*\buv\.lock\b", text, re.M | re.I), (
+            "WOR-1077: the build must COPY uv.lock, the file the audit gate audits"
+        )
+        installs = [c for c in _run_commands(dockerfile_text) if _INSTALLER.search(c)]
+        assert installs == _LOCKED_INSTALL, (
+            "WOR-1077: the image must install only uv.lock's hashed export.\n"
+            f"  expected: {_LOCKED_INSTALL}\n  found:    {installs}\n"
+            "If this change is deliberate, update _LOCKED_INSTALL and the claims it backs."
+        )
+
+    def test_external_images_are_digest_pinned(self, dockerfile_text: str):
+        """Every image the build pulls, `COPY --from` sources included, pins a digest.
+
+        A tag can be repointed at different content; the digest can't.
+        Read through _instructions, so case, indenting, wrapping and flags before
+        an image (`FROM --platform=…`, `COPY --chown=… --from=…`) don't hide one.
+        """
+        text = _instructions(dockerfile_text)
+        image = r"^FROM\s+(?:--\S+\s+)*(\S+)"
+        stages = {alias for _, alias in re.findall(image + r"\s+AS\s+(\S+)", text, re.M | re.I)}
+        refs = re.findall(image, text, re.M | re.I)
+        refs += re.findall(r"^COPY\s[^\n]*--from=(\S+)", text, re.M | re.I)
+        for run in re.findall(r"^RUN\s([^\n]*)", text, re.M | re.I):
+            refs += re.findall(r"--mount=\S*?\bfrom=([^,\s]+)", run, re.I)
+        external = [r for r in refs if r not in stages]
+        assert external, "no external images found; did the parsing break?"
+        for ref in external:
+            assert re.search(r"@sha256:[0-9a-f]{64}$", ref), f"image not pinned by digest: {ref}"
+        assert not re.search(r"^ADD\s[^\n]*https?://", text, re.M | re.I), (
+            "ADD <url> fetches with no digest; COPY it from a digest-pinned image instead"
+        )
 
     def test_pythondontwritebytecode(self, dockerfile_text: str):
         """PYTHONDONTWRITEBYTECODE must be set to avoid .pyc files on read-only fs."""
@@ -1097,6 +1168,61 @@ class TestDockerfile:
         assert env, f"{dockerfile} must set WORTHLESS_SIDECAR_UID in its ENV"
         assert env.group(1) == crypto.group(1), (
             f"WORTHLESS_SIDECAR_UID={env.group(1)} but worthless-crypto is uid {crypto.group(1)}"
+        )
+
+
+_LOCK_CHECK_RUN = 'uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"'
+
+
+def _pushes(step: dict) -> bool:
+    """*step* pushes an image, going by what it does as well as by its name."""
+    opts = step.get("with") or {}
+    outputs = str(opts.get("outputs", "")).replace(" ", "")
+    # publish-docker.yml's real push sets `push: false` and pushes via `outputs`;
+    # a `type=registry` exporter pushes whatever `push:` says.
+    return (
+        str(step.get("name", "")).startswith("Push")
+        or opts.get("push") not in (None, False, "false")
+        or "push=true" in outputs
+        or "type=registry" in outputs
+    )
+
+
+def _lock_check_step(workflow: str, job: str, image: str) -> None:
+    """*job* checks the *image* it built against uv.lock, before anything scans or pushes it."""
+    wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / workflow).read_text())
+    steps = wf["jobs"][job]["steps"]
+    found = [i for i, s in enumerate(steps) if "check_image_matches_lock.py" in str(s.get("run"))]
+    assert len(found) == 1, f"{workflow} {job}: expected one lock-check step, found {len(found)}"
+    step = steps[found[0]]
+    assert "if" not in step and "continue-on-error" not in step, (
+        "a skipped or soft-failing lock check passes on any image"
+    )
+    assert step.get("env", {}).get("IMAGE") == image, (
+        f"the lock check must run on the image this job built, {image}"
+    )
+    # Exact, so `|| true` or `; exit 0` can't turn a failing check into a pass.
+    assert step["run"].strip() == _LOCK_CHECK_RUN, f"the step must run exactly: {_LOCK_CHECK_RUN}"
+    built = next(i for i, s in enumerate(steps) if image in str(s))
+    assert built < found[0], "the lock check runs before the image is built"
+    for s in steps[: found[0]]:
+        assert "anchore/scan-action" not in str(s.get("uses")), (
+            "a failing scan step before it would skip the lock check"
+        )
+        assert not _pushes(s), "the image is pushed unchecked"
+
+
+class TestImageLockCheck:
+    """The built image is checked against uv.lock before anything relies on it (WOR-1077)."""
+
+    def test_pr_scan_checks_the_image_against_the_lock(self):
+        """`scan` is required on every PR; docker-e2e, which also runs the check, is not."""
+        _lock_check_step("docker-security.yml", "scan", "worthless-proxy:${{ github.sha }}")
+
+    def test_release_checks_the_image_before_pushing_it(self):
+        """The publish smoke checks the pulled image too, but only after it is public."""
+        _lock_check_step(
+            "publish-docker.yml", "build-push", "worthless-proxy:scan-${{ github.sha }}"
         )
 
 
@@ -2822,6 +2948,132 @@ GUARD_MUTATIONS = [
         "true",
         "test_publisher_still_waiting_after_three_days_is_named",
     ),
+    # WOR-1077: the image installs only uv.lock's hashed export.
+    (
+        "drop --require-hashes (image installs unchecked files)",
+        "Dockerfile",
+        # Anchor on the command, not the comment above it that also names the flag.
+        "pip install --no-cache-dir --require-hashes ",
+        "pip install --no-cache-dir ",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "an extra pip3 install the audit never saw",
+        "Dockerfile",
+        "    && pip check\n",
+        "    && pip check \\\n    && pip3 install --no-cache-dir requests\n",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "copy uv from a tag instead of a digest",
+        "Dockerfile",
+        "COPY --from=ghcr.io/astral-sh/uv:",
+        "COPY --from=ghcr.io/astral-sh/uv:latest #",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "a lowercase run that installs a file the lock never hashed",
+        "Dockerfile",
+        "    && pip check\n",
+        "    && pip check\n"
+        "run pip3 install --no-cache-dir --force-reinstall --no-deps msgpack==1.2.4\n",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "copy uv from a tag, with another flag before --from",
+        "Dockerfile",
+        "COPY --from=ghcr.io/astral-sh/uv:",
+        "COPY --chown=0:0 --from=ghcr.io/astral-sh/uv:latest #",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "an indented run the lock never hashed",
+        "Dockerfile",
+        "    && pip check\n",
+        "    && pip check\n  run pip3 install --no-cache-dir requests\n",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "copy uv from a tag, with --from wrapped onto the next line",
+        "Dockerfile",
+        "COPY --from=ghcr.io/astral-sh/uv:",
+        "COPY --chown=0:0 \\\n    --from=ghcr.io/astral-sh/uv:latest #",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "a heredoc after a command runs an install the parser can't see",
+        "Dockerfile",
+        "    && pip check\n",
+        "    && pip check\nRUN /bin/sh <<EOF\npip3 install --no-cache-dir requests\nEOF\n",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "an unpinned image in the first of two RUN mounts",
+        "Dockerfile",
+        "RUN pip install --no-cache-dir --no-deps .",
+        "RUN --mount=type=bind,from=alpine:latest,target=/x"
+        " --mount=type=cache,from=builder,target=/y pip install --no-cache-dir --no-deps .",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "an unpinned RUN mount image under an uppercase FROM= key, which BuildKit accepts",
+        "Dockerfile",
+        "RUN pip install --no-cache-dir --no-deps .",
+        "RUN --mount=type=bind,FROM=alpine:latest,target=/x pip install --no-cache-dir --no-deps .",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "the required scan lets a failing lock check through",
+        ".github/workflows/docker-security.yml",
+        "      - name: Image holds exactly the locked dependency set\n",
+        "      - name: Image holds exactly the locked dependency set\n"
+        "        continue-on-error: true\n",
+        "test_pr_scan_checks_the_image_against_the_lock",
+    ),
+    (
+        "the required scan's lock check can fail without failing the job",
+        ".github/workflows/docker-security.yml",
+        'run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"',
+        'run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE" || true',
+        "test_pr_scan_checks_the_image_against_the_lock",
+    ),
+    (
+        "a release pushes an image nobody checked against the lock",
+        ".github/workflows/publish-docker.yml",
+        'run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"',
+        'run: "true"',
+        "test_release_checks_the_image_before_pushing_it",
+    ),
+    (
+        # The real push step pushes through `outputs`, with `push: false`, so
+        # only its name said it pushed.
+        "a release pushes, under another step name, before the lock check",
+        ".github/workflows/publish-docker.yml",
+        "      - name: Image holds exactly the locked dependency set\n",
+        "      - name: Publish to GHCR\n"
+        "        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6\n"
+        "        with:\n"
+        "          push: false\n"
+        "          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}"
+        "/worthless-proxy,push=true\n"
+        "      - name: Image holds exactly the locked dependency set\n",
+        "test_release_checks_the_image_before_pushing_it",
+    ),
+    (
+        # `type=registry` is the exporter `push: true` stands for: it pushes
+        # whatever `push:` says.
+        "a release pushes via a registry exporter, under another step name, before the lock check",
+        ".github/workflows/publish-docker.yml",
+        "      - name: Image holds exactly the locked dependency set\n",
+        "      - name: Export the image\n"
+        "        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6\n"
+        "        with:\n"
+        "          push: false\n"
+        "          outputs: type=registry,name=ghcr.io/${{ github.repository_owner }}"
+        "/worthless-proxy\n"
+        "      - name: Image holds exactly the locked dependency set\n",
+        "test_release_checks_the_image_before_pushing_it",
+    ),
 ]
 
 
@@ -2859,6 +3111,8 @@ class TestGuardsCanActuallyFail:
         # RELEASING.md: the release-guide guard reads it, and without a copy that
         # guard errors in the control run instead of proving anything.
         shutil.copy(REPO_ROOT / "RELEASING.md", tmp_path / "RELEASING.md")
+        # Dockerfile: the WOR-1077 guards read it.
+        shutil.copy(REPO_ROOT / "Dockerfile", tmp_path / "Dockerfile")
         (tmp_path / "tests").mkdir()
         shutil.copy(Path(__file__), tmp_path / "tests" / Path(__file__).name)
 

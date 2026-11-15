@@ -69,6 +69,7 @@ jobs:
           # Any future ignore MUST be added to the uv-audit hook in
           # .pre-commit-config.yaml at the same time, with its rationale and
           # tracking ticket, so the two gates cannot drift apart again.
+          # What this covers for users: docs/install-security.md "Dependencies".
           uv run pip-audit
 
   full-test:
