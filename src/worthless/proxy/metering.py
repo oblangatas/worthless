@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from worthless.storage.sqlite import connect as sqlite_connect
@@ -38,12 +39,12 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
     """Sum the token counts named by *keys* in a provider ``usage`` object.
 
     An absent count is 0, and so is a null one where the SDK allows null. A
-    whole, non-negative float is its int value: JSON can't tell 1234 from 1234.0.
-    A total above ``_MAX_REPLY_TOKENS`` (such as 1e300) is the cap. Returns None
-    when the usage is unreadable: *usage* isn't an object, or a count is anything
-    else (a null required count, a string, a fractional, negative or non-finite
-    float, a bool, a negative int). The caller then treats it like a reply
-    without usage rather than crashing or billing a bogus number.
+    whole float is its int value: JSON can't tell 1234 from 1234.0. A total
+    above ``_MAX_REPLY_TOKENS`` (such as 1e300) is the cap. Returns None when
+    the usage is unreadable: *usage* isn't an object, or a count is anything
+    else (a null required count, a string, a fractional or non-finite float,
+    a bool, a negative number). The caller then treats it like a reply without
+    usage rather than crashing or billing a bogus number.
     """
     if not isinstance(usage, dict):
         return None
@@ -52,7 +53,7 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
         count = usage.get(key, 0)
         if count is None and key in _NULLABLE_COUNTS:
             continue
-        if isinstance(count, float) and count.is_integer() and count >= 0:
+        if isinstance(count, float) and count.is_integer():
             count = int(count)
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             return None
@@ -103,12 +104,15 @@ def extract_usage_openai(data: bytes) -> UsageInfo | None:
     return None
 
 
-def _sse_event_data(lines: list[str], event_name: str) -> list[dict | None]:
-    """Parse the data payload of each SSE event named *event_name*, in order: None
-    for a payload that isn't a JSON object."""
-    found: list[dict | None] = []
-    for i, line in enumerate(lines):
-        if line.strip() == f"event: {event_name}":
+def _sse_event_data(
+    lines: list[str], event_name: str, *, reverse: bool = False
+) -> Iterator[dict | None]:
+    """Parse the data payload of each SSE event named *event_name*, in order, or last
+    first with *reverse*: None for a payload that isn't a JSON object."""
+    target = f"event: {event_name}"
+    indices = range(len(lines) - 1, -1, -1) if reverse else range(len(lines))
+    for i in indices:
+        if lines[i].strip() == target:
             for j in range(i + 1, len(lines)):
                 data_line = lines[j].strip()
                 if data_line.startswith("data: "):
@@ -116,9 +120,8 @@ def _sse_event_data(lines: list[str], event_name: str) -> list[dict | None]:
                         parsed = json.loads(data_line[6:])
                     except (json.JSONDecodeError, ValueError):
                         parsed = None
-                    found.append(parsed if isinstance(parsed, dict) else None)
+                    yield parsed if isinstance(parsed, dict) else None
                     break
-    return found
 
 
 def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
@@ -150,9 +153,9 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
     input_tokens: int | None = 0
     model: str | None = None
 
-    # As in the stream collector, the last message_start with a usage sets the input
-    # count. No input count bills output only; an unreadable one makes the whole
-    # stream unreadable, as the same usage does in a JSON reply.
+    # The stream collector reads message_start the same way: the last one with a usage
+    # sets the input count. No input count bills output only; an unreadable one makes
+    # the whole stream unreadable, as the same usage does in a JSON reply.
     for start in _sse_event_data(lines, "message_start"):
         msg = start.get("message") if start else None
         if not isinstance(msg, dict):
@@ -163,8 +166,7 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
     if input_tokens is None:
         return None
 
-    deltas = _sse_event_data(lines, "message_delta")
-    delta = deltas[-1] if deltas else None
+    delta = next(_sse_event_data(lines, "message_delta", reverse=True), None)
     if delta is None:
         return None
 
@@ -239,6 +241,8 @@ class StreamingUsageCollector:
                 msg = parsed.get("message")
                 if not isinstance(msg, dict):
                     return
+                # Unlike message_delta, a null usage here is unreadable, not "no new
+                # count": Anthropic always sends message_start a usage object.
                 if "usage" in msg:
                     self._input_tokens = _sum_counts(msg["usage"], *_ANTHROPIC_INPUT_COUNTS)
                 self._model = msg.get("model", self._model)

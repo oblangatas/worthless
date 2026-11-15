@@ -1091,7 +1091,7 @@ class TestBudgetOnlyKeys:
         against the budget, so the key is still let in after spending past it. Before
         WOR-1100 these counted 600 and 1197. Fixing WOR-1031 turns this red on purpose."""
         alias, shard_a_utf8 = anthropic_alias
-        await _daily_budget(proxy_app, alias)
+        budget = await _daily_budget(proxy_app, alias)
         respx.post(ANTHROPIC_MESSAGES).mock(return_value=reply)
 
         got = []
@@ -1104,14 +1104,12 @@ class TestBudgetOnlyKeys:
             got.append(resp.status_code)
 
         assert got == [200, 200, 200]
-        async with proxy_app.state.db.execute(
-            "SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)
-        ) as cur:
-            assert await cur.fetchall() == []
+        await _assert_budget_released(proxy_app.state.db, budget, alias, None)
 
 
 class TestUnreadableStreamCounts:
-    """A capped key settles its hold at the estimate; an uncapped key records nothing."""
+    """For an unreadable reply a capped key is billed max(estimate, ceiling) and an
+    uncapped key records nothing."""
 
     @pytest.mark.parametrize("capped", [False, True], ids=["uncapped", "capped"])
     @pytest.mark.parametrize(
@@ -1122,13 +1120,13 @@ class TestUnreadableStreamCounts:
         ids=["streamed", "buffered"],
     )
     @pytest.mark.parametrize(
-        ("start_usage", "delta_usage", "readable"),
+        ("start_usage", "delta_usage", "billed"),
         [
-            pytest.param({"input_tokens": 5}, {"output_tokens": 3}, True, id="readable"),
-            pytest.param({"input_tokens": None}, {"output_tokens": 3}, False, id="null-input"),
-            pytest.param("x", {"output_tokens": 3}, False, id="non-object-input-usage"),
-            pytest.param({"input_tokens": -5}, {"output_tokens": 3}, False, id="negative-input"),
-            pytest.param({"input_tokens": 5}, {"output_tokens": -3}, False, id="negative-output"),
+            pytest.param({"input_tokens": 5}, {"output_tokens": 3}, 8, id="readable"),
+            pytest.param({"input_tokens": None}, {"output_tokens": 3}, None, id="null-input"),
+            pytest.param("x", {"output_tokens": 3}, None, id="non-object-input-usage"),
+            pytest.param({"input_tokens": -5}, {"output_tokens": 3}, None, id="negative-input"),
+            pytest.param({"input_tokens": 5}, {"output_tokens": -3}, None, id="negative-output"),
         ],
     )
     @respx.mock
@@ -1141,7 +1139,7 @@ class TestUnreadableStreamCounts:
         headers,
         start_usage,
         delta_usage,
-        readable,
+        billed,
     ):
         alias, shard_a_utf8 = anthropic_alias
         db = proxy_app.state.db
@@ -1160,19 +1158,18 @@ class TestUnreadableStreamCounts:
             resp = await proxy_client.post(
                 _proxy_url(alias, "/v1/messages"),
                 headers=_proxy_headers(alias, shard_a_utf8),
-                content=b'{"model": "claude-3-5-sonnet-20241022",'
-                b' "max_tokens": 10, "messages": []}',
+                content=ANTHROPIC_BODY,
             )
 
         assert resp.status_code == 200
         release.assert_awaited_once()
-        async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
-            rows = await cur.fetchall()
-        if readable:
-            assert rows == [(8,)]
+        if capped:
+            await _assert_billed_now(db, alias, billed)
         else:
-            # max(estimate, ceiling) for a capped key; nothing for an uncapped one.
-            assert rows == ([(GLOBAL_CEILING_TOKENS,)] if capped else [])
+            async with db.execute(
+                "SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)
+            ) as cur:
+                assert await cur.fetchall() == ([] if billed is None else [(billed,)])
 
 
 # ------------------------------------------------------------------

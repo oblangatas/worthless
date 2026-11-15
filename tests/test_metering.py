@@ -568,12 +568,8 @@ def test_anthropic_stream_unreadable_input_usage_is_no_usage(parse, start_usage)
 )
 @_ANTHROPIC_STREAM_PARSERS
 def test_anthropic_stream_without_input_usage_counts_output_only(parse, start):
-    events: list[tuple[str, object]] = [_anthropic_delta({"output_tokens": 7})]
-    if start is not None:
-        events.insert(0, ("message_start", start))
-    result = parse(_sse(*events))
-    assert result is not None
-    assert result.total_tokens == 7
+    starts = [] if start is None else [("message_start", start)]
+    assert _total(parse(_sse(*starts, _anthropic_delta({"output_tokens": 7})))) == 7
 
 
 @pytest.mark.parametrize(
@@ -591,5 +587,4 @@ def test_anthropic_stream_last_message_start_with_usage_counts(parse, messages, 
     """Both readers agree when a stream repeats message_start: a later one with a usage
     replaces the input count, and one without a usage leaves it as it was."""
     events = [("message_start", {"type": "message_start", "message": m}) for m in messages]
-    result = parse(_sse(*events, _anthropic_delta({"output_tokens": 3})))
-    assert (None if result is None else result.total_tokens) == billed
+    assert _total(parse(_sse(*events, _anthropic_delta({"output_tokens": 3})))) == billed
