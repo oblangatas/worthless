@@ -9,6 +9,7 @@ from importlib.metadata import version as pkg_version
 
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -321,3 +322,27 @@ class TestTheDefaultCommandStartsItself:
         )
         assert "HIJACKED" not in out.stdout
         assert out.returncode == 0 and "worthless" in out.stdout.lower(), out.stderr
+
+    def test_a_relative_worthless_home_still_reaches_the_child(self, tmp_path, monkeypatch) -> None:
+        """The child now starts inside the home, so a relative WORTHLESS_HOME
+        (`WORTHLESS_HOME=.wh worthless`) would read as `.wh/.wh` there. Both the
+        cwd and the env the child gets must name the home absolutely."""
+        (tmp_path / ".wh").mkdir()
+        monkeypatch.chdir(tmp_path)
+        home = WorthlessHome(base_dir=Path(".wh"))
+        captured: dict = {}
+
+        def fake_popen(cmd, **kwargs):
+            captured.update(cwd=kwargs.get("cwd"), env=kwargs.get("env"))
+            return MagicMock(pid=1)
+
+        with (
+            patch("worthless.cli.commands.up.subprocess.Popen", fake_popen),
+            patch("worthless.cli.commands.up.poll_health_pid", return_value=42),
+            patch("worthless.cli.commands.up.os.open", return_value=3),
+            patch("worthless.cli.commands.up.os.close"),
+        ):
+            start_supervised_proxy(home, 8787, tmp_path / "proxy.log", MagicMock())
+        expected = str((tmp_path / ".wh").resolve())
+        assert captured["cwd"] == expected
+        assert captured["env"]["WORTHLESS_HOME"] == expected

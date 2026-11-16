@@ -436,8 +436,11 @@ def start_supervised_proxy(
     earlier on PATH would otherwise be the one that runs — it answered /healthz
     on a stale key and turned status green (worthless-l0s1).
     """
+    # Absolute: the child starts inside the home, where a relative
+    # WORTHLESS_HOME would point one level too deep.
+    base_dir = str(home.base_dir.resolve())
     env = os.environ.copy()
-    env["WORTHLESS_HOME"] = str(home.base_dir)
+    env["WORTHLESS_HOME"] = base_dir
     env["WORTHLESS_PORT"] = str(port)
 
     cmd = [sys.executable, "-m", "worthless", "up", "--port", str(port)]
@@ -450,7 +453,7 @@ def start_supervised_proxy(
             # `-m` puts the cwd first on sys.path; the cwd is the user's project,
             # so a `worthless/` package in a cloned repo would run as the proxy.
             # Start in our own 0700 home instead (PR #767 security review).
-            cwd=str(home.base_dir),
+            cwd=base_dir,
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=log_fd,
