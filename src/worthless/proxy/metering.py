@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from worthless.storage.sqlite import connect as sqlite_connect
@@ -38,12 +39,12 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
     """Sum the token counts named by *keys* in a provider ``usage`` object.
 
     An absent count is 0, and so is a null one where the SDK allows null. A
-    whole, non-negative float is its int value: JSON can't tell 1234 from 1234.0.
-    A total above ``_MAX_REPLY_TOKENS`` (such as 1e300) is the cap. Returns None
-    when the usage is unreadable: *usage* isn't an object, or a count is anything
-    else (a null required count, a string, a fractional, negative or non-finite
-    float, a bool). The caller then treats it like a reply without usage rather
-    than crashing or billing a bogus number.
+    whole float is its int value: JSON can't tell 1234 from 1234.0. A total
+    above ``_MAX_REPLY_TOKENS`` (such as 1e300) is the cap. Returns None when
+    the usage is unreadable: *usage* isn't an object, or a count is anything
+    else (a null required count, a string, a fractional or non-finite float,
+    a bool, a negative number). The caller then treats it like a reply without
+    usage rather than crashing or billing a bogus number.
     """
     if not isinstance(usage, dict):
         return None
@@ -52,9 +53,9 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
         count = usage.get(key, 0)
         if count is None and key in _NULLABLE_COUNTS:
             continue
-        if isinstance(count, float) and count.is_integer() and count >= 0:
+        if isinstance(count, float) and count.is_integer():
             count = int(count)
-        if isinstance(count, bool) or not isinstance(count, int):
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             return None
         total += count
     return min(total, _MAX_REPLY_TOKENS)
@@ -103,25 +104,24 @@ def extract_usage_openai(data: bytes) -> UsageInfo | None:
     return None
 
 
-def _find_sse_event_data(
-    lines: list[str],
-    event_name: str,
-    *,
-    reverse: bool = False,
-) -> dict | None:
-    """Find an SSE event by name and parse its data payload."""
+def _sse_event_data(
+    lines: list[str], event_name: str, *, reverse: bool = False
+) -> Iterator[dict | None]:
+    """Parse the data payload of each SSE event named *event_name*, in order, or last
+    first with *reverse*: None for a payload that isn't a JSON object."""
+    target = f"event: {event_name}"
     indices = range(len(lines) - 1, -1, -1) if reverse else range(len(lines))
     for i in indices:
-        if lines[i].strip() == f"event: {event_name}":
+        if lines[i].strip() == target:
             for j in range(i + 1, len(lines)):
                 data_line = lines[j].strip()
                 if data_line.startswith("data: "):
                     try:
                         parsed = json.loads(data_line[6:])
                     except (json.JSONDecodeError, ValueError):
-                        return None
-                    return parsed if isinstance(parsed, dict) else None
-    return None
+                        parsed = None
+                    yield parsed if isinstance(parsed, dict) else None
+                    break
 
 
 def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
@@ -150,17 +150,23 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
     except Exception:  # noqa: S110 — best-effort SSE decode; malformed response must not raise
         return None
 
-    input_tokens = 0
+    input_tokens: int | None = 0
     model: str | None = None
 
-    start = _find_sse_event_data(lines, "message_start")
-    msg = start.get("message") if start else None
-    if isinstance(msg, dict):
-        # An unreadable message_start usage counts like a missing message_start.
-        input_tokens = _sum_counts(msg.get("usage"), *_ANTHROPIC_INPUT_COUNTS) or 0
-        model = msg.get("model")
+    # The stream collector reads message_start the same way: the last one with a usage
+    # sets the input count. No input count bills output only; an unreadable one makes
+    # the whole stream unreadable, as the same usage does in a JSON reply.
+    for start in _sse_event_data(lines, "message_start"):
+        msg = start.get("message") if start else None
+        if not isinstance(msg, dict):
+            continue
+        if "usage" in msg:
+            input_tokens = _sum_counts(msg["usage"], *_ANTHROPIC_INPUT_COUNTS)
+        model = msg.get("model", model)
+    if input_tokens is None:
+        return None
 
-    delta = _find_sse_event_data(lines, "message_delta", reverse=True)
+    delta = next(_sse_event_data(lines, "message_delta", reverse=True), None)
     if delta is None:
         return None
 
@@ -181,7 +187,8 @@ class StreamingUsageCollector:
     def __init__(self, provider: str) -> None:
         self.provider = provider
         self._partial_line: str = ""
-        self._input_tokens: int = 0
+        # None once message_start carries an input count that can't be read.
+        self._input_tokens: int | None = 0
         self._output_tokens: int | None = None
         self._total_tokens: int | None = None
         self._model: str | None = None
@@ -234,9 +241,10 @@ class StreamingUsageCollector:
                 msg = parsed.get("message")
                 if not isinstance(msg, dict):
                     return
-                usage = msg.get("usage")
-                if isinstance(usage, dict):
-                    self._input_tokens = _sum_counts(usage, *_ANTHROPIC_INPUT_COUNTS) or 0
+                # Unlike message_delta, a null usage here is unreadable, not "no new
+                # count": Anthropic always sends message_start a usage object.
+                if "usage" in msg:
+                    self._input_tokens = _sum_counts(msg["usage"], *_ANTHROPIC_INPUT_COUNTS)
                 self._model = msg.get("model", self._model)
             elif self._pending_event == "message_delta":
                 usage = parsed.get("usage")
@@ -267,7 +275,7 @@ class StreamingUsageCollector:
                 return UsageInfo(total_tokens=self._total_tokens, model=self._model)
             return None
         elif self.provider == "anthropic":
-            if self._output_tokens is None:
+            if self._output_tokens is None or self._input_tokens is None:
                 return None
             return _usage_info(self._input_tokens + self._output_tokens, self._model)
         return None
