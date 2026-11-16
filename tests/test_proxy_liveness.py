@@ -137,20 +137,57 @@ async def test_proxy_forgets_its_pid_file_when_the_supervisor_dies(
     monkeypatch: pytest.MonkeyPatch,
     kills: list[tuple[int, int]],
     tmp_path,  # type: ignore[no-untyped-def]
+    tmp_db_path: str,
+    fernet_key: bytes,
 ) -> None:
     """The dead supervisor can't remove proxy.pid; a stale pid there could later
     name an unrelated process, and `worthless down` kills whatever it names.
-    A file a newer `up` already rewrote is not ours to remove."""
+    A file a newer `up` already rewrote is not ours to remove. The file goes
+    only at the end of shutdown: while uvicorn drains a long stream, `down`
+    still needs it to find this proxy."""
     pid = os.getpid() if owner == "this-proxy" else os.getpid() + 1
     pid_file = tmp_path / "proxy.pid"
     write_pid(pid_file, pid, 8787)
     monkeypatch.setenv("WORTHLESS_HOME", str(tmp_path))
     read_fd, write_fd = os.pipe()
     monkeypatch.setenv("WORTHLESS_LIVENESS_FD", str(read_fd))
-    proxy_app._watch_liveness_fd()
+    app = create_app(
+        ProxySettings(db_path=tmp_db_path, fernet_key=bytearray(fernet_key), allow_insecure=True)
+    )
     try:
-        os.close(write_fd)
-        assert await _wait_for(lambda: bool(kills))
+        async with app.router.lifespan_context(app):
+            os.close(write_fd)
+            write_fd = -1
+            assert await _wait_for(lambda: bool(kills))
+            assert pid_file.exists(), "removed while requests may still be draining"
         assert pid_file.exists() is (owner == "a-newer-up")
     finally:
+        for f in (read_fd, write_fd):
+            if f >= 0:
+                os.close(f)
+
+
+async def test_a_clean_shutdown_keeps_the_pid_file(
+    monkeypatch: pytest.MonkeyPatch,
+    kills: list[tuple[int, int]],
+    tmp_path,  # type: ignore[no-untyped-def]
+    tmp_db_path: str,
+    fernet_key: bytes,
+) -> None:
+    """A proxy stopped while its supervisor lives leaves proxy.pid to the supervisor."""
+    pid_file = tmp_path / "proxy.pid"
+    write_pid(pid_file, os.getpid(), 8787)
+    monkeypatch.setenv("WORTHLESS_HOME", str(tmp_path))
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setenv("WORTHLESS_LIVENESS_FD", str(read_fd))
+    app = create_app(
+        ProxySettings(db_path=tmp_db_path, fernet_key=bytearray(fernet_key), allow_insecure=True)
+    )
+    try:
+        async with app.router.lifespan_context(app):
+            pass
+        assert pid_file.exists()
+        assert kills == []
+    finally:
         os.close(read_fd)
+        os.close(write_fd)
