@@ -5,6 +5,13 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Security
+- **Plain `worthless` starts its own proxy, never an older `worthless` from your PATH or code from your project** (worthless-l0s1, [#767](https://github.com/oblangatas/worthless/pull/767)).
+  Before: plain `worthless` started its proxy by running whichever `worthless` came first on your PATH. With an older install earlier on PATH, such as an old `uv tool` copy or a dev checkout, that older version served your traffic. It answered the health check, so `worthless status` showed green for a proxy that could be holding an old key.
+  Now: plain `worthless` starts the proxy with its own Python (`python -m worthless up`), so the version you ran is the version that serves. It starts the proxy from `~/.worthless`, not your project folder, so a `worthless/` folder in a repo you cloned can never run as your proxy. `python -m worthless` now works as a stand-in for the `worthless` command.
+
+  **Limits.**
+  - `worthless up` run by hand inside a project still starts its key-share helper and the proxy with the project as the working folder (worthless-x31h2).
+  - The background service still finds `worthless` on your PATH when you run `worthless service install`, so an older copy first on PATH is the one it runs after a reboot (worthless-0mo7l).
 - **The Docker image installs exactly the dependency versions our security audit checks** (WOR-1077, [#747](https://github.com/oblangatas/worthless/pull/747)).
   Before: building the image installed whatever versions of worthless's dependencies PyPI offered that day, within the minimums in `pyproject.toml`. CI audits the versions pinned in `uv.lock`, so the image could hold versions the audit had never seen. On 2026-10-27, 26 of its 42 dependencies differed from the lock. One was msgpack 1.2.4, a day old and still inside the 7 days Dependabot waits before proposing a release.
   Now: the image installs the versions in `uv.lock` and checks every file against the hash recorded there. The build stops if `uv.lock` doesn't match `pyproject.toml`, and it installs only prebuilt wheels, so no dependency runs its own build script. So the image now runs `uv.lock`'s versions. On 2026-11-12 none of its 42 dependencies was older than v0.3.16's, and five were newer: four security fixes, msgpack ([#745](https://github.com/oblangatas/worthless/pull/745)) and websockets, pydantic and opentelemetry-api ([#765](https://github.com/oblangatas/worthless/pull/765)), plus the pydantic-core that the new pydantic needs. `docs/install-security.md` now says which versions each way of installing gets, and why `install.sh` doesn't pin them.
