@@ -223,6 +223,7 @@ def test_pinned_uv_refuses_a_server_using_a_compromised_emsign_key(
 
     (tmp_path / "served.pem").write_bytes(served)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(tmp_path / "served.pem")
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _NotFound)
     server.socket = ctx.wrap_socket(server.socket, server_side=True)

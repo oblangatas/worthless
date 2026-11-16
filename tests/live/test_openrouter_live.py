@@ -159,7 +159,11 @@ def sandbox() -> Iterator[Sandbox]:
     root = Path(tempfile.mkdtemp(prefix="wl-", dir="/tmp"))
     (root / "project").mkdir()
     env_file = root / "project" / ".env"
-    env_file.write_text(f"OPENROUTER_API_KEY={key}\n")
+    # The real key in a .env is the setup under test, as a user has it. Owner-only
+    # file in an owner-only temp dir, deleted after the test.
+    fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(f"OPENROUTER_API_KEY={key}\n")
     # Only what the binary needs: `uv run --env-file .env` loads every key in
     # .env into this process, and none of them belongs in the sandbox.
     env = {k: v for k, v in os.environ.items() if k in _ENV_KEEP}
@@ -445,32 +449,16 @@ class TestOpenRouterKill9:
                 up.kill()
             sandbox.cli("down")
 
-    def test_kill_9_leaves_no_usable_key_behind(self, sandbox: Sandbox) -> None:
-        with self._killed_up(sandbox) as (base_url, shard_a, _), _client() as client:
-            try:
-                after: httpx.Response | None = _chat(client, base_url, shard_a)
-            except httpx.TransportError:
-                after = None
-            if after is not None:
-                assert after.status_code != 200, "the key still worked after kill -9"
-                assert "choices" not in after.text
-            on_disk = sandbox.key_on_disk()
-            assert not on_disk, "the real key is in a file in the sandbox after kill -9"
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Known gap: `worthless up` starts the proxy without a liveness pipe, so after "
-            "kill -9 the proxy keeps its port until `worthless down` or the next `up`. "
-            "It cannot rebuild the key (its sidecar is gone). WOR-1138; remove when fixed."
-        ),
-    )
-    def test_kill_9_leaves_no_listening_port(self, sandbox: Sandbox) -> None:
-        with self._killed_up(sandbox) as (_, _, proxy):
+    def test_kill_9_leaves_no_key_and_nothing_answering(self, sandbox: Sandbox) -> None:
+        """The proxy follows ``up`` down: nothing answers on the port, no key on disk."""
+        with self._killed_up(sandbox) as (base_url, shard_a, proxy), _client() as client:
             try:
                 proxy.wait(timeout=3)
+                exited = True
             except psutil.TimeoutExpired:
-                pass
-            with socket.socket() as s:
-                listening = s.connect_ex(("127.0.0.1", sandbox.port)) == 0
-            assert not listening, f"port {sandbox.port} still listening 3 s after kill -9"
+                exited = False
+            assert exited, "the proxy still ran 3 s after kill -9 took down `up` and its sidecar"
+            with pytest.raises(httpx.TransportError):
+                _chat(client, base_url, shard_a)
+            on_disk = sandbox.key_on_disk()
+            assert not on_disk, "the real key is in a file in the sandbox after kill -9"
