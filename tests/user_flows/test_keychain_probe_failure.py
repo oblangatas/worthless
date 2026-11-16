@@ -199,16 +199,16 @@ def test_a_real_missing_binary_names_the_path_it_looked_for(
     )
 
 
-def test_many_unreadable_agent_files_produce_one_line_not_many(
+def test_each_unreadable_agent_file_gets_one_line_naming_its_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End to end, through the real detector, on a real directory tree.
 
-    Six agent directories each holding an unparsable auth-profiles.json used
-    to emit the same sentence six times — 622 characters of one sentence's
-    worth of information, which reads as a broken tool. The caveat names the
-    surface rather than the path (a path would leak a home directory into
-    terminal output), so the repeats were byte-identical and carried nothing.
+    Six agent directories each holding an unparsable auth-profiles.json once
+    emitted the same sentence six times, which carried nothing and read as a
+    broken tool. Since #762 each caveat names its agent's folder, so the six
+    lines differ and each tells you where to look. Every agent gets exactly
+    one line: no agent is dropped and none is repeated.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     state = _openclaw_state_dir(tmp_path)
@@ -221,6 +221,6 @@ def test_many_unreadable_agent_files_produce_one_line_not_many(
     uc.detect_unshardable_credentials(caveats)
 
     unreadable = [c for c in caveats if "auth-profiles.json could not be read" in c]
-    assert len(unreadable) == 1, (
-        f"six unreadable files must yield one line, not six; got {len(unreadable)}: {unreadable}"
-    )
+    assert len(unreadable) == len(set(unreadable)) == 6, unreadable
+    for i in range(6):
+        assert sum(f"agents/agent{i}/agent" in c for c in unreadable) == 1, unreadable

@@ -155,6 +155,16 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Plain `worthless doctor`, without `--json`, still doesn't run this check.
   - `worthless doctor --json --fix` still clears all of them, and can't clear only some. It also applies every other doctor fix it finds, such as deleting orphaned key records and keychain entries, without asking.
   - If `GOOGLE_APPLICATION_CREDENTIALS` names a service-account key, Worthless still lists it as a Vertex AI login, and `worthless doctor --json --fix` deletes it. Google never lets you download that key again, and `gcloud auth application-default login` doesn't recreate it. The fix advice says to keep such a file, and no longer points to `--json --fix`. Only text protects that key: `--fix` itself doesn't check the file's `type`.
+- **On a Mac, `worthless lock` and `worthless doctor --json` say when they couldn't check the keychain for a Claude Code or Codex login** (WOR-835, [#574](https://github.com/oblangatas/worthless/pull/574)).
+  Before: Worthless asks macOS's `security` tool whether Claude Code's and Codex's logins are in your keychain. Any failure, such as `security` missing, timing out or being refused access, was read as "no login there", with no note, so a check that couldn't look read as a clean one.
+  Now: only `security`'s "item not found" answer counts as no login. Any other failure adds a note to `lock`'s `[NOTE]` line and to the caveats in `doctor --json`, such as "macOS keychain service 'Claude Code-credentials' could not be checked (security exited 51)". A note that would repeat word for word is shown once.
+
+  **Limits.**
+  - `security` gives the same "not found" answer for a keychain it couldn't open, such as a missing or damaged login keychain, so that case still reads as no login, with no note.
+  - When `HOME` points somewhere else, as under `sudo` or in some containers and launchd jobs, `security` may not search your login keychain and answers "not found" for a login that is there.
+  - A note never changes the check's `status` in `doctor --json`: with no logins found it still says `ok`. Read `caveats` too.
+  - Plain `worthless doctor`, without `--json`, still doesn't run this check.
+  - On Linux and Windows nothing changes: there is no keychain to check.
 - **A crashed `worthless up` no longer leaves your key shares on disk** (`worthless-dhfn`, [#713](https://github.com/oblangatas/worthless/pull/713)).
   Before: if `worthless up` was killed with `kill -9` or crashed, its helper process kept running. Both key share files stayed in `~/.worthless/run/<pid>/`, also after a restart. `worthless doctor` reported "No issues found" because the helper still answered.
   Now: the helper checks every 0.5 seconds that `worthless up` is still running. When `worthless up` is gone, the helper deletes both share files and its socket, then stops. It stops less than 8 seconds after `worthless up` stopped.
