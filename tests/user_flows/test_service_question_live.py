@@ -13,8 +13,8 @@ locked quietly and never asked.
 from __future__ import annotations
 
 import os
+import re
 import secrets
-import socket
 import string
 import subprocess
 import sys
@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 
 import pytest
+
+from tests.user_flows.helpers import free_port, worthless_bin
 
 if sys.platform == "win32":  # pragma: no cover — pty is POSIX-only
     pytest.skip("pty is POSIX-only", allow_module_level=True)
@@ -31,6 +33,7 @@ import select  # noqa: E402
 
 from worthless.cli.commands.lock import _AGENT_ENV_VARS, _CI_ENV_VARS  # noqa: E402
 from worthless.cli.platform import _in_container  # noqa: E402
+from worthless.cli.scanner import _has_git_above  # noqa: E402
 
 pytestmark = [
     pytest.mark.user_flow,
@@ -45,26 +48,24 @@ _STEP_S = 30
 _QUESTION = b"Install the background service on port"
 
 
-def _worthless_bin() -> Path:
-    """The branch build, or WORTHLESS_TEST_BIN to aim at an installed wheel."""
-    override = os.environ.get("WORTHLESS_TEST_BIN")
-    return Path(override) if override else Path(sys.executable).parent / "worthless"
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _setup(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
+def _setup(tmp_path: Path, *, git: bool) -> tuple[Path, Path, dict[str, str]]:
     """A throwaway home + project with one real-looking key, and an env with CI
     and AI-agent markers removed: the offer treats them as 'nobody is
-    watching', and the point here is to be the person who is."""
+    watching', and the point here is to be the person who is.
+
+    *git* makes the project a repository. Plain `worthless` asks about the
+    service only inside one (worthless-mivd), and pytest's tmp_path sits
+    outside any repo, so "no repo" is the default state here."""
     home = tmp_path / "home"
     project = tmp_path / "project"
     home.mkdir()
     project.mkdir()
+    if git:
+        subprocess.run(["git", "init", "-q", str(project)], check=True)  # noqa: S603, S607
+    elif _has_git_above(project):
+        # Otherwise the question appears, nobody answers it, and the test hangs
+        # to its timeout instead of saying why (seen with TMPDIR in a checkout).
+        pytest.fail(f"{tmp_path} is inside a git repo; set TMPDIR outside one")
     # Random, not a repeated pattern: lock rightly ignores low-entropy "keys".
     alphabet = string.ascii_letters + string.digits
     key = "sk-proj-" + "".join(secrets.choice(alphabet) for _ in range(40))
@@ -76,7 +77,7 @@ def _setup(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
             "HOME": str(home),
             "WORTHLESS_HOME": str(home / ".worthless"),
             "WORTHLESS_KEYRING_BACKEND": "null",
-            "WORTHLESS_PORT": str(_free_port()),
+            "WORTHLESS_PORT": str(free_port()),
             "NO_COLOR": "1",
         }
     )
@@ -109,7 +110,7 @@ def _run(
     """
     master, slave = pty.openpty()
     proc = subprocess.Popen(  # noqa: S603
-        [str(_worthless_bin()), *args],
+        [str(worthless_bin()), *args],
         stdin=slave,
         stdout=slave,
         stderr=slave,
@@ -139,13 +140,13 @@ def _run(
         # test on the developer's machine or runner (it happened once, during a
         # mutation check of this very file).
         subprocess.run(  # noqa: S603
-            [str(_worthless_bin()), "service", "uninstall", "--yes"],
+            [str(worthless_bin()), "service", "uninstall", "--yes"],
             env=env,
             capture_output=True,
             timeout=60,
         )
         subprocess.run(  # noqa: S603 — stop the proxy plain `worthless` started
-            [str(_worthless_bin()), "down"], env=env, capture_output=True, timeout=30
+            [str(worthless_bin()), "down"], env=env, capture_output=True, timeout=30
         )
     return seen.decode(errors="replace").replace("\r", ""), installed
 
@@ -161,12 +162,15 @@ def _nothing_installed(home: Path) -> bool:
 def test_plain_worthless_asks_explicitly_and_declining_installs_nothing(
     tmp_path: Path, answer: bytes
 ) -> None:
-    _home, project, env = _setup(tmp_path)
+    _home, project, env = _setup(tmp_path, git=True)
     text, installed = _run([], project, env, {b"Lock these keys?": b"y\n", _QUESTION: answer})
 
     assert "Install the background service on port" in text, (
         f"plain `worthless` never asked about the background service:\n{text}"
     )
+    # Exactly once. A second call site once made plain `worthless` ask twice
+    # in a repo, and saying no just brought the same question back.
+    assert text.count(_QUESTION.decode()) == 1, f"asked more than once:\n{text}"
     assert "What it adds:" in text
     assert "fernet.key" in text, "the master-key trade-off must be in the question"
     assert "worthless service uninstall (the key file stays)" in text
@@ -179,9 +183,36 @@ def test_plain_worthless_asks_explicitly_and_declining_installs_nothing(
     assert not installed, "declining (or just pressing Enter) must install nothing"
 
 
+def test_plain_worthless_outside_a_repo_locks_without_asking(tmp_path: Path) -> None:
+    """worthless-mivd: no repository, no question, but the one-line hint.
+
+    The keys still get locked, and the user still learns the proxy will not
+    outlive this terminal unless they install the service.
+    """
+    _home, project, env = _setup(tmp_path, git=False)
+    text, installed = _run([], project, env, {b"Lock these keys?": b"y\n"})
+
+    assert "protected" in text, f"the lock itself did not run:\n{text}"
+    assert "Install the background service on port" not in text, text
+    # Rich wraps the hint at the PTY's width and styles it: compare words, not layout.
+    flat = re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", text))
+    assert "worthless service install" in flat, f"no hint outside a repo:\n{text}"
+    assert not installed
+
+
+def test_explicit_lock_outside_a_repo_still_asks(tmp_path: Path) -> None:
+    """worthless-mivd: the repo rule is plain `worthless` only. Someone who
+    typed `worthless lock` asked for the full flow, repo or not."""
+    _home, project, env = _setup(tmp_path, git=False)
+    text, installed = _run(["lock"], project, env, {_QUESTION: b"n\n"})
+
+    assert text.count(_QUESTION.decode()) == 1, f"`worthless lock` did not ask once:\n{text}"
+    assert not installed
+
+
 def test_plain_worthless_yes_never_asks_and_installs_nothing(tmp_path: Path) -> None:
     """`worthless --yes` is documented as 'never service install'."""
-    _home, project, env = _setup(tmp_path)
+    _home, project, env = _setup(tmp_path, git=True)
     text, installed = _run(["--yes"], project, env, {})
 
     assert "Lock" in text or "protected" in text, f"--yes did not run the lock at all:\n{text}"

@@ -1548,3 +1548,15 @@ class TestWslDetectionActuallyRuns:
         assert "IS_WSL=" in out and "IS_WSL=1" not in out, (
             f"no /proc/version should mean 'not WSL', quietly:\n{out}"
         )
+
+
+def test_closing_banner_does_not_say_lock_starts_the_proxy(install_text: str) -> None:
+    """`lock` starts no proxy; `up` or `wrap` does (WOR-757).
+
+    The banner said otherwise from 0.3.x until the site-claim tests
+    (test_site_claims_match_cli.py) proved nothing listens after `lock`.
+    It's a two-line printf, so match the text with the line break removed.
+    """
+    banner = re.sub(r'\\n"\s*\n\s*printf "\s*', " ", install_text)
+    assert "and starts a local proxy" not in banner
+    assert "Start the proxy with worthless up" in banner

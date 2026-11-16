@@ -5,6 +5,14 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Security
+- **Plain `worthless` starts its own proxy, never an older `worthless` from your PATH or code from your project** (worthless-l0s1, [#767](https://github.com/oblangatas/worthless/pull/767)).
+  Before: plain `worthless` started its proxy by running whichever `worthless` came first on your PATH. With an older install earlier on PATH, such as an old `uv tool` copy or a dev checkout, that older version served your traffic. It answered the health check, so `worthless status` showed green for a proxy that could be holding an old key.
+  Now: plain `worthless` starts the proxy with its own Python (`python -m worthless up`), so the version you ran is the version that serves. It starts the proxy from `~/.worthless`, not your project folder, so a `worthless/` folder in a repo you cloned can't run as your proxy just by sitting in your project (a `PYTHONPATH` you set yourself still applies, as for any Python program). `python -m worthless` now works as a stand-in for the `worthless` command.
+
+  **Limits.**
+  - A proxy that is already running is kept as it is, even if it's an older version: after upgrading, run `worthless down` first (WOR-1110).
+  - `worthless wrap`, and `worthless up` run by hand inside a project, still start the key-share helper and the proxy with the project as the working folder (worthless-x31h2, WOR-1151).
+  - The background service still finds `worthless` on your PATH when you run `worthless service install`, so an older copy first on PATH is the one it runs after a reboot (worthless-0mo7l).
 - **The Docker image installs exactly the dependency versions our security audit checks** (WOR-1077, [#747](https://github.com/oblangatas/worthless/pull/747)).
   Before: building the image installed whatever versions of worthless's dependencies PyPI offered that day, within the minimums in `pyproject.toml`. CI audits the versions pinned in `uv.lock`, so the image could hold versions the audit had never seen. On 2026-10-27, 26 of its 42 dependencies differed from the lock. One was msgpack 1.2.4, a day old and still inside the 7 days Dependabot waits before proposing a release.
   Now: the image installs the versions in `uv.lock` and checks every file against the hash recorded there. The build stops if `uv.lock` doesn't match `pyproject.toml`, and it installs only prebuilt wheels, so no dependency runs its own build script. So the image now runs `uv.lock`'s versions. On 2026-11-12 none of its 42 dependencies was older than v0.3.16's, and five were newer: four security fixes, msgpack ([#745](https://github.com/oblangatas/worthless/pull/745)) and websockets, pydantic and opentelemetry-api ([#765](https://github.com/oblangatas/worthless/pull/765)), plus the pydantic-core that the new pydantic needs. `docs/install-security.md` now says which versions each way of installing gets, and why `install.sh` doesn't pin them.
@@ -146,7 +154,25 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Releases newer than the v0.3.16 image's with no security fix, such as fastapi 0.162.4 and starlette 1.10.0, stay out of the lock until a later refresh.
   - For compiled packages with no signed build record (cffi, pydantic-core, watchfiles), only the source archive was compared with the upstream tag; their prebuilt binaries can't be checked against it.
 
+### Changed
+- **Plain `worthless` asks about the background service only inside a git repository** (worthless-mivd, [#773](https://github.com/oblangatas/worthless/pull/773)).
+  Before: plain `worthless` asked "Install the background service?" after every lock, in any folder, including a scratch folder with no git.
+  Now: inside a git repository it asks once, as before. Outside one it locks your keys and prints one line instead of the question: `worthless service install` keeps the proxy running after you close the terminal. `worthless lock` always asks, in any folder. `--yes` never asks and never installs.
+
+  **Limits.**
+  - Worthless looks for a `.git` in the folder and every folder above it, up to `/`. If your home folder is a git repository (for example, for dotfiles), every folder under it counts, and plain `worthless` asks everywhere.
+  - A repository without a `.git` folder or file (a bare repository used through `--git-dir`, or jj, Mercurial or Subversion) does not count. Plain `worthless` prints the hint there instead of asking.
+
 ### Fixed
+- **A crashed `worthless up` or `worthless wrap` no longer leaves the proxy running** (`worthless-yfxm`).
+  Before: if `worthless up` or `worthless wrap` was killed with `kill -9` or crashed, the proxy kept running. It kept its port and kept answering requests until you ran `worthless down`.
+  Now: the proxy stops less than 2 seconds after `worthless up` or `worthless wrap` stops. In our tests the proxy of a killed `worthless up` stopped after about 0.2 seconds. A request still running finishes first, and until it does, `worthless down` can still find and stop the proxy: its `~/.worthless/proxy.pid` is removed only once it has stopped (WOR-1141).
+
+  **Limits.**
+  - If `worthless up` is frozen (for example with `kill -STOP`) but not stopped, the proxy keeps running.
+  - A request that is still running finishes first. A long streaming answer can make the proxy stop later.
+  - If the proxy is killed at the same time as `worthless up` (for example `pkill -9 -f worthless`), the old `proxy.pid` stays. Delete `~/.worthless/proxy.pid` before you run `worthless down`.
+
 - **On Python 3.14, `worthless lock` and `worthless doctor --json` say when they couldn't look for a credentials file** ([#762](https://github.com/oblangatas/worthless/pull/762)).
   Before: on Python 3.14, if your user couldn't open the folder holding one of the OAuth credential files Worthless looks for, such as `~/.gemini`, that file was reported as not there, with no note. `worthless lock`'s `[NOTE]` line and the caveats in `worthless doctor --json` left it out, so a check that couldn't look read as a clean one. Python 3.10 to 3.13 were not affected: there, both add "Gemini CLI credentials file could not be checked (Permission denied)".
   Now: both add that note on every Python version, for each credential file Worthless looks for: Claude Code, Codex, Gemini, MiniMax and Vertex AI. A file it can't reach for another reason, such as a symlink loop, also gets the note, where before it was reported as not there. The same goes for an OpenClaw agent folder under `~/.openclaw/agents/` that links somewhere your user can't open: Python 3.14 skipped it without a note. On 3.10 to 3.13, `doctor --json` reported the check as crashed, and `lock` exited with WRTLS-199 after locking your keys. Now it gets "an OpenClaw auth-profiles.json could not be read", with the agent's folder, such as `~/.openclaw/agents/work/agent`, so you can tell several agents apart. When Worthless can't check a credentials file or read an auth-profiles.json, it no longer also prints a warning with the file's full path to your terminal: the note says which login or agent it couldn't check.
@@ -165,13 +191,22 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Plain `worthless doctor`, without `--json`, still doesn't run this check.
   - `worthless doctor --json --fix` still clears all of them, and can't clear only some. It also applies every other doctor fix it finds, such as deleting orphaned key records and keychain entries, without asking.
   - If `GOOGLE_APPLICATION_CREDENTIALS` names a service-account key, Worthless still lists it as a Vertex AI login, and `worthless doctor --json --fix` deletes it. Google never lets you download that key again, and `gcloud auth application-default login` doesn't recreate it. The fix advice says to keep such a file, and no longer points to `--json --fix`. Only text protects that key: `--fix` itself doesn't check the file's `type`.
+- **On a Mac, `worthless lock` and `worthless doctor --json` say when they couldn't check the keychain for a Claude Code or Codex login** (WOR-835, [#574](https://github.com/oblangatas/worthless/pull/574)).
+  Before: Worthless asks macOS's `security` tool whether Claude Code's and Codex's logins are in your keychain. Any failure, such as `security` missing, timing out or being refused access, was read as "no login there", with no note, so a check that couldn't look read as a clean one.
+  Now: only `security`'s "item not found" answer counts as no login. Any other failure adds a note to `lock`'s `[NOTE]` line and to the caveats in `doctor --json`, such as "macOS keychain service 'Claude Code-credentials' could not be checked (security exited 51)". A note that would repeat word for word is shown once.
+
+  **Limits.**
+  - `security` gives the same "not found" answer for a keychain it couldn't open, such as a missing or damaged login keychain, so that case still reads as no login, with no note.
+  - When `HOME` points somewhere else, as under `sudo` or in some containers and launchd jobs, `security` may not search your login keychain and answers "not found" for a login that is there.
+  - A note never changes the check's `status` in `doctor --json`: with no logins found it still says `ok`. Read `caveats` too.
+  - Plain `worthless doctor`, without `--json`, still doesn't run this check.
+  - On Linux and Windows nothing changes: there is no keychain to check.
 - **A crashed `worthless up` no longer leaves your key shares on disk** (`worthless-dhfn`, [#713](https://github.com/oblangatas/worthless/pull/713)).
   Before: if `worthless up` was killed with `kill -9` or crashed, its helper process kept running. Both key share files stayed in `~/.worthless/run/<pid>/`, also after a restart. `worthless doctor` reported "No issues found" because the helper still answered.
   Now: the helper checks every 0.5 seconds that `worthless up` is still running. When `worthless up` is gone, the helper deletes both share files and its socket, then stops. It stops less than 8 seconds after `worthless up` stopped.
 
   **Limits.**
-  - The key stays in the helper's memory for less than 8 seconds after `worthless up` stops. During that time it still answers the proxy that `worthless up` left running.
-  - The proxy also keeps running after `worthless up` crashes. Run `worthless down` to stop it.
+  - The key stays in the helper's memory for less than 8 seconds after `worthless up` stops.
   - If the helper is killed at the same time as `worthless up` (for example `pkill -9 -f worthless`), the share files stay. `worthless doctor` reports them.
   - A helper left running by an older version of Worthless does not stop. Stop it by hand. `worthless doctor` then reports its share files.
   - If `worthless up` is killed and the terminal closes less than 0.5 seconds later, the share files stay. `worthless doctor` reports them.

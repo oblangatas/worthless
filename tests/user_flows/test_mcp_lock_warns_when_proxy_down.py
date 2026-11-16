@@ -27,27 +27,19 @@ from __future__ import annotations
 import json
 import os
 import re
-import socket
 from pathlib import Path
 from unittest.mock import patch
 
 import httpx
 import pytest
 
+from tests.user_flows.helpers import free_port
+
 pytest.importorskip("mcp", reason="mcp extra not installed")
 
 from worthless.mcp.server import worthless_lock  # noqa: E402
 
 pytestmark = pytest.mark.user_flow
-
-
-def _free_port() -> int:
-    """A port nothing is listening on — the proxy is deliberately NOT started."""
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
 
 
 @pytest.mark.asyncio
@@ -63,7 +55,7 @@ async def test_editor_lock_with_dead_proxy_is_flagged_and_env_really_points_at_i
     # Match the mode the product writes; 0644 is refused (worthless-6hu7).
     (home / "fernet.key").chmod(0o600)
 
-    port = _free_port()  # dead — no proxy bound here
+    port = free_port()  # dead — no proxy bound here
     monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
     monkeypatch.setenv("WORTHLESS_PORT", str(port))
 
