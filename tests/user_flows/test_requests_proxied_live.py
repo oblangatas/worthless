@@ -25,9 +25,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
-import socket
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -35,6 +33,8 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+
+from tests.user_flows.helpers import free_port, worthless_bin
 
 # The global default is 30s (pyproject) and the branch build keeps it. Only the
 # installed-wheel run needs more: uv warms its tool env on the first call to a
@@ -49,12 +49,6 @@ pytestmark = [
 ]
 
 _TIMEOUT_S = 60.0
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 class _ScriptedProvider(http.server.BaseHTTPRequestHandler):
@@ -96,18 +90,6 @@ class _ScriptedProvider(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *args: object) -> None:  # noqa: A003 — silence the test log
         return
-
-
-def _worthless_bin() -> Path:
-    """The console script under test.
-
-    Defaults to the one beside the interpreter running the tests — the branch
-    build. ``WORTHLESS_TEST_BIN`` aims this at a different binary, so CI can run
-    the same test against an installed wheel: the artifact a user actually gets
-    (worthless-d4h2). Without that, a packaging-only defect passes every test.
-    """
-    override = os.environ.get("WORTHLESS_TEST_BIN")
-    return Path(override) if override else Path(sys.executable).parent / "worthless"
 
 
 def _health(port: int, deadline: float) -> dict | None:
@@ -169,13 +151,13 @@ def test_proxied_counts_traffic_while_billed_counts_only_what_was_charged(
     Against the pre-fix code the first assertion fails with ``requests_proxied``
     stuck at 0 — the operator-observed symptom, reproduced without a real key.
     """
-    binary = _worthless_bin()
+    binary = worthless_bin()
     if not binary.exists():  # pragma: no cover — depends on how the venv was built
         pytest.skip(f"no worthless console script at {binary}")
 
     _ScriptedProvider.reject = True
-    upstream_port = _free_port()
-    proxy_port = _free_port()
+    upstream_port = free_port()
+    proxy_port = free_port()
 
     upstream = http.server.HTTPServer(("127.0.0.1", upstream_port), _ScriptedProvider)
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
