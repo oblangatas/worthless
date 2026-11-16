@@ -85,6 +85,21 @@ def _failing_security(tmp_path: Path, exit_code: int) -> Path:
     return script
 
 
+def _isolate_doctor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ``doctor`` off the developer's real home and keychain.
+
+    Without ``WORTHLESS_HOME``, doctor bootstraps the import-time default home,
+    and this lane's autouse fixture turns the real keyring back on, so a fresh
+    machine would gain a real home and keychain item. Only the credential
+    probe's subprocess needs to be real here; it reads ``_SECURITY_BIN``, not
+    the keyring.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("WORTHLESS_HOME", str(tmp_path / "worthless"))
+    monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+    monkeypatch.setenv("OPENCLAW_STATE_DIR", str(tmp_path / "openclaw"))
+
+
 def _unshardable_check(payload: dict) -> dict:
     checks = payload.get("checks", [])
     entries = list(checks.values()) if isinstance(checks, dict) else checks
@@ -102,6 +117,7 @@ def test_a_real_failing_security_binary_is_disclosed(
     Nothing is mocked below the CLI — ``subprocess.run`` really forks, really
     execs the script above, and really collects its exit status.
     """
+    _isolate_doctor(tmp_path, monkeypatch)
     monkeypatch.setattr(uc, "_SECURITY_BIN", str(_failing_security(tmp_path, 51)))
 
     result = runner.invoke(app, ["doctor", "--json"])
@@ -124,6 +140,7 @@ def test_a_missing_security_binary_is_disclosed(
 
     A genuine FileNotFoundError out of the OS, not a raised stub.
     """
+    _isolate_doctor(tmp_path, monkeypatch)
     monkeypatch.setattr(uc, "_SECURITY_BIN", str(tmp_path / "definitely-not-here"))
 
     result = runner.invoke(app, ["doctor", "--json"])
@@ -211,7 +228,11 @@ def test_each_unreadable_agent_file_gets_one_line_naming_its_agent(
     one line: no agent is dropped and none is repeated.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
+    # An exported OPENCLAW_STATE_DIR would win over HOME and send the junk
+    # files below into the developer's real agent folders.
+    monkeypatch.setenv("OPENCLAW_STATE_DIR", str(tmp_path / ".openclaw"))
     state = _openclaw_state_dir(tmp_path)
+    assert state == tmp_path / ".openclaw"
     for i in range(6):
         agent = state / "agents" / f"agent{i}" / "agent"
         agent.mkdir(parents=True, exist_ok=True)
