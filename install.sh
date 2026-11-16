@@ -625,8 +625,9 @@ main() {
     printf "  ${BOLD}Audit script:${RESET}  curl worthless.sh?explain=1 | less\n"
     printf "  ${BOLD}Source:${RESET}        https://github.com/oblangatas/worthless\n"
     printf "\n"
-    printf "  worthless lock rewrites .env, splits your API keys, and starts a\n"
-    printf "  local proxy. Your app code doesn't change.\n"
+    printf "  worthless lock rewrites .env and splits your API keys. Start the\n"
+    printf "  proxy with worthless up, or worthless wrap <command>. Your app code\n"
+    printf "  doesn't change.\n"
     printf "\n"
     printf "  Docs: %s\n\n" "$DOCS_URL"
 }

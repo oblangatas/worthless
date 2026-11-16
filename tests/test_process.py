@@ -358,3 +358,16 @@ class TestPrepareProxyEnv:
         monkeypatch.setenv("WORTHLESS_FERNET_KEY", "secret-should-not-leak")
         env = prepare_proxy_env({}, fernet_fd=None)
         assert "WORTHLESS_FERNET_KEY" not in env
+
+    def test_inherited_liveness_fd_scrubbed_from_child_env(self, monkeypatch):
+        """An inherited WORTHLESS_LIVENESS_FD names a pipe that isn't ours (worthless-yfxm).
+
+        In the child that number can be any pipe, and the proxy would shut
+        down when it closes. Only the fd the caller passes may reach it.
+        """
+        from worthless.cli.process import prepare_proxy_env
+
+        monkeypatch.setenv("WORTHLESS_LIVENESS_FD", "0")
+        assert "WORTHLESS_LIVENESS_FD" not in prepare_proxy_env({}, fernet_fd=None)
+        env = prepare_proxy_env({}, fernet_fd=None, liveness_fd=7)
+        assert env["WORTHLESS_LIVENESS_FD"] == "7"

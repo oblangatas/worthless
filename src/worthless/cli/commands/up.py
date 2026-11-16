@@ -37,6 +37,7 @@ from worthless.cli.platform import (
     popen_platform_kwargs,
 )
 from worthless.cli.process import (
+    create_liveness_pipe,
     build_proxy_env,
     check_pid,
     cleanup_stale_pid,
@@ -430,21 +431,29 @@ def start_supervised_proxy(
 
     Foreground ``up`` supervises the crypto sidecar; we run it in a new session
     so the default command can return while the child keeps running.
-    """
-    from worthless.cli.commands.service._common import resolve_worthless_binary
 
-    binary = resolve_worthless_binary()
+    ``sys.executable -m worthless``, not a PATH lookup: an older ``worthless``
+    earlier on PATH would otherwise be the one that runs — it answered /healthz
+    on a stale key and turned status green (worthless-l0s1).
+    """
+    # Absolute: the child starts inside the home, where a relative
+    # WORTHLESS_HOME would point one level too deep.
+    base_dir = str(home.base_dir.resolve())
     env = os.environ.copy()
-    env["WORTHLESS_HOME"] = str(home.base_dir)
+    env["WORTHLESS_HOME"] = base_dir
     env["WORTHLESS_PORT"] = str(port)
 
-    cmd = [str(binary), "up", "--port", str(port)]
+    cmd = [sys.executable, "-m", "worthless", "up", "--port", str(port)]
 
     log_fd: int = -1
     try:
         log_fd = os.open(str(log_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        subprocess.Popen(  # nosec B603 — argv from resolved binary + fixed flags
+        subprocess.Popen(  # nosec B603 — argv is this interpreter + fixed flags
             cmd,
+            # `-m` puts the cwd first on sys.path; the cwd is the user's project,
+            # so a `worthless/` package in a cloned repo would run as the proxy.
+            # Start in our own 0700 home instead (PR #767 security review).
+            cwd=base_dir,
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=log_fd,
@@ -607,24 +616,33 @@ def _start_foreground_locked(
 
         for note in ignored_upstream_env_notes():
             console.print_warning(note)
+        # worthless-yfxm: the proxy exits when this pipe hits EOF. We hold the
+        # write end while we supervise; if we die, even by kill -9, the kernel
+        # closes it. Created after the sidecar spawn, so the sidecar never holds it.
+        read_fd, write_fd = create_liveness_pipe()
         try:
-            proxy, actual_port = spawn_proxy(env=proxy_env, port=port)
-        except Exception as exc:
-            console.print_error(
-                WorthlessError(
-                    ErrorCode.PROXY_UNREACHABLE,
-                    sanitize_exception(exc, generic="failed to start proxy"),
+            try:
+                proxy, actual_port = spawn_proxy(env=proxy_env, port=port, liveness_fd=read_fd)
+            except Exception as exc:
+                console.print_error(
+                    WorthlessError(
+                        ErrorCode.PROXY_UNREACHABLE,
+                        sanitize_exception(exc, generic="failed to start proxy"),
+                    )
                 )
-            )
-            raise typer.Exit(code=1) from exc
+                raise typer.Exit(code=1) from exc
+            finally:
+                os.close(read_fd)  # the proxy has its own copy
 
-        _supervise_proxy_with_sidecar(
-            proxy=proxy,
-            handle=handle,
-            actual_port=actual_port,
-            pid_file=pid_file,
-            console=console,
-        )
+            _supervise_proxy_with_sidecar(
+                proxy=proxy,
+                handle=handle,
+                actual_port=actual_port,
+                pid_file=pid_file,
+                console=console,
+            )
+        finally:
+            os.close(write_fd)
     except BaseException:
         # Tear down on any failure: ``handle is None`` means spawn_sidecar
         # itself raised — we still have shares on disk to clean up. SR-02:

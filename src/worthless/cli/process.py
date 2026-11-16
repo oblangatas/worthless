@@ -418,6 +418,10 @@ def prepare_proxy_env(
     full_env.pop("WORTHLESS_FERNET_KEY", None)
     if fernet_fd is not None:
         full_env["WORTHLESS_FERNET_FD"] = str(fernet_fd)
+    # A value inherited from our own environment names an fd that isn't ours
+    # to hand on: it could be any pipe in the child, and the proxy would shut
+    # down when that pipe closes.
+    full_env.pop("WORTHLESS_LIVENESS_FD", None)
     if liveness_fd is not None:
         full_env["WORTHLESS_LIVENESS_FD"] = str(liveness_fd)
     return full_env
