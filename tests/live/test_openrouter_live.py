@@ -20,6 +20,7 @@ reaches pytest only, never your shell:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -32,7 +33,7 @@ import textwrap
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -51,6 +52,9 @@ REQUEST = {"model": MODEL, "max_tokens": 5, "messages": [{"role": "user", "conte
 BINARY = str(Path(sys.executable).parent / "worthless")
 
 
+_ENV_KEEP = {"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM", "TZ", "SYSTEMROOT"}
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -63,8 +67,9 @@ class Sandbox:
 
     root: Path
     env_file: Path
-    key: str
-    env: dict[str, str]
+    # repr=False: a failing assert that calls a method prints the object.
+    key: str = field(repr=False)
+    env: dict[str, str] = field(repr=False)
 
     @property
     def port(self) -> int:
@@ -87,7 +92,8 @@ class Sandbox:
         shard_a = parsed.get("OPENROUTER_API_KEY") or ""
         base_url = parsed.get("OPENROUTER_BASE_URL") or ""
         assert shard_a, "lock left no OPENROUTER_API_KEY in .env"
-        assert not self.key_on_disk(self.env_file), "lock left the real key in .env"
+        key_left = self.key_on_disk(self.env_file)
+        assert not key_left, "lock left the real key in .env"
         return base_url, shard_a
 
     def unlock(self) -> None:
@@ -118,7 +124,8 @@ class Sandbox:
                 stderr=subprocess.STDOUT,
             )
         if not poll_health(self.port, timeout=30.0):
-            proc.kill()
+            proc.terminate()
+            self.cli("down")
             pytest.fail(f"proxy never came up:\n{log_path.read_text()[-2000:]}")
         return proc
 
@@ -138,7 +145,7 @@ class Sandbox:
             self.cli("down")
 
 
-@pytest.fixture()
+@pytest.fixture
 def sandbox() -> Iterator[Sandbox]:
     """Sandboxed HOME + WORTHLESS_HOME with the real key in a project .env.
 
@@ -153,9 +160,9 @@ def sandbox() -> Iterator[Sandbox]:
     (root / "project").mkdir()
     env_file = root / "project" / ".env"
     env_file.write_text(f"OPENROUTER_API_KEY={key}\n")
-    env = {k: v for k, v in os.environ.items() if not k.startswith("WORTHLESS_")}
-    env.pop("OPENROUTER_API_KEY", None)
-    env.pop("OPENROUTER_BASE_URL", None)
+    # Only what the binary needs: `uv run --env-file .env` loads every key in
+    # .env into this process, and none of them belongs in the sandbox.
+    env = {k: v for k, v in os.environ.items() if k in _ENV_KEEP}
     env.update(
         {
             "HOME": str(root),
@@ -269,17 +276,19 @@ class TestOpenRouterNormalUse:
         assert json.loads(out["body"])["choices"][0]["message"]["content"]
 
     def test_unlock_gives_back_a_key_openrouter_accepts(self, sandbox: Sandbox) -> None:
-        original = sandbox.env_file.read_bytes()
+        # Digests, not bytes: `pytest -l` prints locals, and these hold the real key.
+        original = hashlib.sha256(sandbox.env_file.read_bytes()).digest()
         _, shard_a = sandbox.lock()
         with _client() as client:
             rejected = _chat(client, OPENROUTER_URL, shard_a)
             assert rejected.status_code in {401, 403}, "OpenRouter accepted the locked value"
 
             sandbox.unlock()
-            restored = sandbox.env_file.read_bytes() == original
+            restored = hashlib.sha256(sandbox.env_file.read_bytes()).digest() == original
             assert restored, ".env was not restored byte-for-byte"
-            key = dotenv_values(sandbox.env_file).get("OPENROUTER_API_KEY") or ""
-            _assert_answered(_chat(client, OPENROUTER_URL, key))
+            _assert_answered(
+                _chat(client, OPENROUTER_URL, dotenv_values(sandbox.env_file)["OPENROUTER_API_KEY"])
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +313,9 @@ class TestOpenRouterUnderAttack:
                     f"{label}: the proxy did not refuse it ({resp.status_code}: {resp.text[:200]})"
                 )
             right = _chat(client, base_url, shard_a)
-            assert right.content != refusal.content, "the proxy refuses even the right shard"
+            assert right.status_code < 500 and right.content != refusal.content, (
+                f"the proxy did not pass the right shard on ({right.status_code})"
+            )
 
     def test_old_shard_is_refused_after_relock(self, sandbox: Sandbox) -> None:
         _, old_shard = sandbox.lock()
@@ -320,7 +331,9 @@ class TestOpenRouterUnderAttack:
             direct = _chat(client, OPENROUTER_URL, old_shard)
             assert direct.status_code in {401, 403}, "OpenRouter accepted the old shard"
             right = _chat(client, base_url, new_shard)
-            assert right.content != refusal.content, "the proxy refuses even the right shard"
+            assert right.status_code < 500 and right.content != refusal.content, (
+                f"the proxy did not pass the right shard on ({right.status_code})"
+            )
 
     def test_strangers_all_get_the_same_401(self, sandbox: Sandbox) -> None:
         """No shard, a guessed shard, or the right shard on another alias: one reply, no hints."""
@@ -348,7 +361,9 @@ class TestOpenRouterUnderAttack:
                     f"{label}: got {resp.status_code}: {resp.text[:200]}"
                 )
             right = _chat(client, base_url, shard_a)
-            assert right.content != refusal.content, "the proxy refuses even the right shard"
+            assert right.status_code < 500 and right.content != refusal.content, (
+                f"the proxy did not pass the right shard on ({right.status_code})"
+            )
 
     def test_runaway_loop_is_stopped_by_the_daily_token_budget(self, sandbox: Sandbox) -> None:
         base_url, shard_a = sandbox.lock("--token-budget-daily", "40")
@@ -409,9 +424,11 @@ class TestOpenRouterKill9:
                 refusal = _refusal(client, sandbox.port)
                 forwarded = _chat(client, base_url, shard_a)
                 assert forwarded.content != refusal.content, "the proxy never used the key"
+            on_disk = sandbox.key_on_disk()
+            assert not on_disk, "the real key is in a file in the sandbox while up runs"
             children = psutil.Process(up.pid).children()
             sidecar = next(c for c in children if "worthless.sidecar" in " ".join(c.cmdline()))
-            proxy = next(c for c in children if c.pid != sidecar.pid)
+            proxy = next(c for c in children if "uvicorn" in " ".join(c.cmdline()))
             run_dir = sandbox.worthless_home / "run" / str(up.pid)
             assert (run_dir / "share_a.bin").exists()
 
@@ -451,9 +468,9 @@ class TestOpenRouterKill9:
     def test_kill_9_leaves_no_listening_port(self, sandbox: Sandbox) -> None:
         with self._killed_up(sandbox) as (_, _, proxy):
             try:
-                proxy.wait(timeout=10)
+                proxy.wait(timeout=3)
             except psutil.TimeoutExpired:
                 pass
             with socket.socket() as s:
                 listening = s.connect_ex(("127.0.0.1", sandbox.port)) == 0
-            assert not listening, f"port {sandbox.port} still listening 10 s after kill -9"
+            assert not listening, f"port {sandbox.port} still listening 3 s after kill -9"
