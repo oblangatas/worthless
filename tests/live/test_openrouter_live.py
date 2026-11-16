@@ -457,7 +457,7 @@ class TestOpenRouterKill9:
                 exited = True
             except psutil.TimeoutExpired:
                 exited = False
-            assert exited, "the proxy outlived `up` by 3 s after kill -9"
+            assert exited, "the proxy still ran 3 s after kill -9 took down `up` and its sidecar"
             with pytest.raises(httpx.TransportError):
                 _chat(client, base_url, shard_a)
             on_disk = sandbox.key_on_disk()
