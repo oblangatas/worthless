@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import select
 import signal
 import stat
 import time
@@ -193,6 +194,15 @@ def _forget_pid_file() -> None:
             pid_file.unlink()
 
 
+def _supervisor_gone(fd: int) -> bool:
+    """True when the liveness pipe is at EOF, without blocking on a live one."""
+    try:
+        readable, _, _ = select.select([fd], [], [], 0)
+        return bool(readable) and os.read(fd, 64) == b""
+    except (OSError, ValueError):
+        return False
+
+
 def _watch_liveness_fd() -> int | None:
     """Shut the proxy down when its supervisor dies (worthless-yfxm).
 
@@ -217,7 +227,6 @@ def _watch_liveness_fd() -> int | None:
             return
         loop.remove_reader(fd)
         logger.warning("supervisor is gone (liveness pipe closed); shutting down")
-        _forget_pid_file()
         os.kill(os.getpid(), signal.SIGTERM)
 
     # A stale or bogus value (a closed fd, a regular file that always reads
@@ -386,6 +395,10 @@ async def _lifespan(app: FastAPI):
     finally:
         if liveness_fd is not None:
             asyncio.get_running_loop().remove_reader(liveness_fd)
+            # Only now, after uvicorn drained in-flight requests: until then
+            # `worthless down` still needs the file to find this proxy.
+            if _supervisor_gone(liveness_fd):
+                _forget_pid_file()
         # Cancel background tasks before closing the DB — they MUST NOT race
         # db.close(). Both cancel() and await are required: cancel() alone leaves
         # the task running until the event loop closes, causing "task was
