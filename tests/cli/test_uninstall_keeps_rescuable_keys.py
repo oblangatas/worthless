@@ -206,3 +206,21 @@ def test_a_moved_copy_of_a_key_still_live_elsewhere_does_not_block(home_dir, tmp
     assert result.exit_code == 0, result.output
     assert live.read_text() == original, "the live project did not get its key back"
     assert "revoke" not in result.output, result.output
+
+
+def test_lock_ignores_a_stored_key_it_cannot_decrypt(home_dir, tmp_path) -> None:
+    """One stale key from another project (Fernet drift) must not stop every
+    later lock of that provider: the guard skips what it can't read (Brutus)."""
+    _lock(_project(tmp_path, "good", "good"), home_dir)
+    _lock(_project(tmp_path, "stale", "stale"), home_dir)
+    stale = next(e.key_alias for e in list_enrollments(home_dir) if "stale" in e.env_path)
+    con = sqlite3.connect(home_dir.db_path)
+    with con:
+        con.execute(
+            "UPDATE shards SET shard_b_enc = ? WHERE key_alias = ?", (b"not-a-token", stale)
+        )
+    con.close()
+
+    result = cli_invoke(["lock", "--env", str(_project(tmp_path, "new", "new"))], home_dir)
+
+    assert result.exit_code == 0, result.output

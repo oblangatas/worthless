@@ -28,6 +28,8 @@ from urllib.parse import urlsplit
 import httpx
 import typer
 
+from cryptography.fernet import InvalidToken
+
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
@@ -74,6 +76,7 @@ from worthless.cli.key_check import KEY_FIX, refuse_a_key_that_opens_no_locked_k
 from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix, is_oauth_token
 from worthless.cli.log_redaction import _redact
 from worthless._flags import fernet_ipc_only_enabled
+from worthless.ipc.client import IPCBackendError
 from worthless.cli.keystore import (
     _fernet_file_bytes,
     keyring_available,
@@ -599,7 +602,13 @@ async def _halves_of_stored_keys(
             prefix, charset = encrypted.prefix, encrypted.charset
             if not any(value.startswith(prefix) for _v, value, _p in scanned):
                 continue
-            decrypted.append((alias, prefix, charset, await repo.decrypt_shard(encrypted)))
+            try:
+                stored = await repo.decrypt_shard(encrypted)
+            except (InvalidToken, IPCBackendError):
+                # Sealed under another Fernet key: nothing here can rescue it,
+                # and one stale key must not block every later lock.
+                continue
+            decrypted.append((alias, prefix, charset, stored))
         for var_name, value, _provider in scanned:
             for alias, prefix, charset, stored in decrypted:
                 if not value.startswith(prefix):
