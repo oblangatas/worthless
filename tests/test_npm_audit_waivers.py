@@ -430,3 +430,161 @@ def test_the_committed_waivers_are_valid_today_shape() -> None:
     assert waivers, "the file exists to hold the picomatch waiver"
     for w in waivers:
         assert hook.waiver_shape_problems(w) == []
+
+
+# ── last_release_seen must be the truth, not a knob ────────────────────────
+
+
+@pytest.mark.parametrize("seen", ["2099-01-01T00:00:00Z", "2026-08-24T14:29:55.167Z"])
+def test_last_release_seen_must_equal_the_newest_release(seen) -> None:
+    """A far-future value would switch the "a fix shipped" check off; a stale
+    one claims a history that isn't npm's. Only the real newest release fits."""
+    problems = _check(waivers=[_waiver(last_release_seen=seen)]).problems
+    assert any("newest" in p for p in problems)
+
+
+def test_a_non_date_in_the_release_history_fails() -> None:
+    releases = copy.deepcopy(RELEASES)
+    releases["picomatch"]["unpublished"] = {"time": "2026-01-01T00:00:00.000Z"}
+    assert _check(releases=releases).problems
+
+
+# ── the parts that talk to npm ─────────────────────────────────────────────
+
+
+class _Proc:
+    def __init__(self, returncode: int, stdout: str, stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _fake_run(monkeypatch, *procs: _Proc) -> list[dict]:
+    calls: list[dict] = []
+    queue = list(procs)
+
+    def run(cmd, **kwargs):
+        calls.append({"cmd": cmd, **kwargs})
+        return queue.pop(0)
+
+    monkeypatch.setattr(hook.subprocess, "run", run)
+    return calls
+
+
+def _json(obj) -> str:
+    import json
+
+    return json.dumps(obj)
+
+
+def test_npm_audit_is_run_over_the_whole_tree(monkeypatch, tmp_path) -> None:
+    calls = _fake_run(monkeypatch, _Proc(1, _json(REPORT)))
+    hook.run_npm_audit(tmp_path)
+    assert calls[0]["cmd"] == [
+        "npm",
+        "audit",
+        "--json",
+        "--include=dev",
+        "--include=optional",
+        "--include=peer",
+    ]
+    assert calls[0]["cwd"] == tmp_path
+
+
+@pytest.mark.parametrize("name", ["NPM_CONFIG_OMIT", "npm_config_omit", "Npm_Config_Audit_Level"])
+def test_inherited_npm_settings_are_stripped(monkeypatch, tmp_path, name) -> None:
+    monkeypatch.setenv(name, "dev")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    calls = _fake_run(monkeypatch, _Proc(1, _json(REPORT)), _Proc(0, _json(RELEASES["picomatch"])))
+    hook.run_npm_audit(tmp_path)
+    hook.npm_release_times("picomatch")
+    for call in calls:
+        assert not any(k.upper().startswith("NPM_CONFIG_") for k in call["env"]), call["env"]
+        assert call["env"]["PATH"] == "/usr/bin"
+
+
+@pytest.mark.parametrize(
+    ("code", "report"),
+    [
+        (0, REPORT),  # findings, but npm said all clear
+        (1, {"auditReportVersion": 2, "vulnerabilities": {}, "metadata": {}}),  # red, no findings
+        (2, REPORT),  # neither 0 nor 1
+        (2, {"auditReportVersion": 2, "vulnerabilities": {}, "metadata": {}}),  # crash, "clean"
+    ],
+)
+def test_npm_exit_code_and_findings_must_agree(monkeypatch, tmp_path, code, report) -> None:
+    _fake_run(monkeypatch, _Proc(code, _json(report)))
+    with pytest.raises(hook.AuditError):
+        hook.run_npm_audit(tmp_path)
+
+
+def test_npm_missing_fails(monkeypatch, tmp_path) -> None:
+    def run(cmd, **kwargs):
+        raise FileNotFoundError("npm")
+
+    monkeypatch.setattr(hook.subprocess, "run", run)
+    with pytest.raises(hook.AuditError):
+        hook.run_npm_audit(tmp_path)
+    with pytest.raises(hook.AuditError):
+        hook.npm_release_times("picomatch")
+
+
+@pytest.mark.parametrize(
+    "proc",
+    [
+        _Proc(1, "", "E404"),
+        _Proc(1, '{"4.0.7": "2026-08-24T14:36:23.690Z"}', "E500"),  # failed, plausible output
+        _Proc(0, "[]"),
+        _Proc(0, "not json"),
+    ],
+)
+def test_unreadable_release_history_from_npm_fails(monkeypatch, proc) -> None:
+    _fake_run(monkeypatch, proc)
+    with pytest.raises((hook.AuditError, ValueError)):
+        hook.npm_release_times("picomatch")
+
+
+def _main(monkeypatch, tmp_path, *procs: _Proc, today=TODAY) -> int:
+    waivers = tmp_path / "w.json"
+    waivers.write_text(_json({"waivers": [_waiver()]}))
+    monkeypatch.setattr(hook, "WAIVERS", waivers)
+    monkeypatch.setattr(hook, "_today", lambda: today)
+    _fake_run(monkeypatch, *procs)
+    return hook.main(["--scope", "worker", "--dir", "workers/worthless-sh"])
+
+
+def test_main_passes_the_covered_tree(monkeypatch, tmp_path) -> None:
+    code = _main(
+        monkeypatch, tmp_path, _Proc(0, _json(RELEASES["picomatch"])), _Proc(1, _json(REPORT))
+    )
+    assert code == 0
+
+
+def test_main_fails_on_a_new_release(monkeypatch, tmp_path) -> None:
+    times = dict(RELEASES["picomatch"], **{"4.0.8": "2026-11-20T09:00:00.000Z"})
+    assert _main(monkeypatch, tmp_path, _Proc(0, _json(times)), _Proc(1, _json(REPORT))) == 1
+
+
+def test_main_fails_when_npm_view_fails(monkeypatch, tmp_path) -> None:
+    assert _main(monkeypatch, tmp_path, _Proc(1, "", "E404")) == 1
+
+
+def test_main_fails_on_an_npm_error_report(monkeypatch, tmp_path) -> None:
+    error = {"error": {"summary": "", "detail": ""}}
+    code = _main(
+        monkeypatch, tmp_path, _Proc(0, _json(RELEASES["picomatch"])), _Proc(1, _json(error))
+    )
+    assert code == 1
+
+
+def test_main_warns_in_the_github_summary(monkeypatch, tmp_path, capsys) -> None:
+    """A warning in a green job's log is unread; `::warning::` reaches the PR."""
+    code = _main(
+        monkeypatch,
+        tmp_path,
+        _Proc(0, _json(RELEASES["picomatch"])),
+        _Proc(1, _json(REPORT)),
+        today=dt.date(2026, 12, 5),
+    )
+    assert code == 0
+    assert "::warning::" in capsys.readouterr().out

@@ -282,7 +282,9 @@ def test_npm_audit_runs_through_the_waiver_gate(job: str) -> None:
     """
     _, scope, tree = NPM_JOBS[job]
     run = _npm_step(job)["run"].split()
-    assert run[:2] == ["python3", NPM_GATE], run
+    # -I: isolated mode, so a stray json.py next to the script can't shadow
+    # the stdlib module the gate parses npm's verdict with.
+    assert run[:3] == ["python3", "-I", NPM_GATE], run
     assert run[run.index("--scope") + 1] == scope
     assert run[run.index("--dir") + 1] == tree
 

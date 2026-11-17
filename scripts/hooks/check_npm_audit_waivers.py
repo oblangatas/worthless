@@ -306,20 +306,39 @@ def evaluate(
 
 
 def _release_problems(w: dict, times: object) -> list[str]:
+    """`last_release_seen` must be exactly the package's newest release.
+
+    Any later release ends the waiver ("a fix shipped"). Requiring an exact
+    match, not just "nothing later", stops a renewal from parking the value in
+    the future, which would switch this check off.
+    """
     if not isinstance(times, dict) or not times:
         return [f"{w['advisory']}: could not read {w['package']}'s release history from npm"]
     seen = _instant(w["last_release_seen"])
     problems = []
+    published: list[tuple[dt.datetime, str]] = []
     for version, raw in sorted(times.items()):
         if version in ("created", "modified"):
             continue
-        published = _instant(raw)
-        if seen is None or published is None or published > seen:
+        when = _instant(raw)
+        if when is None:
+            problems.append(f"{w['advisory']}: {w['package']} {version} has no readable date")
+            continue
+        published.append((when, version))
+        if seen is not None and when > seen:
             problems.append(
                 f"{w['advisory']}: {w['package']} {version} was published {raw}, after the "
                 "waiver's last_release_seen. Check whether it fixes the advisory, then take it "
                 "or re-argue"
             )
+    if not published:
+        return problems + [f"{w['advisory']}: {w['package']} has no releases on npm"]
+    newest, version = max(published)
+    if seen != newest:
+        problems.append(
+            f"{w['advisory']}: last_release_seen {w['last_release_seen']} is not the newest "
+            f"{w['package']} release ({version}, {newest.isoformat()})"
+        )
     return problems
 
 
@@ -369,6 +388,10 @@ def npm_release_times(package: str) -> dict:
     return times
 
 
+def _today() -> dt.date:
+    return dt.datetime.now(dt.timezone.utc).date()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="npm audit, with dated self-ending waivers")
     parser.add_argument("--scope", required=True, choices=SCOPES)
@@ -394,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
         report,
         waivers,
         scope=args.scope,
-        today=dt.datetime.now(dt.timezone.utc).date(),
+        today=_today(),
         releases=releases,
     )
     for w in result.waived:
@@ -403,7 +426,9 @@ def main(argv: list[str] | None = None) -> int:
             f"({w['ticket']}): {w['reason']}"
         )
     for warning in result.warnings:
-        print(f"warning: {warning}")
+        # `::warning::` lifts it into the PR's check summary; a green job's log
+        # is never read.
+        print(f"::warning::{warning}")
     if result.problems:
         print(f"npm audit ({args.scope}) FAILED:", file=sys.stderr)
         for p in result.problems:

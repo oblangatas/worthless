@@ -206,7 +206,7 @@ jobs:
         #
         # This job's `name:` is a required status check on main. Renaming it
         # blocks every PR with zero failing checks (WOR-874).
-        run: python3 scripts/hooks/check_npm_audit_waivers.py --scope worker --dir workers/worthless-sh
+        run: python3 -I scripts/hooks/check_npm_audit_waivers.py --scope worker --dir workers/worthless-sh
 
   # The docs site (docs.wless.io, Astro + Starlight) owns the ROOT package.json
   # and package-lock.json, and the job above only covers workers/worthless-sh.
@@ -239,7 +239,7 @@ jobs:
         run: npm ci --dry-run
 
       - name: Audit the docs site's dependency tree
-        run: python3 scripts/hooks/check_npm_audit_waivers.py --scope docs --dir .
+        run: python3 -I scripts/hooks/check_npm_audit_waivers.py --scope docs --dir .
 
   # The CI half of the `grype-ignore-expiry` pre-commit hook, for the same
   # reason the `audit` job above exists: that hook is client-side, so
