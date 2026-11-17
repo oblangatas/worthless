@@ -192,11 +192,12 @@ async def _rescuable_keys(repo, enrollments: list) -> tuple[list[str], list[tupl
     """
     linked = {e.key_alias for e in enrollments}
     unlinked = sorted(set(await repo.list_keys()) - linked)
-    moved = [
-        (e.key_alias, e.env_path)
-        for e in enrollments
-        if e.env_path is not None and _file_gone(e.env_path)
-    ]
+    gone = [e for e in enrollments if e.env_path is not None and _file_gone(e.env_path)]
+    # A key still locked in a project that exists comes back through it, so a
+    # moved copy doesn't put it at risk — and `revoke --alias` would break that
+    # live project, so it must never be suggested for such a key.
+    live = {e.key_alias for e in enrollments if e.env_path is not None and e not in gone}
+    moved = [(e.key_alias, e.env_path) for e in gone if e.key_alias not in live]
     return unlinked, moved
 
 

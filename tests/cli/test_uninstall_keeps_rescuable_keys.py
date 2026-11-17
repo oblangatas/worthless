@@ -187,3 +187,22 @@ def test_lock_never_resplits_a_moved_keys_only_project(home_dir, tmp_path) -> No
     assert result.exit_code != 0, result.output
     assert moved.read_text() == before, "lock overwrote half of a moved project's key"
     assert _shard_aliases(home_dir) == [alias], "lock stored a new key"
+
+
+def test_a_moved_copy_of_a_key_still_live_elsewhere_does_not_block(home_dir, tmp_path) -> None:
+    """Same key locked in two projects, one moved: uninstall gives the key back
+    through the live one. Refusing here would suggest ``revoke --alias``, which
+    deletes every record of the key and breaks the live project (Karen, WOR-1135)."""
+    live = _project(tmp_path, "live", "shared")
+    original = live.read_text()
+    _lock(live, home_dir)
+    moved = _project(tmp_path, "old-name", "shared")
+    _lock(moved, home_dir)
+    assert len(set(_shard_aliases(home_dir))) == 1, "precondition: one key, two projects"
+    moved.parent.rename(tmp_path / "new-name")
+
+    result = cli_invoke(["uninstall", "--yes"], home_dir)
+
+    assert result.exit_code == 0, result.output
+    assert live.read_text() == original, "the live project did not get its key back"
+    assert "revoke" not in result.output, result.output
