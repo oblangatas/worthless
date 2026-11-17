@@ -831,3 +831,84 @@ ignore:
     package: {name: libssl3, type: deb}
     reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22). The NULL deref is in CMP password-based protection verification; upstream states CMP is a specialized feature an application must explicitly enable, and Worthless does not. Upstream: no memory disclosure, no controlled write, no path to code execution. fix=not-fixed: no Debian bookworm update exists. WOR-915."
     expiry: "2027-01-31"
+
+  # ── OpenSSL 3.5.7 (trixie), advisory of 2026-11-10 (WOR-1155) ──────────
+  # Four advisories turned main's required `scan` red on 2026-11-17. OpenSSL
+  # rates all four LOW; grype reports High from a mechanical CVSS score. All are
+  # fix=not-fixed: upstream ships 3.5.10 on 2026-12-01 and Debian trixie has no
+  # update yet, so there is nothing to bump to. The claim is the WEAKER one,
+  # "we do not call this code", not "the code is absent" (trixie's 3.5 has QUIC
+  # compiled in, unlike the bookworm CVE-2026-14456 case above):
+  #
+  #   CVE-2026-107496  CMS_encrypt() loop. CMS/S-MIME only; TLS never calls it.
+  #   CVE-2026-88823   AES-GCM-SIV AAD reset. Not a TLS cipher suite.
+  #   CVE-2026-95691   QUIC CLIENT use-after-free. Python's ssl has no QUIC API.
+  #   CVE-2026-95692   AES-GCM-SIV short-IV OOB read. Not a TLS cipher suite.
+  #
+  # Measured 2026-11-17 on the image built from main, base digest 2d44738e...
+  # (amd64 + arm64 both carry 3.5.7-1~deb13u3):
+  #
+  #   dpkg-query -W openssl libssl3t64 openssl-provider-legacy -> 3.5.7-1~deb13u3
+  #   every ELF linking the system libssl/libcrypto: apt + coreutils hashers,
+  #     /usr/bin/openssl, OpenSSL's own engines/providers, and Python's _ssl
+  #     and _hashlib. Neither Python module exposes CMS, an EVP cipher API, or
+  #     QUIC.
+  #   Worthless imports only Fernet, hashes and HKDF from cryptography; uv.lock
+  #     has no aioquic/http3.
+  #
+  # NOT COVERED BY THESE ENTRIES, and grype does not flag it: cryptography
+  # 50.0.2 bundles its own OpenSSL 4.0.3, inside the affected range for both
+  # AES-GCM-SIV CVEs (fixed in 4.0.4). Unreachable today because nothing calls
+  # AESGCMSIV. WOR-1155 tracks the cryptography bump once a wheel ships >= 4.0.4.
+  #
+  # Pinned to the exact Debian version: grype stops suppressing the day Debian
+  # ships the fix (see the libstdc++ pair above for the contrast measurement).
+  # At expiry, delete these if Debian has shipped; otherwise re-measure.
+  - vulnerability: CVE-2026-107496
+    package: {name: openssl, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rates it Low, TLS and QUIC never call it. Worthless never builds CMS/S-MIME: measured 2026-11-17, only _ssl and _hashlib link the system libssl in the image, neither exposes CMS. fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). WOR-1155."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-107496
+    package: {name: libssl3t64, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rates it Low, TLS and QUIC never call it. Worthless never builds CMS/S-MIME: measured 2026-11-17, only _ssl and _hashlib link the system libssl in the image, neither exposes CMS. fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). WOR-1155."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-107496
+    package: {name: openssl-provider-legacy, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rates it Low, TLS and QUIC never call it. Worthless never builds CMS/S-MIME: measured 2026-11-17, only _ssl and _hashlib link the system libssl in the image, neither exposes CMS. fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). WOR-1155."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-88823
+    package: {name: openssl, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD. OpenSSL rates it Low. AES-GCM-SIV is not a TLS cipher and Python's ssl/_hashlib expose no EVP cipher API; Worthless uses only Fernet, hashes and HKDF (measured 2026-11-17). fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). WOR-1155."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-88823
+    package: {name: libssl3t64, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD. OpenSSL rates it Low. AES-GCM-SIV is not a TLS cipher and Python's ssl/_hashlib expose no EVP cipher API; Worthless uses only Fernet, hashes and HKDF (measured 2026-11-17). fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). WOR-1155."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-88823
+    package: {name: openssl-provider-legacy, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD. OpenSSL rates it Low. AES-GCM-SIV is not a TLS cipher and Python's ssl/_hashlib expose no EVP cipher API; Worthless uses only Fernet, hashes and HKDF (measured 2026-11-17). fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). WOR-1155."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-95691
+    package: {name: openssl, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server. OpenSSL rates it Low. Python's ssl module has no QUIC API; httpx/uvicorn speak HTTP/1.1 and H2 over TCP; uv.lock has no aioquic/http3 (measured 2026-11-17). fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). WOR-1155."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-95691
+    package: {name: libssl3t64, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server. OpenSSL rates it Low. Python's ssl module has no QUIC API; httpx/uvicorn speak HTTP/1.1 and H2 over TCP; uv.lock has no aioquic/http3 (measured 2026-11-17). fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). WOR-1155."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-95691
+    package: {name: openssl-provider-legacy, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server. OpenSSL rates it Low. Python's ssl module has no QUIC API; httpx/uvicorn speak HTTP/1.1 and H2 over TCP; uv.lock has no aioquic/http3 (measured 2026-11-17). fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). WOR-1155."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-95692
+    package: {name: openssl, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds. OpenSSL rates it Low. AES-GCM-SIV is not a TLS cipher and Python's ssl/_hashlib expose no EVP cipher API; Worthless uses only Fernet, hashes and HKDF (measured 2026-11-17). fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). WOR-1155."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-95692
+    package: {name: libssl3t64, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds. OpenSSL rates it Low. AES-GCM-SIV is not a TLS cipher and Python's ssl/_hashlib expose no EVP cipher API; Worthless uses only Fernet, hashes and HKDF (measured 2026-11-17). fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). WOR-1155."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-95692
+    package: {name: openssl-provider-legacy, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds. OpenSSL rates it Low. AES-GCM-SIV is not a TLS cipher and Python's ssl/_hashlib expose no EVP cipher API; Worthless uses only Fernet, hashes and HKDF (measured 2026-11-17). fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). WOR-1155."
+    expiry: "2026-12-15"
