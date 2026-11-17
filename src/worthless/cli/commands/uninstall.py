@@ -182,7 +182,9 @@ def _file_gone(env_path: str) -> bool:
     return False
 
 
-async def _rescuable_keys(repo, enrollments: list) -> tuple[list[str], list[tuple[str, str]]]:  # noqa: ANN001
+def _rescuable_keys(
+    aliases: list[str], enrollments: list[tuple[str, str | None]]
+) -> tuple[list[str], list[tuple[str, str]]]:
     """Keys a wipe would destroy although they can still be rescued (WOR-1135).
 
     ``unlinked``: a shard with no enrollment, as the v0.3.7–v0.3.14 doctor bug
@@ -190,14 +192,13 @@ async def _rescuable_keys(repo, enrollments: list) -> tuple[list[str], list[tupl
     was moved, renamed or deleted. Either way Shard A may still sit in a .env
     Worthless can't see, so the wipe would make the key unrecoverable.
     """
-    linked = {e.key_alias for e in enrollments}
-    unlinked = sorted(set(await repo.list_keys()) - linked)
-    gone = [e for e in enrollments if e.env_path is not None and _file_gone(e.env_path)]
+    unlinked = sorted(set(aliases) - {alias for alias, _ in enrollments})
+    gone = [(alias, path) for alias, path in enrollments if path is not None and _file_gone(path)]
     # A key still locked in a project that exists comes back through it, so a
     # moved copy doesn't put it at risk — and `revoke --alias` would break that
     # live project, so it must never be suggested for such a key.
-    live = {e.key_alias for e in enrollments if e.env_path is not None and e not in gone}
-    moved = [(e.key_alias, e.env_path) for e in gone if e.key_alias not in live]
+    live = {alias for alias, path in enrollments if path is not None and (alias, path) not in gone}
+    moved = [(alias, path) for alias, path in gone if alias not in live]
     return unlinked, moved
 
 
@@ -217,17 +218,19 @@ def _holds_no_keys(home) -> bool:  # noqa: ANN001
 def _find_rescuable(home) -> tuple[list[str], list[tuple[str, str]]]:  # noqa: ANN001
     """Read the rescuable keys before uninstall changes anything.
 
-    A busy DB refuses here with nothing changed. Any other read failure returns
-    nothing, so the broken-install path below decides exactly as before.
+    Plain read-only SQL, no Fernet key: a locked keychain must not hide which
+    keys a wipe would destroy. A busy DB refuses here with nothing changed. Any
+    other read failure returns nothing, so the broken-install path below
+    decides exactly as before.
     """
-
-    async def _read():
-        async with open_repo(home) as repo:
-            return await _rescuable_keys(repo, await _read_enrollments(repo))
-
     try:
-        return asyncio.run(_read())
-    except (WorthlessError, sqlite3.Error, OSError) as exc:
+        con = sqlite3.connect(f"file:{home.db_path}?mode=ro", uri=True)
+        try:
+            aliases = [row[0] for row in con.execute("SELECT key_alias FROM shards")]
+            enrollments = con.execute("SELECT key_alias, env_path FROM enrollments").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
         if _is_recoverable_repo_error(exc):
             raise WorthlessError(
                 ErrorCode.LOCK_IN_PROGRESS,
@@ -236,6 +239,7 @@ def _find_rescuable(home) -> tuple[list[str], list[tuple[str, str]]]:  # noqa: A
                 "are safe. Stop it with `worthless down` and re-run.",
             ) from exc
         return [], []
+    return _rescuable_keys(aliases, enrollments)
 
 
 def _guard_rescuable(
@@ -246,17 +250,15 @@ def _guard_rescuable(
     every such key first; ``print_key_note`` shows even under ``--quiet``."""
     if not unlinked and not moved:
         return
-    rows = [
-        f"  {alias}   lost its link to its project (Worthless doctor bug, v0.3.7–v0.3.14)"
-        for alias in unlinked
-    ]
+    rows = [f"  {alias}   lost its link to its project" for alias in unlinked]
     rows += [
         f"  {alias}   its project moved or was deleted: {_shown(path)}" for alias, path in moved
     ]
     if force:
-        names = ", ".join([*unlinked, *(alias for alias, _ in moved)])
+        doomed = dict.fromkeys([*unlinked, *(alias for alias, _ in moved)])
         console.print_key_note(
-            f"--force: destroying {len(rows)} key(s) that could have been rescued: {names}. "
+            f"--force: destroying {len(doomed)} key(s) that could have been rescued: "
+            f"{', '.join(doomed)}. "
             "Rotate them at your provider."
         )
         return
@@ -275,15 +277,17 @@ def _guard_rescuable(
     if unlinked:
         tip = unlinked[0]
         lines.append(
-            "Keep ~/.worthless: the next Worthless release brings these keys back. "
-            f"A project locked with a proxy URL has a .env line containing /{tip}/."
+            "A lost link is usually the Worthless doctor bug (v0.3.7–v0.3.14). Keep "
+            "~/.worthless: the next Worthless release brings these keys back. A project "
+            f"locked with a proxy URL has a .env line containing /{tip}/. If an earlier "
+            "uninstall stopped partway, that key may already be back in its .env."
         )
-    first = (unlinked or [alias for alias, _ in moved])[0]
+    aliases = dict.fromkeys([*unlinked, *(alias for alias, _ in moved)])
     lines += [
         f"See {_RESCUE_ISSUE_URL}",
         "",
         "Sure you'll never need one of these keys? Remove just that key:",
-        f"  worthless revoke --alias {first}",
+        *(f"  worthless revoke --alias {alias}" for alias in aliases),
     ]
     raise WorthlessError(
         ErrorCode.SHARD_STORAGE_FAILED,

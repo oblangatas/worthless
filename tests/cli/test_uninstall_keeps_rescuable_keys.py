@@ -224,3 +224,34 @@ def test_lock_ignores_a_stored_key_it_cannot_decrypt(home_dir, tmp_path) -> None
     result = cli_invoke(["lock", "--env", str(_project(tmp_path, "new", "new"))], home_dir)
 
     assert result.exit_code == 0, result.output
+
+
+def _hide_fernet_key(home: WorthlessHome) -> None:
+    """As a locked keychain or a WSL box with no secret service looks to uninstall."""
+    home.fernet_key_path.unlink()
+
+
+def test_an_unreadable_fernet_key_does_not_hide_a_rescuable_key(home_dir, tmp_path) -> None:
+    """Key names need no decryption (Brutus): the guard must still refuse."""
+    env = _project(tmp_path, "app", "no-fernet")
+    _lock(env, home_dir)
+    alias = _unlink_like_the_bug(home_dir, env)
+    _hide_fernet_key(home_dir)
+
+    result = cli_invoke(["uninstall", "--yes"], home_dir)
+
+    assert result.exit_code == REFUSED, result.output
+    assert alias in _flat(result.output), result.output
+    assert _shard_aliases(home_dir) == [alias]
+
+
+def test_force_names_keys_even_when_the_fernet_key_is_unreadable(home_dir, tmp_path) -> None:
+    env = _project(tmp_path, "app", "no-fernet-force")
+    _lock(env, home_dir)
+    alias = _unlink_like_the_bug(home_dir, env)
+    _hide_fernet_key(home_dir)
+
+    result = cli_invoke(["--quiet", "uninstall", "--yes", "--force"], home_dir)
+
+    assert result.exit_code == 0, result.output
+    assert alias in _flat(result.output), f"--force must name what it destroyed:\n{result.output}"
