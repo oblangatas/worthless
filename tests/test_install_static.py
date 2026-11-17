@@ -12,8 +12,9 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
-from tests._install_helpers import INSTALL_FIXTURES, INSTALL_SH, REPO_ROOT
+from tests._install_helpers import INSTALL_FIXTURES, INSTALL_SH, REPO_ROOT, read_install_var
 
 
 @pytest.fixture(scope="module")
@@ -30,6 +31,35 @@ def test_set_eu_present(install_text: str) -> None:
 def test_uv_version_pinned(install_text: str) -> None:
     assert re.search(r"\bUV_VERSION\s*=\s*['\"]?\d+\.\d+", install_text), (
         "install.sh must pin UV_VERSION to a specific release"
+    )
+
+
+def test_uv_version_rejects_compromised_emudhra_keys() -> None:
+    """WOR-1116 (GHSA-hq85-5cpj-mr62): uv checks PyPI against its own roots. Below
+    0.13.4 they trust the root above the compromised eMudhra keys; 0.13.6 is the
+    first to download CPython 3.14.10, whose ssl rejects those keys too."""
+    version = read_install_var("UV_VERSION")
+    assert tuple(int(part) for part in version.split(".")) >= (0, 13, 6), (
+        f"UV_VERSION {version} is below 0.13.6: uv below 0.13.4 trusts the root above the "
+        "compromised eMudhra keys (GHSA-hq85-5cpj-mr62), and uv below 0.13.6 can't "
+        "download CPython 3.14.10"
+    )
+
+
+def test_tool_python_keeps_the_3_14_10_floor() -> None:
+    """WOR-1116: 3.14.10's ssl rejects the compromised eMudhra keys, and an older
+    uv-managed 3.14 is reused unless the floor excludes it; 3.15 has no PyYAML wheel.
+    Reads install.sh, not the tests' hand copy, so weakening both still fails here."""
+    value = read_install_var("TOOL_PYTHON")
+    try:
+        spec = SpecifierSet(value)
+    except InvalidSpecifier:
+        pytest.fail(
+            f'TOOL_PYTHON {value!r} is not a version range like ">=3.14.10,<3.15": a bare '
+            '"3.14" lets uv reuse any 3.14, an exact version blocks later 3.14 fixes'
+        )
+    assert "3.14.10" in spec and "3.14.9" not in spec and "3.15.0" not in spec, (
+        f"TOOL_PYTHON {value!r} must allow 3.14.10+ and nothing below it or from 3.15"
     )
 
 
@@ -849,10 +879,10 @@ def test_install_smoke_uploads_terminal_artifacts() -> None:
     )
     assert "install-smoke-traces-${{ matrix.os }}-${{ github.run_id }}" in text, (
         "live matrix artifact names must use matrix.os, not runner.os, so "
-        "macos-14/macos-15 and ubuntu-22.04/ubuntu-24.04 uploads do not collide."
+        "ubuntu-22.04/ubuntu-24.04 uploads do not collide."
     )
     assert "install-smoke-traces-${{ runner.os }}-${{ github.run_id }}" not in text, (
-        "runner.os collapses macos-14/macos-15 and ubuntu-22.04/ubuntu-24.04 "
+        "runner.os collapses ubuntu-22.04/ubuntu-24.04 "
         "into duplicate artifact names under upload-artifact@v4."
     )
     assert "install-smoke-traces-proxy-${{ github.run_id }}" in text, (
@@ -1518,3 +1548,15 @@ class TestWslDetectionActuallyRuns:
         assert "IS_WSL=" in out and "IS_WSL=1" not in out, (
             f"no /proc/version should mean 'not WSL', quietly:\n{out}"
         )
+
+
+def test_closing_banner_does_not_say_lock_starts_the_proxy(install_text: str) -> None:
+    """`lock` starts no proxy; `up` or `wrap` does (WOR-757).
+
+    The banner said otherwise from 0.3.x until the site-claim tests
+    (test_site_claims_match_cli.py) proved nothing listens after `lock`.
+    It's a two-line printf, so match the text with the line break removed.
+    """
+    banner = re.sub(r'\\n"\s*\n\s*printf "\s*', " ", install_text)
+    assert "and starts a local proxy" not in banner
+    assert "Start the proxy with worthless up" in banner

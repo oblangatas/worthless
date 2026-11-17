@@ -26,9 +26,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from worthless.openclaw import config as _config_mod
@@ -66,7 +68,47 @@ class UnshardableCredentialFinding:
     needs_vertex_reauth_notice: bool = False
 
 
-def _keychain_service_present(service: str) -> bool:
+class KeychainProbe(Enum):
+    """Outcome of a keychain presence check (WOR-835).
+
+    PRESENT
+        ``security`` answered: the credential is in the keychain.
+    ABSENT
+        ``security`` answered: it is not. Also non-macOS, where there is no
+        keychain to hold it — a definite answer, not a gap.
+
+        Measured limit: exit 44 is NOT exclusive to "no such item". A missing
+        or corrupt keychain file returns 44 with byte-identical stderr, so an
+        unopenable keychain is indistinguishable from an empty one and lands
+        here rather than in UNKNOWN. Nothing in the exit code or stderr can
+        separate them; closing that gap needs a different probe, not a
+        different threshold. See WOR-835 follow-ups.
+    UNKNOWN
+        The question was never answered: the binary is missing, the probe
+        timed out, or it exited for a reason other than "not found".
+
+    A plain ``bool`` cannot separate ABSENT from UNKNOWN, and collapsing them
+    is precisely the false all-clear this module exists to prevent. The
+    members are deliberately checked with ``is``, never truthiness — every enum
+    member is truthy, so ``if probe:`` would silently treat ABSENT as PRESENT.
+    A plain ``Enum`` rather than ``(str, Enum)``: nothing serialises this, and
+    the mixin would let ``probe == "absent"`` quietly succeed.
+    """
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+# errSecItemNotFound. The only non-zero exit treated as an answer rather than
+# a failure to look — mirrors the same constant in _clear_keychain_service.
+# It is the sole OSStatus in -25400..-25200 truncating to 44, but `security`
+# also returns it for a keychain it could not open, so 44 means "no item
+# visible", NOT "no item exists". Verified by measurement, not assumed.
+_ERR_SEC_ITEM_NOT_FOUND = 44
+
+
+def _keychain_probe(service: str, caveats: list[str] | None) -> KeychainProbe:
     """Best-effort presence check via the ``security`` CLI binary.
 
     Matches real OpenClaw's own detection mechanism exactly
@@ -79,9 +121,24 @@ def _keychain_service_present(service: str) -> bool:
     process with an uncatchable Objective-C exception (a Python
     ``try/except`` cannot catch a native-level abort). A subprocess crash,
     by contrast, only fails this one check.
+
+    WOR-835: this used to return a bare ``bool``, so a missing binary, a
+    timeout, or any unexpected exit code read exactly like an empty keychain
+    and the surface was reported clean without ever being inspected. Same rule
+    as :func:`_probe_is_file` — "we couldn't look" must never be reported as
+    "it isn't there" — but expressed in the return type, because unlike a file
+    probe there are three distinguishable outcomes.
+
+    ``caveats`` is required, not defaulted, for the same reason as
+    :func:`_probe_is_file`: a call site that forgets it silently discards the
+    UNKNOWN signal and re-creates this bug.
+
+    Only exit 44 counts as a genuine "not there". Treating every non-zero exit
+    as UNKNOWN would caveat every clean Mac on every run, which is the
+    false-caveat inverse of the bug and would train users to ignore caveats.
     """
     if sys.platform != "darwin":
-        return False
+        return KeychainProbe.ABSENT
     try:
         result = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input  # nosec B603
             [_SECURITY_BIN, "find-generic-password", "-s", service],
@@ -89,9 +146,56 @@ def _keychain_service_present(service: str) -> bool:
             timeout=_KEYCHAIN_TIMEOUT_S,
             check=False,
         )
-        return result.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("could not probe keychain service %s: %s", service, exc)
+        _append_keychain_caveat(service, caveats, _describe_probe_failure(exc))
+        return KeychainProbe.UNKNOWN
+
+    if result.returncode == 0:
+        return KeychainProbe.PRESENT
+    if result.returncode == _ERR_SEC_ITEM_NOT_FOUND:
+        return KeychainProbe.ABSENT
+
+    logger.debug(
+        "keychain probe for %s exited %d — treating as unknown", service, result.returncode
+    )
+    _append_keychain_caveat(service, caveats, f"security exited {result.returncode}")
+    return KeychainProbe.UNKNOWN
+
+
+def _describe_probe_failure(exc: Exception) -> str:
+    """A short, non-secret reason for a caveat line."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"timed out after {_KEYCHAIN_TIMEOUT_S}s"
+    if isinstance(exc, FileNotFoundError):
+        return f"{_SECURITY_BIN} not found"
+    return getattr(exc, "strerror", None) or exc.__class__.__name__
+
+
+def _add_caveat(caveats: list[str] | None, text: str) -> None:
+    """Record a caveat once, preserving first-seen order.
+
+    Several probes run per scan and their caveat text is deliberately
+    surface-shaped, not path-shaped — naming the file would leak a home
+    directory into terminal output. That makes repeats genuinely identical:
+    six agent dirs with an unreadable auth-profiles.json produced the same
+    sentence six times, 600+ characters of it joined into one NOTE, carrying
+    no more information than one copy. A wall of repeated text reads as a
+    broken tool and trains people to skip the line — which defeats the point
+    of emitting it. Dedupe here rather than at each render site, so every
+    consumer benefits and no caller has to remember.
+    """
+    if caveats is not None and text not in caveats:
+        caveats.append(text)
+
+
+def _append_keychain_caveat(service: str, caveats: list[str] | None, reason: str) -> None:
+    """Record an unanswered keychain probe, naming the service but no secret.
+
+    Same wording as the file-surface caveats ("could not be checked") so the
+    doctor output reads consistently regardless of which probe fell short.
+    """
+    _add_caveat(caveats, f"macOS keychain service {service!r} could not be checked ({reason})")
 
 
 def _clear_keychain_service(service: str) -> bool:
@@ -125,23 +229,28 @@ def _home_relative_path(*parts: str) -> Path:
 def _probe_is_file(path: Path, surface_label: str, caveats: list[str] | None) -> bool:
     """Presence probe that can never raise.
 
-    ``Path.is_file()`` does NOT swallow ``EACCES`` — pathlib ignores only
-    ENOENT/ENOTDIR/EBADF/ELOOP — so a credential directory this process
-    can't traverse propagates ``PermissionError`` and takes down the whole
-    scan. Treat an un-probeable surface as absent, but record a caveat:
-    "we couldn't look" must never be reported as "it isn't there", which is
-    exactly the false all-clear this module exists to prevent.
+    Only ENOENT/ENOTDIR mean "it isn't there". Any other failure, such as a
+    credential directory this process can't traverse, means "we couldn't
+    look": treat the surface as absent, but record a caveat. Reporting it as
+    "it isn't there" is exactly the false all-clear this module exists to
+    prevent.
+
+    ``stat()``, not ``is_file()``: on Python 3.14, ``is_file()`` returns
+    False where it can't look, instead of raising.
 
     The caveat names the surface, never the path — caveats surface in CLI
-    output and CI logs, and a home-relative path is needless detail there
-    (the full path goes to the debug log instead).
+    output and CI logs, and a home-relative path is needless detail there.
+    The full path is logged at DEBUG only, which the CLI doesn't print.
     """
     try:
-        return path.is_file()
+        return stat.S_ISREG(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
     except OSError as exc:
-        logger.warning("could not probe %s at %s: %s", surface_label, path, exc)
-        if caveats is not None:
-            caveats.append(f"{surface_label} could not be checked ({exc.strerror or 'unreadable'})")
+        logger.debug("could not probe %s at %s: %s", surface_label, path, exc)
+        _add_caveat(
+            caveats, f"{surface_label} could not be checked ({exc.strerror or 'unreadable'})"
+        )
         return False
 
 
@@ -149,7 +258,7 @@ def _detect_claude_cli(
     findings: list[UnshardableCredentialFinding], caveats: list[str] | None = None
 ) -> None:
     # Surface 1 — OS keychain "Claude Code-credentials" (cli-credentials.ts:18).
-    if _keychain_service_present(CLAUDE_CLI_KEYCHAIN_SERVICE):
+    if _keychain_probe(CLAUDE_CLI_KEYCHAIN_SERVICE, caveats) is KeychainProbe.PRESENT:
         findings.append(
             UnshardableCredentialFinding(
                 surface_id="claude_cli_keychain",
@@ -179,7 +288,7 @@ def _detect_codex_cli(
     findings: list[UnshardableCredentialFinding], caveats: list[str] | None = None
 ) -> None:
     # Surface 3 — ~/.codex/auth.json + its own keychain entry.
-    if _keychain_service_present(CODEX_CLI_KEYCHAIN_SERVICE):
+    if _keychain_probe(CODEX_CLI_KEYCHAIN_SERVICE, caveats) is KeychainProbe.PRESENT:
         findings.append(
             UnshardableCredentialFinding(
                 surface_id="codex_cli_keychain",
@@ -236,6 +345,17 @@ def _detect_minimax_cli(
         )
 
 
+def _agent_store_label(agent_dir: Path) -> str:
+    """Where an agent's auth store is, for a caveat that ``lock`` prints and
+    CI logs keep: from ``~`` when it's under home (``~/.openclaw/agents/<id>/
+    agent``, or an ``agentDir`` the user set), else the path as configured.
+    """
+    try:
+        return f"~/{agent_dir.relative_to(Path.home()).as_posix()}"
+    except ValueError:
+        return str(agent_dir)
+
+
 def _detect_auth_profiles_oauth_token(
     findings: list[UnshardableCredentialFinding],
     caveats: list[str] | None = None,
@@ -271,12 +391,15 @@ def _detect_auth_profiles_oauth_token(
             # drop EVERY oauth/token profile inside it and still report "no
             # unshardable credentials found" — a false all-clear caused by a
             # file we couldn't parse. Skip it, but say so.
-            logger.warning("could not read %s: %s", auth_profiles_path, exc)
-            if caveats is not None:
-                caveats.append(
-                    "an OpenClaw auth-profiles.json could not be read — any "
-                    "OAuth/token profiles inside it were not checked"
-                )
+            logger.debug("could not read %s: %s", auth_profiles_path, exc)
+            # The CLI prints no DEBUG log, so with several agents the
+            # caveat itself has to say which store to look at.
+            _add_caveat(
+                caveats,
+                "an OpenClaw auth-profiles.json could not be read "
+                f"(in {_agent_store_label(agent_dir)}) — any "
+                "OAuth/token profiles inside it were not checked",
+            )
             continue
         profiles = data.get("profiles")
         if not isinstance(profiles, dict):
@@ -368,7 +491,7 @@ def detection_caveats() -> list[str]:
     part of the scan genuinely couldn't run — the whole point of this
     feature is honesty about what ``lock`` can and can't see. Keychain
     access (surfaces 1 and 3) is macOS-only; on any other platform those
-    two surfaces are silently skipped by ``_keychain_service_present``,
+    two surfaces are silently skipped by ``_keychain_probe``,
     so callers surface this explicitly rather than let a 0-finding result
     imply they were checked and came back clean.
     """

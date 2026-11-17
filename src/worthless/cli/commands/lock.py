@@ -2980,16 +2980,20 @@ def _print_unshardable_credentials_warning(console: WorthlessConsole) -> None:
         console.print_warning(
             f"[WARN] {n} OAuth/token credential{'s' if n != 1 else ''} found that lock "
             "CANNOT protect (the proxy is not load-bearing for these) — run "
-            "`worthless doctor --fix` to clear the ones you don't need."
+            "`worthless doctor --json` to review them before clearing any you don't need."
         )
     # WOR-797 (Gap 1, second surface): a Linux/WSL scan cannot inspect the two
     # macOS-keychain surfaces. Surface that caveat here — exactly as `doctor`
     # does — so a partial scan on the target platform never reads as a clean
-    # bill of health. Runs on both the has-keys and zero-keys paths.
+    # bill of health. Runs on both the has-keys and zero-keys paths. Only
+    # `doctor --json` runs this check; plain `doctor` can say "No issues found."
     caveats = detection_caveats() + probe_caveats
     if caveats:
         console.print_hint(
-            "[NOTE] " + "; ".join(caveats) + " — run `worthless doctor` for a full check."
+            "[NOTE] "
+            + "; ".join(caveats)
+            + " — run `worthless doctor --json` to list the logins it finds"
+            " and the places it couldn't check."
         )
 
 
@@ -3602,12 +3606,15 @@ def _offer_question(port: int, home: WorthlessHome) -> str:
     )
 
 
-def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> bool:
+def _offer_service_after_lock(console, *, home: WorthlessHome, port: int, ask: bool = True) -> bool:
     """Offer to keep the proxy alive after this terminal closes (WOR-853).
 
     ``lock`` is the first moment a Fernet key exists, so it is the earliest
     point the service CAN be installed — ``install.sh`` cannot, because
     ``preflight_service_install`` refuses without a key.
+
+    ``ask=False`` runs every gate below but prints the one-line hint where the
+    question would be: plain ``worthless`` outside a git repo (worthless-mivd).
 
     Returns True only if a service was actually installed.
     """
@@ -3654,7 +3661,7 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
     # the person whose account gets a startup item. Both get the hint; typing
     # `worthless service install` is the explicit way in. Not a security wall
     # (an agent can drop the markers): it stops a question nobody human sees.
-    if console.assume_yes or any(os.environ.get(v) for v in _AGENT_ENV_VARS):
+    if not ask or console.assume_yes or any(os.environ.get(v) for v in _AGENT_ENV_VARS):
         console.print_hint(_offer_declined_hint())
         return False
 
