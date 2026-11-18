@@ -4,6 +4,15 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.17] — 2026-11-18
+
+### Upgrading from 0.3.16
+- **Restart the proxy after you upgrade.** A proxy that is already running keeps running the old version, and keeps trusting the old CA list, until it stops. Run `worthless down` and start it again, or `worthless service restart` if you use the background service.
+- **Behind a corporate proxy, set `WORTHLESS_UPSTREAM_PROXY`.** The proxy no longer uses `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `SSL_CERT_FILE` or `SSL_CERT_DIR` for calls to the provider (Security, below). If your machine reaches providers only through a proxy, calls fail with `502 bad gateway` (or `504 gateway timeout` if the blocked connection hangs) until you set it where the Worthless proxy gets its environment. A background service doesn't read your shell: add it to the service's environment. `worthless status` and `worthless doctor` don't warn about this yet; the warning is in the proxy's own output and log.
+- **A `worthless up` you started by hand now takes the proxy down with it.** If that `worthless up` stops, for example because you closed the SSH session it ran in, the proxy now stops too; before, it kept running. Use `worthless service install`, or plain `worthless`, to keep a proxy running.
+- **To go back to 0.3.16:** `uv tool install --force worthless==0.3.16` (installed with `install.sh`), `pip install worthless==0.3.16`, or the `ghcr.io/oblangatas/worthless-proxy:0.3.16` image. Run `worthless down` first.
+- Until 1.0, a 0.3.x release can change behaviour, as this one does. This section lists the changes most likely to need action from you; the Limits under each entry below have the rest.
+
 ### Security
 - **Plain `worthless` starts its own proxy, never an older `worthless` from your PATH or code from your project** (worthless-l0s1, [#767](https://github.com/oblangatas/worthless/pull/767)).
   Before: plain `worthless` started its proxy by running whichever `worthless` came first on your PATH. With an older install earlier on PATH, such as an old `uv tool` copy or a dev checkout, that older version served your traffic. It answered the health check, so `worthless status` showed green for a proxy that could be holding an old key.
@@ -154,6 +163,10 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Releases newer than the v0.3.16 image's with no security fix, such as fastapi 0.162.4 and starlette 1.10.0, stay out of the lock until a later refresh.
   - For compiled packages with no signed build record (cffi, pydantic-core, watchfiles), only the source archive was compared with the upstream tag; their prebuilt binaries can't be checked against it.
 
+- **The proxy sends the provider only its own credential header** (WOR-979, [#726](https://github.com/oblangatas/worthless/pull/726)).
+  Before: if your app sent its locked key in both `Authorization` and `x-api-key`, or in the other provider's header, the proxy put the real key in the provider's own header and passed the other header on unchanged. The provider got two different credentials in one request. That never exposed the real key, and the locked value alone is worthless, but how a provider or gateway reads two credentials is up to it.
+  Now: an OpenAI key's request drops `x-api-key`, and an Anthropic key's request drops `Authorization`, before the real key is added. The provider gets one credential header, carrying the real key.
+
 ### Changed
 - **Plain `worthless` asks about the background service only inside a git repository** (worthless-mivd, [#773](https://github.com/oblangatas/worthless/pull/773)).
   Before: plain `worthless` asked "Install the background service?" after every lock, in any folder, including a scratch folder with no git.
@@ -163,8 +176,17 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Worthless looks for a `.git` in the folder and every folder above it, up to `/`. If your home folder is a git repository (for example, for dotfiles), every folder under it counts, and plain `worthless` asks everywhere.
   - A repository without a `.git` folder or file (a bare repository used through `--git-dir`, or jj, Mercurial or Subversion) does not count. Plain `worthless` prints the hint there instead of asking.
 
+- **Over SSH or in a container, `worthless service install` names the admin command that works, instead of one that was just refused** (worthless-8kn5, worthless-tkv1, [#734](https://github.com/oblangatas/worthless/pull/734)).
+  Before: on Linux, over SSH or in a container, the system refuses to let you turn on lingering (what lets the background service start at boot and keep running after you log out). `service install` then stopped with `WRTLS-119` and told you to run `loginctl enable-linger` yourself, the command that had just been refused. `worthless doctor` gave the same advice to everyone with lingering off, including WSL users with systemd off, where it can't work.
+  Now:
+  - Over SSH, `service install` installs anyway. The service runs while you're logged in, and Worthless names the one command an admin runs for it to start at boot: `sudo loginctl enable-linger <you>`, with your real account name.
+  - With no login session at all (`docker exec`, cron), it stops with that admin command, tells you to use `worthless up` meanwhile, and leaves no unit file behind.
+  - From `su` or `sudo -u`, it tells you to log in as that user directly (SSH, or `machinectl shell you@`).
+  - `service install --json` adds `"lingering": true` or `false` (`null` on macOS), so "installed" isn't read as "survives logout". The banner says lingering is on only when it is, and `lock` asks whether to try turning it on rather than promising it.
+  - `worthless doctor` gives the `/etc/wsl.conf` fix on WSL with systemd off, and otherwise the self-serve command plus the admin one, with your real account name instead of a literal `$USER`.
+
 ### Fixed
-- **A crashed `worthless up` or `worthless wrap` no longer leaves the proxy running** (`worthless-yfxm`).
+- **A crashed `worthless up` or `worthless wrap` no longer leaves the proxy running** (`worthless-yfxm`, [#768](https://github.com/oblangatas/worthless/pull/768), [#777](https://github.com/oblangatas/worthless/pull/777)).
   Before: if `worthless up` or `worthless wrap` was killed with `kill -9` or crashed, the proxy kept running. It kept its port and kept answering requests until you ran `worthless down`.
   Now: the proxy stops less than 2 seconds after `worthless up` or `worthless wrap` stops. In our tests the proxy of a killed `worthless up` stopped after about 0.2 seconds. A request still running finishes first, and until it does, `worthless down` can still find and stop the proxy: its `~/.worthless/proxy.pid` is removed only once it has stopped (WOR-1141).
 
@@ -172,6 +194,10 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - If `worthless up` is frozen (for example with `kill -STOP`) but not stopped, the proxy keeps running.
   - A request that is still running finishes first. A long streaming answer can make the proxy stop later.
   - If the proxy is killed at the same time as `worthless up` (for example `pkill -9 -f worthless`), the old `proxy.pid` stays. Delete `~/.worthless/proxy.pid` before you run `worthless down`.
+
+- **The installer no longer says `worthless lock` starts the proxy** ([#694](https://github.com/oblangatas/worthless/pull/694)).
+  Before: the message at the end of `install.sh` said `worthless lock` "splits your API keys, and starts a local proxy". It doesn't: nothing listens after `lock`. The proxy starts with `worthless up`, `worthless wrap` or plain `worthless`.
+  Now: the message says what `lock` does. New tests run the released CLI in a container and check the claims the website makes about it: `lock` starts no proxy, `up` does, `unlock` gives back your `.env` byte for byte, and a key Worthless can't protect is left alone with a message saying so.
 
 - **On Python 3.14, `worthless lock` and `worthless doctor --json` say when they couldn't look for a credentials file** ([#762](https://github.com/oblangatas/worthless/pull/762)).
   Before: on Python 3.14, if your user couldn't open the folder holding one of the OAuth credential files Worthless looks for, such as `~/.gemini`, that file was reported as not there, with no note. `worthless lock`'s `[NOTE]` line and the caveats in `worthless doctor --json` left it out, so a check that couldn't look read as a clean one. Python 3.10 to 3.13 were not affected: there, both add "Gemini CLI credentials file could not be checked (Permission denied)".
@@ -897,6 +923,7 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.17]: https://github.com/oblangatas/worthless/releases/tag/v0.3.17
 [0.3.16]: https://github.com/oblangatas/worthless/releases/tag/v0.3.16
 [0.3.15]: https://github.com/oblangatas/worthless/releases/tag/v0.3.15
 [0.3.14]: https://github.com/oblangatas/worthless/releases/tag/v0.3.14
