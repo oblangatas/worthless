@@ -27,7 +27,7 @@ set -eu
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
-GPG_FINGERPRINT="739B528ACF5AC12FE63E447592F719843935814D"
+GPG_FINGERPRINT="9332E0332E616BC37E87019FCEA39EE63CA10DDD"
 
 # --- 1. Validate args --------------------------------------------------------
 
