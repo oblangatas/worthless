@@ -6,6 +6,13 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [0.3.17] — 2026-11-18
 
+### Upgrading from 0.3.16
+- **Restart the proxy after you upgrade.** A proxy that is already running keeps running the old version, and keeps trusting the old CA list, until it stops. Run `worthless down` and start it again, or `worthless service restart` if you use the background service.
+- **Behind a corporate proxy, set `WORTHLESS_UPSTREAM_PROXY`.** The proxy no longer uses `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `SSL_CERT_FILE` or `SSL_CERT_DIR` for calls to the provider (Security, below). If your machine reaches providers only through a proxy, calls fail with `502 bad gateway` until you set it where the Worthless proxy gets its environment. A background service doesn't read your shell: add it to the service's environment. `worthless status` and `worthless doctor` don't warn about this yet; the warning is in the proxy's own output and log.
+- **A `worthless up` you started by hand now takes the proxy down with it.** If that `worthless up` stops, for example because you closed the SSH session it ran in, the proxy now stops too; before, it kept running. Use `worthless service install`, or plain `worthless`, to keep a proxy running.
+- **To go back to 0.3.16:** `uv tool install --force worthless==0.3.16` (installed with `install.sh`), `pip install worthless==0.3.16`, or the `ghcr.io/oblangatas/worthless-proxy:0.3.16` image. Run `worthless down` first.
+- Until 1.0, a 0.3.x release can change behaviour, as this one does. This section lists the changes most likely to need action from you; the Limits under each entry below have the rest.
+
 ### Security
 - **Plain `worthless` starts its own proxy, never an older `worthless` from your PATH or code from your project** (worthless-l0s1, [#767](https://github.com/oblangatas/worthless/pull/767)).
   Before: plain `worthless` started its proxy by running whichever `worthless` came first on your PATH. With an older install earlier on PATH, such as an old `uv tool` copy or a dev checkout, that older version served your traffic. It answered the health check, so `worthless status` showed green for a proxy that could be holding an old key.
