@@ -19,7 +19,7 @@
 # Prerequisites:
 #   - You are on main, up-to-date with origin/main
 #   - pyproject.toml already bumped to <version> and committed
-#   - GPG key 739B528ACF5AC12FE63E447592F719843935814D is available
+#   - the release key in GPG_FINGERPRINT below is available
 #     (gpg --list-secret-keys)
 
 set -eu
