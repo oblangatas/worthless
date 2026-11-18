@@ -1278,6 +1278,49 @@ def test_the_libstdcpp_waivers_stay_version_pinned() -> None:
         )
 
 
+TRIXIE_OPENSSL_VERSION = "3.5.7-1~deb13u3"
+TRIXIE_OPENSSL_PACKAGES = {"openssl", "libssl3t64", "openssl-provider-legacy"}
+# Upstream ships 3.5.10 on 2026-12-01; a re-measure two weeks later is the cap.
+TRIXIE_OPENSSL_LATEST_EXPIRY = dt.date(2026, 12, 15)
+
+
+@pytest.mark.parametrize(
+    "cve",
+    [
+        # Advisory of 2026-11-10 (WOR-1155).
+        "CVE-2026-107496",
+        "CVE-2026-88823",
+        "CVE-2026-95691",
+        "CVE-2026-95692",
+        # Advisory of 2026-11-17 (WOR-1157).
+        "CVE-2026-107493",
+        "CVE-2026-124709",
+        "CVE-2026-35190",
+    ],
+)
+def test_the_trixie_openssl_waivers_cover_each_package_at_the_shipped_version(cve: str) -> None:
+    """Grype reports each OpenSSL CVE once per binary package built from it.
+
+    Miss one of the three and that row turns `scan` red on every PR; drop the
+    `version` pin and the waiver keeps suppressing after Debian ships 3.5.10,
+    so the CVE never re-fires for the re-measure the expiry promises.
+    """
+    rules = yaml.safe_load((REPO / ".grype.yaml").read_text())["ignore"]
+    scoped = [r for r in rules if isinstance(r, dict) and r.get("vulnerability") == cve]
+
+    names = {(r.get("package") or {}).get("name") for r in scoped}
+    assert names == TRIXIE_OPENSSL_PACKAGES, f"{cve}: waived for {names!r}"
+    for rule in scoped:
+        pkg = rule["package"]
+        assert pkg.get("type") == "deb", f"{cve}/{pkg['name']}: lost its type scope"
+        assert pkg.get("version") == TRIXIE_OPENSSL_VERSION, (
+            f"{cve}/{pkg['name']}: pinned to {pkg.get('version')!r}, not the shipped "
+            f"{TRIXIE_OPENSSL_VERSION}. Re-measure on the new build, do not re-pin blind."
+        )
+        expiry = dt.date.fromisoformat(str(rule["expiry"]))
+        assert expiry <= TRIXIE_OPENSSL_LATEST_EXPIRY, f"{cve}/{pkg['name']}: expires {expiry}"
+
+
 def test_a_type_scope_without_a_version_is_rejected(tmp_path: Path) -> None:
     """Bare `type:` is not a scope — it is every package of that ecosystem.
 
