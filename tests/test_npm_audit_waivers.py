@@ -228,6 +228,30 @@ def test_a_non_breaking_fix_path_ends_the_waiver(fix) -> None:
     assert any("fix" in p.lower() for p in problems)
 
 
+@pytest.mark.parametrize(
+    "fix",
+    [None, {}, "yes", {"name": "vitest", "version": "3.1.4"}, {"isSemVerMajor": "true"}],
+)
+def test_an_unreadable_fix_offer_fails_closed(fix) -> None:
+    """A missing or odd `fixAvailable` must not read as "no fix exists"."""
+
+    def odd(r):
+        if fix is None:
+            del r["vulnerabilities"]["picomatch"]["fixAvailable"]
+        else:
+            r["vulnerabilities"]["picomatch"]["fixAvailable"] = fix
+
+    problems = _check(_report_with(odd)).problems
+    assert any("fixAvailable" in p for p in problems)
+
+
+def test_no_fix_at_all_keeps_the_waiver() -> None:
+    def none(r):
+        r["vulnerabilities"]["picomatch"]["fixAvailable"] = False
+
+    assert _check(_report_with(none)).problems == []
+
+
 def test_a_breaking_downgrade_is_not_a_fix() -> None:
     """npm's only offer today is vitest 4 -> 3.1.4, a major downgrade."""
     assert _check().problems == []
@@ -248,6 +272,12 @@ def test_any_new_release_ends_the_waiver() -> None:
 def test_unreadable_release_history_fails() -> None:
     assert _check(releases={}).problems
     assert _check(releases={"picomatch": {"4.0.8": "not a date"}}).problems
+
+
+def test_a_history_with_no_versions_fails() -> None:
+    meta_only = {k: RELEASES["picomatch"][k] for k in ("created", "modified")}
+    problems = _check(releases={"picomatch": meta_only}).problems
+    assert any("no releases" in p for p in problems)
 
 
 @pytest.mark.parametrize("rng", ["<4.0.8", "<= 4.0.7", "*", ">=0.0.0"])
@@ -425,10 +455,9 @@ def test_a_warning_is_printed_inside_the_last_14_days() -> None:
 
 
 def test_the_committed_waivers_are_valid_today_shape() -> None:
-    """Every committed waiver has every field; dates are checked in CI."""
-    waivers = hook.load_waivers(WAIVERS)
-    assert waivers, "the file exists to hold the picomatch waiver"
-    for w in waivers:
+    """Every committed waiver has every field; dates are checked in CI. The
+    list may be empty: the PR that takes the picomatch fix removes the waiver."""
+    for w in hook.load_waivers(WAIVERS):
         assert hook.waiver_shape_problems(w) == []
 
 

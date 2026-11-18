@@ -267,7 +267,10 @@ def evaluate(
                     f"has no live waiver for scope '{scope}'",
                 )
                 continue
-            fix = (vulns.get(adv["name"]) or {}).get("fixAvailable")
+            fix = (vulns.get(adv["name"]) or {}).get("fixAvailable", "missing")
+            if not (isinstance(fix, bool) or _fix_offer(fix)):
+                flag(pkg, f"{adv['id']}: unreadable fixAvailable ({fix!r}); cannot rule out a fix")
+                continue
             if fix is True or (isinstance(fix, dict) and fix.get("isSemVerMajor") is False):
                 flag(
                     pkg,
@@ -303,6 +306,16 @@ def evaluate(
         else:
             result.waived.append(w)
     return result
+
+
+def _fix_offer(fix: object) -> bool:
+    """npm's fix object: {name, version, isSemVerMajor: bool}."""
+    return (
+        isinstance(fix, dict)
+        and isinstance(fix.get("name"), str)
+        and isinstance(fix.get("version"), str)
+        and isinstance(fix.get("isSemVerMajor"), bool)
+    )
 
 
 def _release_problems(w: dict, times: object) -> list[str]:
