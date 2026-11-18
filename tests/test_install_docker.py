@@ -1008,6 +1008,9 @@ def test_interrupting_a_real_install_does_not_report_a_network_failure(
                 "docker",
                 "run",
                 "--rm",
+                # On a release PR the baked pin isn't on PyPI yet: an install
+                # that outruns the 2s interrupt would exit 10 for that reason.
+                *_published_version_run_args(),
                 "-v",
                 f"{REPO_ROOT}:/w:ro",
                 tag,
