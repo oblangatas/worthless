@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -282,17 +283,54 @@ class TestServiceInstall:
         assert "running" in result.output.lower()
 
 
+class TestInstallFailureSaysWhy:
+    """worthless-3j8x: a failing launchctl/systemctl is not an "internal error".
+
+    run_cmd uses check=True, so the platform tool's failure arrived at
+    @error_boundary as a raw CalledProcessError and printed WRTLS-199. The
+    user needs the command that failed, what it said, and one thing to try.
+    """
+
+    def test_failed_platform_command_is_reported_with_its_reason(self, home_dir: Path) -> None:
+        mock_backend = MagicMock()
+        mock_backend.install.side_effect = subprocess.CalledProcessError(
+            1,
+            ["systemctl", "--user", "enable", "--now", "worthless-proxy.service"],
+            stderr="noise\nFailed to enable unit: Unit file worthless-proxy.service is masked.\n",
+        )
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch("worthless.cli.commands.service.preflight_service_install"),
+            patch(
+                "worthless.cli.commands.service.resolve_worthless_binary",
+                return_value=Path("/usr/local/bin/worthless"),
+            ),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+        ):
+            mock_home.return_value = WorthlessHome(base_dir=home_dir)
+            result = runner.invoke(
+                app, ["service", "install", "--yes"], env={"WORTHLESS_HOME": str(home_dir)}
+            )
+
+        assert result.exit_code != 0
+        out = " ".join(result.output.split())
+        assert "internal error" not in out.lower(), out
+        assert f"WRTLS-{ErrorCode.SERVICE_INSTALL_FAILED.value}" in out, out
+        assert "systemctl --user enable --now worthless-proxy.service" in out, out
+        assert "is masked" in out, out
+        assert "worthless up" in out, "no fix line for the user"
+
+
 class TestLingerIsDisclosed:
-    """We switch on account-level state and never switch it off. Say so.
+    """We switch on account-level state. Say so, and say when it is undone.
 
     `_ensure_linger` runs `loginctl enable-linger` during a systemd install, so
-    the service survives logout. `worthless service uninstall` does not reverse
-    it, and deliberately so: linger is account-wide, other user services may
-    depend on it, and turning off state we may not have created is exactly the
-    mistake the install rollback's `created_here` guard exists to avoid.
+    the service survives logout. `worthless service uninstall` reverses it only
+    when this install turned it on (worthless-fzas): linger is account-wide, and
+    other user services may depend on it if it was on before.
 
     Review (karen, 2026-10-08) called the silence the unfixed half of the
-    consent defect. Disclosure is the fix; a precise undo is worthless-fzas.
+    consent defect.
     """
 
     def test_start_does_not_claim_it_enabled_linger(self, home_dir: Path) -> None:
@@ -339,7 +377,7 @@ class TestLingerIsDisclosed:
         warned = " ".join(str(c) for c in console.print_warning.call_args_list)
         assert "15 seconds" in warned, "the WSL warning itself must still appear"
 
-    def test_systemd_install_says_uninstall_leaves_linger_on(self) -> None:
+    def test_systemd_install_says_when_uninstall_turns_linger_off(self) -> None:
         """The install path IS where _ensure_linger runs, so it must disclose."""
         with patch("worthless.cli.commands.service.is_wsl", return_value=False):
             from worthless.cli.commands.service import _print_service_banner
@@ -350,8 +388,7 @@ class TestLingerIsDisclosed:
 
         said = " ".join(str(c) for c in console.print_hint.call_args_list)
         assert "Lingering is now on" in said
-        assert "leaves it on" in said
-        assert "disable-linger" in said
+        assert "turns it off again, unless it was already on" in said
 
     def test_launchd_does_not_mention_linger(self, home_dir: Path) -> None:
         """launchd has no such concept; the hint must not leak to macOS."""

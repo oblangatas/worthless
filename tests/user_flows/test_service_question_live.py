@@ -179,7 +179,7 @@ def test_plain_worthless_asks_explicitly_and_declining_installs_nothing(
         assert "macOS login item" in text
     else:
         assert "lingering" in text, "Linux must be told about lingering before answering"
-        assert "loginctl disable-linger" in text
+        assert "turns lingering off, if this turned it on" in text
     assert not installed, "declining (or just pressing Enter) must install nothing"
 
 

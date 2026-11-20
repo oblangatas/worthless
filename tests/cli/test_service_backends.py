@@ -1147,3 +1147,110 @@ class TestRollbackSurvivesAnInterrupt:
             systemd.install(home)
 
         assert not unit.exists(), "an interrupted rollback left the unit behind"
+
+
+class TestLingerIsUndoneOnlyIfWeTurnedItOn:
+    """worthless-fzas: install turns lingering on; uninstall must turn it back off.
+
+    Linger is account-wide, so uninstall may only switch off what OUR install
+    switched on. Install leaves a marker in WORTHLESS_HOME when (and only when)
+    it ran `enable-linger` itself. A failed install rolls it back under the same
+    `created_here` guard as the unit file.
+    """
+
+    DISABLE = ["loginctl", "--no-ask-password", "disable-linger", "testuser"]
+
+    @staticmethod
+    def _binary(tmp_path: Path) -> Path:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        return binary
+
+    @staticmethod
+    def _fake_run(calls: list[list[str]], *, linger: str, fail_enable_now: bool = False):
+        def fake_run(args: list[str], **kwargs):
+            calls.append(args)
+            if fail_enable_now and args[:3] == ["systemctl", "--user", "enable"]:
+                raise subprocess.CalledProcessError(1, args, stderr="Unit is masked.")
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = f"Linger={linger}" if args[:2] == ["loginctl", "show-user"] else ""
+            return result
+
+        return fake_run
+
+    def _install(self, home: WorthlessHome, tmp_path: Path, unit: Path, fake_run) -> None:
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "_preflight_systemd_available"),
+            patch.object(systemd, "run_cmd", side_effect=fake_run),
+            patch.object(systemd, "report_proxy_health"),
+            patch.object(systemd, "_session_user", return_value="testuser"),
+        ):
+            systemd.install(home)
+
+    def _uninstall(self, home: WorthlessHome, unit: Path, fake_run) -> None:
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "run_cmd", side_effect=fake_run),
+            patch.object(systemd, "_session_user", return_value="testuser"),
+        ):
+            systemd.uninstall(home)
+
+    def test_uninstall_turns_off_linger_this_install_turned_on(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        unit = tmp_path / "worthless-proxy.service"
+        calls: list[list[str]] = []
+        self._install(home, tmp_path, unit, self._fake_run(calls, linger="no"))
+        assert self.DISABLE not in calls
+
+        calls.clear()
+        self._uninstall(home, unit, self._fake_run(calls, linger="yes"))
+
+        assert self.DISABLE in calls, "uninstall left on the linger our install turned on"
+        assert list(home.base_dir.glob("*linger*")) == [], "the marker outlived the undo"
+
+    def test_uninstall_leaves_linger_that_was_already_on(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        unit = tmp_path / "worthless-proxy.service"
+        calls: list[list[str]] = []
+        self._install(home, tmp_path, unit, self._fake_run(calls, linger="yes"))
+        self._uninstall(home, unit, self._fake_run(calls, linger="yes"))
+
+        assert not any("disable-linger" in a for a in calls), (
+            "uninstall switched off account-wide linger it did not switch on"
+        )
+
+    def test_failed_install_turns_off_linger_it_turned_on(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        unit = tmp_path / "worthless-proxy.service"
+        calls: list[list[str]] = []
+        with pytest.raises(subprocess.CalledProcessError):
+            self._install(
+                home, tmp_path, unit, self._fake_run(calls, linger="no", fail_enable_now=True)
+            )
+
+        assert ["loginctl", "--no-ask-password", "enable-linger", "testuser"] in calls
+        assert self.DISABLE in calls, "a failed install left account-wide linger on"
+        assert list(home.base_dir.glob("*linger*")) == []
+
+    def test_failed_reinstall_keeps_linger_for_the_unit_that_still_works(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        unit = tmp_path / "worthless-proxy.service"
+        calls: list[list[str]] = []
+        self._install(home, tmp_path, unit, self._fake_run(calls, linger="no"))
+
+        calls.clear()
+        with pytest.raises(subprocess.CalledProcessError):
+            self._install(
+                home, tmp_path, unit, self._fake_run(calls, linger="yes", fail_enable_now=True)
+            )
+
+        assert unit.exists()
+        assert self.DISABLE not in calls, "rollback switched off linger the old unit relies on"

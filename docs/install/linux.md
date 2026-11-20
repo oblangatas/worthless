@@ -128,6 +128,8 @@ worthless service status
 `install` tries `loginctl enable-linger` so the user unit survives
 logout and starts at boot. Requires a readable Fernet key at
 `~/.worthless/fernet.key` (default on Linux without DBus).
+`worthless service uninstall` turns lingering off again, but only if
+`install` turned it on. If it was already on, it stays on.
 
 Over SSH, or anywhere without a local login, the system may refuse
 lingering. The service then still installs and runs while you're
