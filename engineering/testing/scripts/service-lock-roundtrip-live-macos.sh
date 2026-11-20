@@ -16,6 +16,7 @@ source "${SCRIPT_DIR}/_live-pack-lib.sh"
 # worthless-d4h2: name the binary before proving anything with it. Set
 # WORTHLESS_BIN to aim this pack at an installed wheel instead of whatever
 # PATH happens to resolve (a worktree venv, typically).
+# WOR-854: also set WORTHLESS_EXPECT_VERSION=x.y.z to stop on any other release.
 lp_use_binary
 # shellcheck source=/dev/null
 bash "${SCRIPT_DIR}/dev-teardown-macos.sh"

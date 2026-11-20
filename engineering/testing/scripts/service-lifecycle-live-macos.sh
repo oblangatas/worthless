@@ -10,6 +10,7 @@ source "${SCRIPT_DIR}/_live-pack-lib.sh"
 # silently tested a worktree venv rather than the artifact users install. Set
 # WORTHLESS_BIN to aim it at an installed wheel; either way it now prints which
 # binary it is about to prove things about.
+# WOR-854: also set WORTHLESS_EXPECT_VERSION=x.y.z to stop on any other release.
 lp_use_binary
 
 PORT="${WORTHLESS_PORT:-8787}"
