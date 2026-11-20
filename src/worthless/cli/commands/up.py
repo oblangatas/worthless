@@ -30,8 +30,10 @@ from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary, sanitize_exception
 from worthless.cli.key_check import (
     KEY_FIX,
+    MALFORMED_KEY,
     aliases_key_cannot_open,
-    enrolled_aliases,
+    key_is_well_formed,
+    record_key_file_refused,
     record_unopenable,
 )
 from worthless.cli.keystore import read_fernet_key_from_file
@@ -135,6 +137,9 @@ def _wait_for_a_key_that_opens(home: WorthlessHome) -> None:
             if exc.code == ErrorCode.KEY_NOT_FOUND and had_file:
                 raise typer.Exit(code=_RESTART_FOR_NEW_KEY) from None
             continue
+        if not key_is_well_formed(key):  # still corrupted: a restart would refuse it again
+            zero_buf(key)
+            continue
         try:
             total, dead = aliases_key_cannot_open(home, key)
         finally:
@@ -152,14 +157,23 @@ def _read_key_or_wait(home: WorthlessHome, console) -> bytearray | None:
     a copy of the key for the caller to zero.
     """
     try:
-        return home.fernet_key
+        key = home.fernet_key
+        if not key_is_well_formed(key):  # garbage bytes crashed build_proxy_env's decode
+            zero_buf(key)
+            raise WorthlessError(ErrorCode.KEY_REFUSED, MALFORMED_KEY)
     except WorthlessError as exc:
         if exc.code != ErrorCode.KEY_REFUSED:
             raise
-        record_unopenable(home, enrolled_aliases(home))
+        # The file itself was refused — no key was checked, so no alias is
+        # "can't unlock". status names this refusal and its own fix.
+        record_unopenable(home, [])
+        record_key_file_refused(home, exc.message)
         if not is_service_managed():
             raise
         console.print_error(exc)
+    else:
+        record_key_file_refused(home, None)
+        return key
     _wait_for_a_key_that_opens(home)
     return None
 
@@ -509,17 +523,31 @@ def start_supervised_proxy(
     if resolved_pid is None:
         # worthless-jywo: say why, and fail — it used to wait out the timeout and
         # exit 0 with the cause only in proxy.log.
-        cause = (
-            _last_error_line(log_file, log_start)
-            if proc.poll() is not None
-            else "it didn't answer a health check within 30 s."
-        )
+        if proc.poll() is not None:
+            cause = _last_error_line(log_file, log_start)
+        else:
+            # Never report "didn't start" while a slow one comes up behind us.
+            _stop_child(proc)
+            cause = (
+                "it didn't answer within 30 s, so it was stopped (a cold start, "
+                "e.g. on WSL, can be slow). Run `worthless up` to watch it start."
+            )
         raise WorthlessError(
             ErrorCode.PROXY_UNREACHABLE, f"The proxy didn't start: {cause} (log: {log_file})"
         )
 
     console.print_success(f"Proxy running on 127.0.0.1:{port} (PID {resolved_pid})")
     return resolved_pid
+
+
+def _stop_child(proc: subprocess.Popen) -> None:
+    """SIGTERM the ``up`` we started (it tears down its sidecar + proxy), then kill."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=10)
 
 
 def _last_error_line(log_file: Path, start: int) -> str:

@@ -200,7 +200,6 @@ class TestServiceManagedLockIdempotency:
             "worthless.cli.default_command.start_supervised_proxy",
             fake_supervised,
         )
-        monkeypatch.setattr("worthless.cli.default_command.poll_health", lambda *a, **kw: True)
 
         first = runner.invoke(app, ["--yes"], env=env)
         assert first.exit_code == 0, first.stdout + first.stderr

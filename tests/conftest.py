@@ -525,8 +525,6 @@ def _isolate_default_command_proxy(request, monkeypatch):
     - ``start_supervised_proxy`` returns ``_FAKE_DAEMON_PID`` (12345). PID 0 would
       hijack ``os.kill`` liveness probes (POSIX-reserved); a non-zero
       synthetic PID lets such probes fail honestly.
-    - ``poll_health`` returns ``True`` so callers that only check
-      "responsive?" don't loop.
     - ``detect_proxy_runtime`` returns a neutral "not running, no service"
       state so ``_service_start_hint`` never hits live sockets or launchd/systemd
       (Q5 / WOR-717 review — closes the ~1s ``poll_health`` leak).
@@ -545,11 +543,6 @@ def _isolate_default_command_proxy(request, monkeypatch):
         default_command,
         "start_supervised_proxy",
         lambda *_a, **_kw: _FAKE_DAEMON_PID,
-    )
-    monkeypatch.setattr(
-        default_command,
-        "poll_health",
-        lambda port, timeout=10.0: True,
     )
     monkeypatch.setattr(
         default_command,

@@ -329,6 +329,29 @@ def test_plain_worthless_says_why_the_proxy_did_not_start_and_exits_non_zero(
     assert data["verdict"] == "key_refused"
 
 
+def test_a_garbage_key_file_is_refused_with_the_cause_and_status_turns_red(
+    world: _World, tmp_path: Path
+) -> None:
+    """A corrupted fernet.key (not a valid key at all) must fail the same honest way."""
+    proj = world.project("proj1")
+    assert world.lock(proj).returncode == 0
+    key_file = world.wl / "fernet.key"
+    key_file.write_bytes(b"\x00\xffnot-a-fernet-key\n")
+    key_file.chmod(0o600)
+
+    plain = world.run("--yes")
+    said = _said(plain.stdout + plain.stderr)
+    assert plain.returncode != 0, said
+    # Before: WRTLS-199 "an internal error occurred" (a UTF-8 decode crash).
+    assert "fernet.key isn't a valid key" in said, said
+    assert "WRTLS-199" not in said, said
+
+    code, status_said, data = _status(world)
+    assert code != 0 and "🔴" in status_said, status_said
+    assert "isn't a valid key" in status_said, status_said
+    assert data["verdict"] == "key_refused"
+
+
 def test_a_symlinked_key_parks_the_service_once_instead_of_restart_looping(
     world: _World, tmp_path: Path
 ) -> None:

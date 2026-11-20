@@ -23,21 +23,35 @@ logger = logging.getLogger(__name__)
 KEY_FIX = "Run `worthless doctor --explain fernet_drift` to find the right key."
 
 
-def _unopenable_path(home: WorthlessHome) -> Path:
+_B64URL = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+MALFORMED_KEY = (
+    "fernet.key isn't a valid key (44 characters of URL-safe base64) — it may be "
+    f"corrupted. Restore it from a backup. {KEY_FIX}"
+)
+
+
+def key_is_well_formed(key: bytes | bytearray) -> bool:
+    """A Fernet key's shape, checked in place (no copy of the key is made)."""
+    return len(key) == 44 and key[43] == ord("=") and all(key[i] in _B64URL for i in range(43))
+
+
+def unopenable_path(home: WorthlessHome) -> Path:
     return home.base_dir / "run" / "unopenable-keys"
 
 
-def record_unopenable(home: WorthlessHome, aliases: list[str]) -> None:
-    """Leave the aliases the proxy's key can't open where ``status`` can read them.
+def _key_file_refused_path(home: WorthlessHome) -> Path:
+    return home.base_dir / "run" / "key-file-refused"
 
-    Names only, never key material (worthless-n2bj): ``status`` must not load the
-    key itself (keychain prompts), and ``/healthz`` is unauthenticated. Rewritten
-    on every proxy start; an empty list removes it. A disk error is logged, never
-    raised: a hint for ``status`` must not stop the proxy starting.
+
+def _write_hint(path: Path, text: str | None) -> None:
+    """Write (or with None, remove) a hint ``status`` reads. Never key material.
+
+    ``status`` must not load the key itself (keychain prompts), and ``/healthz``
+    is unauthenticated (worthless-n2bj). A disk error is logged, never raised:
+    a hint for ``status`` must not stop the proxy starting.
     """
-    path = _unopenable_path(home)
     try:
-        if not aliases:
+        if text is None:
             path.unlink(missing_ok=True)
             return
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -45,26 +59,39 @@ def record_unopenable(home: WorthlessHome, aliases: list[str]) -> None:
         tmp.unlink(missing_ok=True)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(sorted(aliases)) + "\n")
+            fh.write(text)
         tmp.replace(path)
     except OSError as exc:
-        logger.warning("Could not record the keys this key can't unlock at %s: %s", path, exc)
+        logger.warning("Could not write %s for `worthless status`: %s", path, exc)
+
+
+def _read_hint(path: Path) -> str | None:
+    """None when absent. Any other read error raises: status must say it couldn't tell."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def record_unopenable(home: WorthlessHome, aliases: list[str]) -> None:
+    """The aliases the proxy's key can't open, by name; an empty list removes it."""
+    _write_hint(unopenable_path(home), "\n".join(sorted(aliases)) + "\n" if aliases else None)
 
 
 def read_unopenable(home: WorthlessHome) -> set[str]:
-    """The aliases the last proxy start couldn't open (empty if none or unreadable)."""
-    try:
-        text = _unopenable_path(home).read_text(encoding="utf-8")
-    except OSError:
-        return set()
-    return {line for line in text.splitlines() if line}
+    """The aliases the last proxy start couldn't open. Raises OSError if unreadable."""
+    return set((_read_hint(unopenable_path(home)) or "").split())
 
 
-def enrolled_aliases(home: WorthlessHome) -> list[str]:
-    """Every enrolled alias, without a key (for a key that couldn't even be read)."""
-    if not home.db_path.is_file():
-        return []
-    return asyncio.run(ShardReader(home.db_path).list_enrolled_aliases())
+def record_key_file_refused(home: WorthlessHome, message: str | None) -> None:
+    """Why the proxy refused to read ``fernet.key`` itself (symlink, mode, owner)."""
+    _write_hint(_key_file_refused_path(home), message)
+
+
+def read_key_file_refused(home: WorthlessHome) -> str | None:
+    """The last proxy start's key-file refusal, if any. Raises OSError if unreadable."""
+    text = _read_hint(_key_file_refused_path(home))
+    return text.strip() if text else None
 
 
 def aliases_key_cannot_open(home: WorthlessHome, key: bytes | bytearray) -> tuple[int, list[str]]:

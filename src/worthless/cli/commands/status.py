@@ -25,7 +25,12 @@ from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.cli.commands.service.proxy_state import restart_note, survives_restart
 from worthless.cli.console import get_console
 from worthless.cli.errors import error_boundary
-from worthless.cli.key_check import KEY_FIX, read_unopenable
+from worthless.cli.key_check import (
+    KEY_FIX,
+    read_key_file_refused,
+    read_unopenable,
+    unopenable_path,
+)
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
 from worthless.cli.orphans import FIX_PHRASE, UNLOCKED_FIX_PHRASE, find_unlocked, is_orphan
 from worthless.cli.process import check_proxy_health, read_pid
@@ -126,7 +131,11 @@ def _list_enrolled_keys(home: WorthlessHome) -> list[dict[str, str]]:
     for e in enrollments:
         by_alias.setdefault(e.key_alias, []).append(e)
     # worthless-n2bj: what the last proxy start's key couldn't open (names only).
-    unopenable = read_unopenable(home)
+    # An unreadable file is reported by `status` itself (_proxy_key_hints).
+    try:
+        unopenable = read_unopenable(home)
+    except OSError:
+        unopenable = set()
 
     for alias, provider in all_aliases.items():
         rows = by_alias.get(alias, [])
@@ -172,6 +181,7 @@ def _status_verdict(
     proxy_identified: bool,
     *,
     survives_restart: bool = False,
+    key_file_refused: str | None = None,
 ) -> tuple[str, str | None]:
     """WOR-779: derive the worst-component verdict. Returns ``(enum, header)``.
 
@@ -237,8 +247,13 @@ def _status_verdict(
             f"(a lock was cut off) — run `{UNLOCKED_FIX_PHRASE}` there."
         )
 
-    # worthless-n2bj: not an outage `worthless up` fixes — every request for
-    # these fails until the key is fixed, so red, and named.
+    # worthless-n2bj: not an outage `worthless up` fixes — every request
+    # fails until the key is fixed, so red, and named. A refused key FILE
+    # (symlink, mode, owner) carries its own fix, not fernet_drift's.
+    if key_file_refused:
+        return "key_refused", (
+            f"🔴 Not working — the proxy won't read fernet.key: {key_file_refused}"
+        )
     unreadable = sorted(k["alias"] for k in keys if k["status"] == "UNREADABLE")
     if unreadable:
         return "key_refused", (
@@ -271,6 +286,25 @@ def _status_verdict(
         f"🟡 Protected at rest — {n} {noun} locked (a stolen .env is worthless), "
         f"but the proxy is down so your apps can't reach them. Run `worthless up`."
     )
+
+
+def _proxy_key_hints(home: WorthlessHome | None) -> tuple[str | None, str | None]:
+    """(why the proxy refused fernet.key, why status couldn't read the proxy's notes).
+
+    The second must never pass silently: an unreadable notes file would
+    otherwise read as "every key unlocks" and leave the verdict green.
+    """
+    if home is None:
+        return None, None
+    try:
+        read_unopenable(home)
+        return read_key_file_refused(home), None
+    except OSError as exc:
+        return None, (
+            f"Couldn't read the proxy's notes in {unopenable_path(home).parent} "
+            f"({exc.strerror or exc}), so status can't tell whether the proxy's key "
+            f"unlocks your keys. Run `worthless doctor`."
+        )
 
 
 def _survives_restart_for(home: WorthlessHome | None, proxy_info: dict[str, Any]) -> bool:
@@ -339,8 +373,14 @@ def register_status_commands(app: typer.Typer) -> None:
         # marker lock's bind-confirmation gates on.
         identified = "bind_probe_count" in proxy_info
         survives = _survives_restart_for(home, proxy_info)
+        key_file_refused, key_check_error = _proxy_key_hints(home)
         verdict, header = _status_verdict(
-            keys, bool(proxy_info["healthy"]), degraded, identified, survives_restart=survives
+            keys,
+            bool(proxy_info["healthy"]),
+            degraded,
+            identified,
+            survives_restart=survives,
+            key_file_refused=key_file_refused,
         )
 
         # Output. Sub-command --json mirrors scan/wrap; honors top-level --json too.
@@ -352,6 +392,7 @@ def register_status_commands(app: typer.Typer) -> None:
                 "sentinel": sentinel,
                 "degraded": degraded,
                 "survives_restart": survives,
+                "key_check_error": key_check_error,
             }
             sys.stdout.write(json.dumps(result, default=str) + "\n")
             sys.stdout.flush()
@@ -359,6 +400,8 @@ def register_status_commands(app: typer.Typer) -> None:
             # WOR-779: lead with the glanceable verdict, then the detail.
             if header:
                 sys.stderr.write(header + "\n\n")
+            if key_check_error:
+                sys.stderr.write(f"[WARN] {key_check_error}\n\n")
 
             if not keys:
                 # Keep the "No keys enrolled" signal AND nudge to lock

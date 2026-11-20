@@ -530,9 +530,14 @@ class TestStartSupervisedProxy:
             patch("worthless.cli.commands.up.subprocess.Popen", return_value=child),
             patch("worthless.cli.commands.up.poll_health_pid", return_value=None),
             patch("worthless.cli.commands.up.time.monotonic", side_effect=lambda: next(clock)),
-            pytest.raises(WorthlessError, match="didn't answer a health check"),
+            pytest.raises(WorthlessError, match="didn't answer within 30 s") as exc,
         ):
             start_supervised_proxy(home_with_key, 8787, tmp_path / "proxy.log", MagicMock())
+
+        # Never "didn't start" while a slow cold start comes up behind the message.
+        child.terminate.assert_called_once()
+        child.wait.assert_called()
+        assert "proxy.log" in str(exc.value) and "worthless up" in str(exc.value)
 
     def test_spawn_failure_exits(self, home_with_key: WorthlessHome, tmp_path: Path) -> None:
         import typer

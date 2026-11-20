@@ -23,7 +23,7 @@ from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.commands.lock import _lock_keys, _offer_service_after_lock
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.commands.up import start_supervised_proxy
-from worthless.cli.process import ignored_upstream_env_notes, poll_health, resolve_port
+from worthless.cli.process import ignored_upstream_env_notes, resolve_port
 from worthless.cli.console import get_console
 from worthless.cli.dotenv_rewriter import build_enrolled_locations, scan_env_keys
 from worthless.cli.errors import ErrorCode, WorthlessError
@@ -281,13 +281,8 @@ def _ensure_proxy_running(home: WorthlessHome, console) -> tuple[bool, int | Non
             "Proxy failed to start. Try 'worthless up' for details.",
         ) from exc
 
-    # worthless-jywo: a proxy that isn't serving is a failure, never exit 0.
-    if not poll_health(actual_port, timeout=10.0):
-        raise WorthlessError(
-            ErrorCode.PROXY_UNREACHABLE,
-            f"The proxy stopped answering right after it started. See {log_file}",
-        )
-
+    # worthless-jywo: start_supervised_proxy returns only once /healthz answered,
+    # and raises (non-zero exit, with the cause) otherwise.
     return True, None, actual_port
 
 
