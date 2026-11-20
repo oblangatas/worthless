@@ -916,7 +916,9 @@ ignore:
   # a mechanical CVSS score (7.5, availability only; EPSS 0.09%).
   #
   # SOURCE. Upstream fix: https://github.com/openssl/openssl/pull/33634. Its
-  # author rates the flaw Low: the client must enable both PKIX-TA/EE and
+  # author calls it Low in a review reply ("hence the Low severity"); the PR's
+  # `severity: important` label is OpenSSL's tag for any security fix, not a
+  # rating. Trigger: the client must enable both PKIX-TA/EE and
   # DANE-TA(2) SPKI(1) Full(0) TLSA usages, and the server's self-signed EE
   # cert must already sit in the client's trust store. Read 2026-11-20
   # (`gh pr view 33634 --repo openssl/openssl`): state OPEN, not merged,
@@ -945,6 +947,9 @@ ignore:
   #          3dc5d05d (b49a2007's parent; no change to Dockerfile, uv.lock,
   #          pyproject.toml, deploy/ or src/ between them), 759 ELFs. Its rootfs
   #          was exported, never run, and swept with x86_64-linux-gnu-nm.
+  #   Re-measured independently the same day on local buildx images of
+  #   3dc5d05d, with pyelftools over ELFs that have a .dynsym (758 amd64, 757
+  #   arm64; counts differ from the nm sweep by method, the result does not).
   # Same result on both arches, from undefined dynamic symbols of every ELF:
   #
   #   SSL_dane_enable, SSL_CTX_dane_enable, SSL_dane_tlsa_add -> /usr/bin/openssl only
