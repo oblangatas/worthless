@@ -1278,6 +1278,64 @@ def test_the_libstdcpp_waivers_stay_version_pinned() -> None:
         )
 
 
+TRIXIE_OPENSSL_PACKAGES = {"openssl", "libssl3t64", "openssl-provider-legacy"}
+
+
+def test_each_trixie_openssl_waiver_covers_all_three_packages_at_one_pinned_version() -> None:
+    """Grype reports each OpenSSL CVE once per binary package built from it.
+
+    Miss one of the three and that row turns `scan` red on every PR; drop the
+    `version` pin and the waiver keeps suppressing after Debian ships the fix,
+    so the CVE never re-fires for the re-measure its expiry promises. One
+    shared version, because the three packages come from one source build.
+
+    Asserts over whatever OpenSSL waivers exist, so deleting them all when
+    Debian ships 3.5.10, or re-pinning them after a re-measure, stays green.
+    """
+    rules = yaml.safe_load((REPO / ".grype.yaml").read_text())["ignore"]
+    by_cve: dict[str, list[dict]] = {}
+    for rule in rules:
+        pkg = rule.get("package") or {}
+        if pkg.get("name") in TRIXIE_OPENSSL_PACKAGES:
+            by_cve.setdefault(rule["vulnerability"], []).append(pkg)
+
+    for cve, pkgs in by_cve.items():
+        names = {p["name"] for p in pkgs}
+        assert names == TRIXIE_OPENSSL_PACKAGES, f"{cve}: waived for {sorted(names)} only"
+        for pkg in pkgs:
+            assert pkg.get("type") == "deb", f"{cve}/{pkg['name']}: lost its type scope"
+            assert pkg.get("version"), f"{cve}/{pkg['name']}: lost its version pin"
+    versions = {p["version"] for pkgs in by_cve.values() for p in pkgs}
+    assert len(versions) <= 1, f"OpenSSL waivers pin different builds: {sorted(versions)}"
+
+
+@pytest.mark.parametrize(
+    "cve",
+    [
+        "CVE-2026-116566",  # getaddrinfo NUL truncation (WOR-1108)
+        # grype DB of 2026-11-18 (WOR-1157)
+        "CVE-2026-124249",  # http.cookiejar expired-cookie deletion
+        "CVE-2026-115559",  # imaplib STARTTLS read-ahead buffer
+        "CVE-2026-115791",  # tarfile/zipfile/gzip CLI sys.path[0]
+    ],
+)
+def test_the_python_waivers_on_a_3_16_range_stay_version_pinned(cve: str) -> None:
+    """Grype's record for these is NVD's "< 3.16.0", so it matches every 3.13.x.
+
+    Without a `version`, a waiver argued against 3.13.18 would silently cover
+    whatever interpreter the base image moves to next, unmeasured. The pin makes
+    a base-image bump re-fire the finding for a fresh argument.
+    """
+    rules = yaml.safe_load((REPO / ".grype.yaml").read_text())["ignore"]
+    scoped = [r for r in rules if isinstance(r, dict) and r.get("vulnerability") == cve]
+
+    assert scoped, f"{cve} is no longer waived — delete it from this list with the entry"
+    for rule in scoped:
+        pkg = rule.get("package") or {}
+        assert (pkg.get("name"), pkg.get("type")) == ("python", "binary"), f"{cve}: {pkg!r}"
+        assert pkg.get("version"), f"{cve}: lost its interpreter version pin"
+
+
 def test_a_type_scope_without_a_version_is_rejected(tmp_path: Path) -> None:
     """Bare `type:` is not a scope — it is every package of that ecosystem.
 

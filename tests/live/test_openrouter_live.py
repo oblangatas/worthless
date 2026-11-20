@@ -21,6 +21,7 @@ reaches pytest only, never your shell:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -288,7 +289,9 @@ class TestOpenRouterNormalUse:
             assert rejected.status_code in {401, 403}, "OpenRouter accepted the locked value"
 
             sandbox.unlock()
-            restored = hashlib.sha256(sandbox.env_file.read_bytes()).digest() == original
+            restored = hmac.compare_digest(
+                hashlib.sha256(sandbox.env_file.read_bytes()).digest(), original
+            )
             assert restored, ".env was not restored byte-for-byte"
             _assert_answered(
                 _chat(client, OPENROUTER_URL, dotenv_values(sandbox.env_file)["OPENROUTER_API_KEY"])

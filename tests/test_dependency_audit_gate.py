@@ -245,12 +245,48 @@ def test_audit_job_is_unconditional() -> None:
 # The Worker subproject has its own lockfile and was audited by nothing.
 
 
-def _npm_step() -> dict:
+NPM_GATE = "scripts/hooks/check_npm_audit_waivers.py"
+# job id -> (status-check name, --scope, --dir). The worker name is a required
+# status check on main: renaming it blocks every PR with zero failing checks
+# (WOR-874). The docs name is pinned so a rename is a decision, not a typo.
+NPM_JOBS = {
+    "npm-audit": ("npm audit (worker)", "worker", "workers/worthless-sh"),
+    "npm-audit-docs": ("npm audit (docs site)", "docs", "."),
+}
+
+
+def _npm_step(job: str = "npm-audit") -> dict:
     wf = yaml.safe_load(WORKFLOW.read_text())
-    steps = wf["jobs"]["npm-audit"]["steps"]
-    matches = [s for s in steps if "npm audit" in str(s.get("run", ""))]
-    assert len(matches) == 1, f"expected exactly one npm audit step, got {len(matches)}"
+    steps = wf["jobs"][job]["steps"]
+    matches = [
+        s
+        for s in steps
+        if "npm audit" in str(s.get("run", "")) or NPM_GATE in str(s.get("run", ""))
+    ]
+    assert len(matches) == 1, f"expected exactly one npm audit step in {job}, got {len(matches)}"
     return matches[0]
+
+
+@pytest.mark.parametrize("job", sorted(NPM_JOBS))
+def test_npm_audit_job_names_are_pinned(job: str) -> None:
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    assert wf["jobs"][job]["name"] == NPM_JOBS[job][0]
+
+
+@pytest.mark.parametrize("job", sorted(NPM_JOBS))
+def test_npm_audit_runs_through_the_waiver_gate(job: str) -> None:
+    """Both trees go through check_npm_audit_waivers.py, each with its own scope.
+
+    A bare `npm audit` here would ignore .npm-audit-waivers.json; a wrong
+    --scope would apply the other tree's waivers. WOR-1156.
+    """
+    _, scope, tree = NPM_JOBS[job]
+    run = _npm_step(job)["run"].split()
+    # -I: isolated mode, so a stray json.py next to the script can't shadow
+    # the stdlib module the gate parses npm's verdict with.
+    assert run[:3] == ["python3", "-I", NPM_GATE], run
+    assert run[run.index("--scope") + 1] == scope
+    assert run[run.index("--dir") + 1] == tree
 
 
 def test_npm_audit_covers_the_full_tree() -> None:
@@ -292,14 +328,15 @@ def test_npm_lockfile_freshness_is_checked() -> None:
     )
 
 
-def test_npm_audit_can_fail() -> None:
+@pytest.mark.parametrize("job", sorted(NPM_JOBS))
+def test_npm_audit_can_fail(job: str) -> None:
     """Same rule as the Python gate: it must be able to go red."""
-    step = _npm_step()
+    step = _npm_step(job)
     assert "continue-on-error" not in step
     assert "|| true" not in step["run"], "swallowing the exit code makes this decorative"
     wf = yaml.safe_load(WORKFLOW.read_text())
-    assert "continue-on-error" not in wf["jobs"]["npm-audit"]
-    assert "if" not in wf["jobs"]["npm-audit"], (
+    assert "continue-on-error" not in wf["jobs"][job]
+    assert "if" not in wf["jobs"][job], (
         "a skipped job reports SUCCESS to branch protection — a bypass, not a gate"
     )
 

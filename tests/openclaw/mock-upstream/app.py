@@ -282,13 +282,18 @@ async def chat_completions(request: Request):
 
 @app.post("/v1/messages")
 async def messages(request: Request):
-    """Capture x-api-key header and return an Anthropic Messages response."""
+    """Capture the credential headers and return an Anthropic Messages response.
+
+    Authorization is recorded too: the anthropic SDK 2.x sends its key there,
+    so a proxy that forwarded it would hand the provider shard-A.
+    """
     api_key = request.headers.get("x-api-key", "")
+    auth = request.headers.get("authorization", "")
     with _lock:
         _captured_headers.append(
             {
                 "header_key": "x-api-key",
-                "authorization": "",
+                "authorization": auth,
                 "x-api-key": api_key,
                 "provider": "anthropic",
                 "timestamp": str(time.time()),

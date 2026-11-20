@@ -2,6 +2,10 @@ name = "worthless-sh"
 main = "src/index.ts"
 compatibility_date = "2026-04-01"
 compatibility_flags = ["nodejs_compat"]
+# Wrangler >= 4.150 uploads source maps by default: one more multipart part,
+# carrying the original source text, for the WAF below to inspect. Keep the
+# upload to the bundled JS. Pinned by tests/test_worker_upload_shape.py.
+upload_source_maps = false
 
 # NB: no `[[rules]]` block. install.sh + walkthrough.txt are embedded
 # via `scripts/embed-assets.mjs` (base64 → src/embedded.ts) at build

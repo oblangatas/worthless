@@ -309,6 +309,12 @@ async def test_base_url_request_transits_proxy_to_upstream(
                 f"upstream saw {upstream_key!r}; expected the reconstructed key"
             )
             assert shard_a != upstream_key, "shard-A leaked to the upstream"
+            # anthropic 2.x sends its key as Authorization: Bearer, not
+            # x-api-key; the proxy must not pass that header on (WOR-979).
+            assert entry["authorization"] == "", (
+                f"upstream saw Authorization {entry['authorization']!r}; "
+                "only x-api-key may carry a credential to Anthropic"
+            )
 
         # --- Witness #2: the proxy's spend LEDGER recorded the transit. ---
         async with httpx.AsyncClient(transport=proxy_transport, base_url="http://proxy") as probe:
