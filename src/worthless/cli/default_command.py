@@ -281,12 +281,12 @@ def _ensure_proxy_running(home: WorthlessHome, console) -> tuple[bool, int | Non
             "Proxy failed to start. Try 'worthless up' for details.",
         ) from exc
 
-    healthy = poll_health(actual_port, timeout=10.0)
-    if not healthy:
-        console.print_warning(
-            "  Proxy started but health check failed. Check ~/.worthless/proxy.log"
+    # worthless-jywo: a proxy that isn't serving is a failure, never exit 0.
+    if not poll_health(actual_port, timeout=10.0):
+        raise WorthlessError(
+            ErrorCode.PROXY_UNREACHABLE,
+            f"The proxy stopped answering right after it started. See {log_file}",
         )
-        return False, None, 0
 
     return True, None, actual_port
 

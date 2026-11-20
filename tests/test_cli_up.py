@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.up import _resolve_port
+from worthless.cli.errors import WorthlessError
 from worthless.cli.process import (
     check_pid,
     cleanup_stale_pid,
@@ -490,56 +491,48 @@ class TestStartSupervisedProxy:
         assert popen_kwargs["start_new_session"] is True
         console.print_success.assert_called_once()
 
-    def test_health_timeout_uses_pidfile(
+    def test_a_child_that_exits_fails_with_its_own_error(
+        self, home_with_key: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """worthless-jywo: the cause used to stay in proxy.log behind an exit 0."""
+        from worthless.cli.commands.up import start_supervised_proxy
+
+        log_file = tmp_path / "proxy.log"
+        log_file.write_text("WRTLS-999: an older run's error\n")
+        child = MagicMock()
+        child.poll.return_value = 1
+
+        def child_writes_its_error(*_a, **_kw):
+            with log_file.open("a") as fh:
+                fh.write("WRTLS-121: The key this proxy loaded can't unlock\nany of them.\n")
+            return None
+
+        with (
+            patch("worthless.cli.commands.up.subprocess.Popen", return_value=child),
+            patch("worthless.cli.commands.up.poll_health_pid", side_effect=child_writes_its_error),
+            pytest.raises(WorthlessError) as exc,
+        ):
+            start_supervised_proxy(home_with_key, 8787, log_file, MagicMock())
+
+        assert "WRTLS-121: The key this proxy loaded can't unlock any of them." in str(exc.value)
+        assert "older run" not in str(exc.value)
+
+    def test_a_child_that_never_answers_fails_instead_of_returning(
         self, home_with_key: WorthlessHome, tmp_path: Path
     ) -> None:
         from worthless.cli.commands.up import start_supervised_proxy
 
-        binary = tmp_path / "worthless"
-        binary.write_text("#!/bin/sh\n")
-        binary.chmod(0o755)
-        log_file = tmp_path / "proxy.log"
-        console = MagicMock()
-        pf = pid_path(home_with_key)
-        write_pid(pf, 7777, 8787)
+        child = MagicMock()
+        child.poll.return_value = None  # alive, just never healthy
+        clock = iter(range(0, 1000, 20))
 
         with (
-            patch(
-                "worthless.cli.commands.service._common.resolve_worthless_binary",
-                return_value=binary,
-            ),
-            patch("worthless.cli.commands.up.subprocess.Popen"),
+            patch("worthless.cli.commands.up.subprocess.Popen", return_value=child),
             patch("worthless.cli.commands.up.poll_health_pid", return_value=None),
+            patch("worthless.cli.commands.up.time.monotonic", side_effect=lambda: next(clock)),
+            pytest.raises(WorthlessError, match="didn't answer a health check"),
         ):
-            pid = start_supervised_proxy(home_with_key, 8787, log_file, console)
-
-        assert pid == 7777
-        console.print_warning.assert_called_once()
-
-    def test_health_timeout_without_pidfile_returns_zero(
-        self, home_with_key: WorthlessHome, tmp_path: Path
-    ) -> None:
-        from worthless.cli.commands.up import start_supervised_proxy
-
-        binary = tmp_path / "worthless"
-        binary.write_text("#!/bin/sh\n")
-        binary.chmod(0o755)
-        log_file = tmp_path / "proxy.log"
-        console = MagicMock()
-        pid_path(home_with_key).unlink(missing_ok=True)
-
-        with (
-            patch(
-                "worthless.cli.commands.service._common.resolve_worthless_binary",
-                return_value=binary,
-            ),
-            patch("worthless.cli.commands.up.subprocess.Popen"),
-            patch("worthless.cli.commands.up.poll_health_pid", return_value=None),
-        ):
-            pid = start_supervised_proxy(home_with_key, 8787, log_file, console)
-
-        assert pid == 0
-        console.print_warning.assert_called_once()
+            start_supervised_proxy(home_with_key, 8787, tmp_path / "proxy.log", MagicMock())
 
     def test_spawn_failure_exits(self, home_with_key: WorthlessHome, tmp_path: Path) -> None:
         import typer

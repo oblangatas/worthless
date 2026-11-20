@@ -14,6 +14,14 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
   **Limits.**
   - LXC, systemd-nspawn and other containers that set neither variable nor marker file are still asked.
+- **A broken key shows everywhere: `worthless status` turns red and names the keys, plain `worthless` fails with the cause, and the background service stops restarting every 5 seconds** (worthless-n2bj, worthless-jywo, worthless-srto).
+  Before: if `fernet.key` could unlock only some of your locked keys, the proxy served the rest and `worthless status` still said 🟢 "You're protected". If it unlocked none, plain `worthless` waited about 40 seconds, printed "Proxy started but health check failed", and exited 0. The real cause was only in `proxy.log`. A `fernet.key` that was a symlink made the background service exit, so launchd or systemd restarted it every 5 seconds and logged the same refusal each time.
+  Now: `worthless status` shows 🔴 "Not working", names each key the proxy's key can't unlock, marks them `UNREADABLE`, and exits 73. Plain `worthless` stops as soon as the proxy refuses to start, prints the proxy's own error (for example "can't unlock any of your 1 locked key(s)"), and exits non-zero. A proxy that never answers its health check also fails now; it no longer exits 0. A symlinked or wrong-permission `fernet.key` makes the background service log the refusal once and wait; when you put the real file back, it restarts on its own.
+
+  **Limits.**
+  - `status` reports what the proxy found when it last started. If you fix the key while the proxy is stopped, `status` stays red until the next `worthless up`.
+  - With a symlinked `fernet.key`, `status` fails with the symlink error and doesn't list your keys.
+  - `worthless down` still can't see a service that is waiting for a fixed key. Use `worthless service stop`, or fix the key.
 
 ## [0.3.17] — 2026-11-18
 

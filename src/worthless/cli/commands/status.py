@@ -25,6 +25,7 @@ from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.cli.commands.service.proxy_state import restart_note, survives_restart
 from worthless.cli.console import get_console
 from worthless.cli.errors import error_boundary
+from worthless.cli.key_check import KEY_FIX, read_unopenable
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
 from worthless.cli.orphans import FIX_PHRASE, UNLOCKED_FIX_PHRASE, find_unlocked, is_orphan
 from worthless.cli.process import check_proxy_health, read_pid
@@ -124,13 +125,17 @@ def _list_enrolled_keys(home: WorthlessHome) -> list[dict[str, str]]:
     by_alias: dict[str, list[EnrollmentRecord]] = {}
     for e in enrollments:
         by_alias.setdefault(e.key_alias, []).append(e)
+    # worthless-n2bj: what the last proxy start's key couldn't open (names only).
+    unopenable = read_unopenable(home)
 
     for alias, provider in all_aliases.items():
         rows = by_alias.get(alias, [])
-        if not rows:
-            status = "PROTECTED"  # shard-without-enrollment edge — not HF5 scope
-        elif alias in exposed:
+        if alias in exposed:
             status = "EXPOSED"
+        elif alias in unopenable:
+            status = "UNREADABLE"
+        elif not rows:
+            status = "PROTECTED"  # shard-without-enrollment edge — not HF5 scope
         elif all(is_orphan(e) for e in rows):
             status = "BROKEN"
         else:
@@ -179,8 +184,9 @@ def _status_verdict(
         the real key in that key's own ``.env``, WOR-958)
       * availability      — can apps reach the keys right now? (proxy up/down)
 
-    🔴 ``at_risk`` is reserved for a real failure (degraded routing, an
-    EXPOSED key). A locked
+    🔴 is reserved for a real failure: ``at_risk`` (degraded routing, an
+    EXPOSED key) or ``key_refused`` (the proxy's key can't open a locked key,
+    so its requests fail until the key is fixed — worthless-n2bj). A locked
     key with the proxy down is SAFE AT REST — that's 🟡 ``protected_at_rest``,
     never 🔴: calling an availability outage a security risk trains the user
     to ignore red. A BROKEN enrollment is data-loss (🟡 ``attention``), not a
@@ -229,6 +235,15 @@ def _status_verdict(
         return "at_risk", (
             f"🔴 At risk — {exposed} {e_noun} still in plain text in .env "
             f"(a lock was cut off) — run `{UNLOCKED_FIX_PHRASE}` there."
+        )
+
+    # worthless-n2bj: not an outage `worthless up` fixes — every request for
+    # these fails until the key is fixed, so red, and named.
+    unreadable = sorted(k["alias"] for k in keys if k["status"] == "UNREADABLE")
+    if unreadable:
+        return "key_refused", (
+            f"🔴 Not working — the proxy's key can't unlock {', '.join(unreadable)}, "
+            f"so requests for them fail. {KEY_FIX}"
         )
 
     broken = sum(1 for k in keys if k["status"] == "BROKEN")
@@ -419,4 +434,4 @@ def register_status_commands(app: typer.Typer) -> None:
         # Trust-fix exit: at_risk (degraded sentinel, or an EXPOSED key) = non-zero exit so callers
         # (CI scripts, shell pipelines, agents polling status) get the
         # signal even if they ignored the original lock exit code.
-        raise typer.Exit(code=73 if degraded or verdict == "at_risk" else 0)
+        raise typer.Exit(code=73 if degraded or verdict in ("at_risk", "key_refused") else 0)

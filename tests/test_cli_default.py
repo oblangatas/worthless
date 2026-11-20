@@ -164,18 +164,12 @@ class TestHappyPaths:
             "worthless.cli.default_command.start_supervised_proxy",
             mock_start_daemon,
         )
-        # First poll_health call is the detection probe (should say "not running"),
-        # subsequent calls are post-start verification (should say "healthy").
-        health_calls = 0
-
-        def mock_poll_health(*args, **kw):
-            nonlocal health_calls
-            health_calls += 1
-            return health_calls > 1  # False on detection, True on verify
-
+        # Detection runs through proxy_state (no pidfile, nothing on the port);
+        # this is only the post-start verify. worthless-jywo: answering False
+        # here used to pass too, with exit 0 on a proxy that wasn't serving.
         monkeypatch.setattr(
             "worthless.cli.default_command.poll_health",
-            mock_poll_health,
+            lambda *args, **kw: True,
         )
         # No PID file means proxy is not running
         pid_file = home_with_key.base_dir / "proxy.pid"

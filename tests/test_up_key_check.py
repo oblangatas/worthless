@@ -142,6 +142,16 @@ class TestWhatUpDoes:
         (message,) = console.print_warning.call_args.args
         assert "side" in message and "work" not in message
         assert "worthless doctor --explain fernet_drift" in message
+        assert key_check.read_unopenable(home) == {"side"}, "status reads this (worthless-n2bj)"
+
+    def test_a_disk_error_recording_the_names_never_stops_up(self, home: WorthlessHome) -> None:
+        """The names file is a hint for `status`; failing to write it must not crash `up`."""
+        seal_enrolled(home.db_path, K1, "work")
+        seal_enrolled(home.db_path, K2, "side")
+        (home.base_dir / "run").write_text("not a directory")  # mkdir/open now fail
+        wait, _console = _check(home, K1, managed=True)
+        assert wait is False
+        assert key_check.read_unopenable(home) == set()
 
     def test_nothing_locked_yet_starts(self, home: WorthlessHome) -> None:
         wait, console = _check(home, K2, managed=False)
