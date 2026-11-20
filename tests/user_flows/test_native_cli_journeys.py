@@ -66,14 +66,10 @@ def test_default_command_yes_detects_and_locks_project_env(
     )
     monkeypatch.chdir(project)
 
-    def _poll_health(*args: object, **kwargs: object) -> bool:
-        return True
-
     monkeypatch.setattr(
         "worthless.cli.default_command.start_supervised_proxy",
         lambda *a, **kw: 4242,
     )
-    monkeypatch.setattr("worthless.cli.default_command.poll_health", _poll_health)
 
     result = _invoke(["--yes"], home)
 
@@ -139,7 +135,6 @@ def test_default_second_invocation_skips_supervised_start(
         "worthless.cli.default_command.start_supervised_proxy",
         mock_supervised,
     )
-    monkeypatch.setattr("worthless.cli.default_command.poll_health", lambda *a, **kw: True)
 
     first = _invoke(["--yes"], home)
     first_output = _combined_output(first)

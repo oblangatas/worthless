@@ -119,10 +119,6 @@ class TestHappyPaths:
             "worthless.cli.default_command.start_supervised_proxy",
             lambda *a, **kw: 54321,
         )
-        monkeypatch.setattr(
-            "worthless.cli.default_command.poll_health",
-            lambda *a, **kw: True,
-        )
 
         result = _invoke_default(
             {"WORTHLESS_HOME": str(home_dir.base_dir)},
@@ -164,19 +160,9 @@ class TestHappyPaths:
             "worthless.cli.default_command.start_supervised_proxy",
             mock_start_daemon,
         )
-        # First poll_health call is the detection probe (should say "not running"),
-        # subsequent calls are post-start verification (should say "healthy").
-        health_calls = 0
-
-        def mock_poll_health(*args, **kw):
-            nonlocal health_calls
-            health_calls += 1
-            return health_calls > 1  # False on detection, True on verify
-
-        monkeypatch.setattr(
-            "worthless.cli.default_command.poll_health",
-            mock_poll_health,
-        )
+        # Detection runs through proxy_state (no pidfile, nothing on the port);
+        # this is only the post-start verify. worthless-jywo: answering False
+        # here used to pass too, with exit 0 on a proxy that wasn't serving.
         # No PID file means proxy is not running
         pid_file = home_with_key.base_dir / "proxy.pid"
         pid_file.unlink(missing_ok=True)
@@ -238,10 +224,6 @@ class TestHappyPaths:
             "worthless.cli.default_command.start_supervised_proxy",
             lambda *a, **kw: 54321,
         )
-        monkeypatch.setattr(
-            "worthless.cli.default_command.poll_health",
-            lambda *a, **kw: True,
-        )
 
         result = _invoke_default(
             {"WORTHLESS_HOME": str(home_dir.base_dir)},
@@ -290,10 +272,6 @@ class TestNonInteractive:
         monkeypatch.setattr(
             "worthless.cli.default_command.start_supervised_proxy",
             lambda *a, **kw: 54321,
-        )
-        monkeypatch.setattr(
-            "worthless.cli.default_command.poll_health",
-            lambda *a, **kw: True,
         )
 
         result = _invoke_default(
@@ -367,10 +345,6 @@ class TestEdgeCases:
         monkeypatch.setattr(
             "worthless.cli.default_command.start_supervised_proxy",
             lambda *a, **kw: 54321,
-        )
-        monkeypatch.setattr(
-            "worthless.cli.default_command.poll_health",
-            lambda *a, **kw: True,
         )
 
         result = _invoke_default(
@@ -539,29 +513,25 @@ class TestErrorHandling:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """Proxy fails health check: actionable error or warning."""
+        """worthless-jywo: a proxy that didn't start exits non-zero with its cause."""
         monkeypatch.chdir(tmp_path)
 
         # No PID file = proxy not running; start will be attempted
         (home_with_key.base_dir / "proxy.pid").unlink(missing_ok=True)
 
-        monkeypatch.setattr(
-            "worthless.cli.default_command.start_supervised_proxy",
-            lambda *a, **kw: 54321,
-        )
-        monkeypatch.setattr(
-            "worthless.cli.default_command.poll_health",
-            lambda *a, **kw: False,
-        )
+        def refused(*_a, **_kw):
+            raise WorthlessError(
+                ErrorCode.PROXY_UNREACHABLE, "The proxy didn't start: WRTLS-121: refused"
+            )
+
+        monkeypatch.setattr("worthless.cli.default_command.start_supervised_proxy", refused)
 
         result = _invoke_default(
             {"WORTHLESS_HOME": str(home_with_key.base_dir)},
         )
-        combined = result.stdout + result.stderr
-        # Should warn about health check failure
-        assert (
-            "WRTLS" in combined or "health" in combined.lower() or "unreachable" in combined.lower()
-        )
+        combined = " ".join((result.stdout + result.stderr).split())
+        assert result.exit_code != 0, combined
+        assert "The proxy didn't start: WRTLS-121: refused" in combined
 
 
 # ---------------------------------------------------------------------------
@@ -601,10 +571,6 @@ class TestSidecarSupervisedProxyStart:
         monkeypatch.setattr(
             "worthless.cli.commands.up.start_daemon",
             mock_daemon,
-        )
-        monkeypatch.setattr(
-            "worthless.cli.default_command.poll_health",
-            lambda *a, **kw: True,
         )
 
         result = _invoke_default({"WORTHLESS_HOME": str(home_with_key.base_dir)})
@@ -824,7 +790,6 @@ class TestDefaultCommandOAuthOnlyEnv:
             "worthless.cli.default_command.start_supervised_proxy",
             lambda *a, **kw: 54321,
         )
-        monkeypatch.setattr("worthless.cli.default_command.poll_health", lambda *a, **kw: True)
 
         result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)}, args=args)
         low = " ".join((result.stdout + result.stderr).split()).lower()
@@ -945,7 +910,6 @@ class TestDefaultCommandOAuthOnlyEnv:
             "worthless.cli.default_command.start_supervised_proxy",
             lambda *a, **kw: 54321,
         )
-        monkeypatch.setattr("worthless.cli.default_command.poll_health", lambda *a, **kw: True)
 
         result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)}, args=["--yes"])
         low = " ".join((result.stdout + result.stderr).split()).lower()

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from cryptography.fernet import Fernet
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
@@ -20,7 +21,9 @@ def home(tmp_path: Path) -> WorthlessHome:
     base = tmp_path / ".worthless"
     base.mkdir()
     fernet = base / "fernet.key"
-    fernet.write_bytes(b"x" * 32)
+    # A real key: `up` now refuses a malformed fernet.key, and a refused
+    # service waits (it would wait here forever).
+    fernet.write_bytes(Fernet.generate_key())
     fernet.chmod(0o600)
     return WorthlessHome(base_dir=base)
 

@@ -7,6 +7,9 @@ One answer for ``up``, ``lock`` and ``doctor``. Checks each shard's HMAC
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import logging
 import os
 from pathlib import Path
 
@@ -17,7 +20,99 @@ from worthless.crypto.fernet_check import key_fits_token
 from worthless.crypto.types import zero_buf
 from worthless.storage.shard_reader import ShardReader
 
+logger = logging.getLogger(__name__)
+
 KEY_FIX = "Run `worthless doctor --explain fernet_drift` to find the right key."
+
+
+MALFORMED_KEY = (
+    "fernet.key isn't a valid key (it doesn't decode to a 32-byte Fernet key) — it "
+    f"may be corrupted. Restore it from a backup. {KEY_FIX}"
+)
+
+
+def key_is_well_formed(key: bytes | bytearray) -> bool:
+    """Exactly what ``Fernet(key)`` accepts, and readable as text.
+
+    Fernet runs ``urlsafe_b64decode`` (which skips whitespace and takes both
+    base64 alphabets) and wants 32 bytes; a stricter shape check refused keys
+    that work today, such as one with a trailing CR from a systemd value. Text:
+    ``build_proxy_env`` passes the key on decoded, so raw garbage crashed there.
+    """
+    try:
+        decoded = bytearray(base64.urlsafe_b64decode(key))
+    except (binascii.Error, ValueError):
+        return False
+    fits = len(decoded) == 32
+    zero_buf(decoded)
+    if not fits:
+        return False
+    if key.isascii():  # no copy on the common path
+        return True
+    try:
+        key.decode("utf-8")  # rare path; build_proxy_env makes the same str
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def unopenable_path(home: WorthlessHome) -> Path:
+    return home.base_dir / "run" / "unopenable-keys"
+
+
+def _key_file_refused_path(home: WorthlessHome) -> Path:
+    return home.base_dir / "run" / "key-file-refused"
+
+
+def _write_hint(path: Path, text: str | None) -> None:
+    """Write (or with None, remove) a hint ``status`` reads. Never key material.
+
+    ``status`` must not load the key itself (keychain prompts), and ``/healthz``
+    is unauthenticated (worthless-n2bj). A disk error is logged, never raised:
+    a hint for ``status`` must not stop the proxy starting.
+    """
+    try:
+        if text is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.unlink(missing_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        tmp.replace(path)
+    except OSError as exc:
+        logger.warning("Could not write %s for `worthless status`: %s", path, exc)
+
+
+def _read_hint(path: Path) -> str | None:
+    """None when absent. Any other read error raises: status must say it couldn't tell."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def record_unopenable(home: WorthlessHome, aliases: list[str]) -> None:
+    """The aliases the proxy's key can't open, by name; an empty list removes it."""
+    _write_hint(unopenable_path(home), "\n".join(sorted(aliases)) + "\n" if aliases else None)
+
+
+def read_unopenable(home: WorthlessHome) -> set[str]:
+    """The aliases the last proxy start couldn't open. Raises OSError if unreadable."""
+    return set((_read_hint(unopenable_path(home)) or "").split())
+
+
+def record_key_file_refused(home: WorthlessHome, message: str | None) -> None:
+    """Why the proxy refused to read ``fernet.key`` itself (symlink, mode, owner)."""
+    _write_hint(_key_file_refused_path(home), message)
+
+
+def read_key_file_refused(home: WorthlessHome) -> str | None:
+    """The last proxy start's key-file refusal, if any. Raises OSError if unreadable."""
+    text = _read_hint(_key_file_refused_path(home))
+    return text.strip() if text else None
 
 
 def aliases_key_cannot_open(home: WorthlessHome, key: bytes | bytearray) -> tuple[int, list[str]]:

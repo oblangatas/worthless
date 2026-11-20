@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import signal
@@ -28,7 +29,14 @@ from worthless._flags import WORTHLESS_SIDECAR_UID_ENV
 from worthless.cli.bootstrap import WorthlessHome, get_home
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary, sanitize_exception
-from worthless.cli.key_check import KEY_FIX, aliases_key_cannot_open
+from worthless.cli.key_check import (
+    KEY_FIX,
+    MALFORMED_KEY,
+    aliases_key_cannot_open,
+    key_is_well_formed,
+    record_key_file_refused,
+    record_unopenable,
+)
 from worthless.cli.keystore import read_fernet_key_from_file
 from worthless.cli.platform import (
     IS_WINDOWS,
@@ -70,6 +78,8 @@ from worthless.sidecar.health import (
     probe_socket,
 )
 
+logger = logging.getLogger(__name__)
+
 # A refused service that sees fernet.key fixed (or gone) exits with this so
 # launchd/systemd restart it on the new key. Non-zero: systemd's
 # Restart=on-failure ignores a clean exit. 75 = EX_TEMPFAIL.
@@ -90,6 +100,7 @@ def _refuse_unless_key_opens_locked_keys(home: WorthlessHome, key: bytearray, co
     5 s and log this forever.
     """
     total, dead = aliases_key_cannot_open(home, key)
+    record_unopenable(home, dead)
     if not dead:
         return False
     if len(dead) < total:
@@ -129,12 +140,45 @@ def _wait_for_a_key_that_opens(home: WorthlessHome) -> None:
             if exc.code == ErrorCode.KEY_NOT_FOUND and had_file:
                 raise typer.Exit(code=_RESTART_FOR_NEW_KEY) from None
             continue
+        if not key_is_well_formed(key):  # still corrupted: a restart would refuse it again
+            zero_buf(key)
+            continue
         try:
             total, dead = aliases_key_cannot_open(home, key)
         finally:
             zero_buf(key)
         if len(dead) < total or not total:
             raise typer.Exit(code=_RESTART_FOR_NEW_KEY)
+
+
+def _read_key_or_wait(home: WorthlessHome, console) -> bytearray | None:
+    """Read the key; a refused file parks a service instead of exiting (worthless-srto).
+
+    A symlinked or loose-mode ``fernet.key`` raises KEY_REFUSED before the
+    stale-key check. Exiting there made launchd/systemd relaunch the service
+    every 5 s and log the refusal each time. Returns None after the wait, else
+    a copy of the key for the caller to zero.
+    """
+    try:
+        key = home.fernet_key
+        if not key_is_well_formed(key):  # garbage bytes crashed build_proxy_env's decode
+            zero_buf(key)
+            raise WorthlessError(ErrorCode.KEY_REFUSED, MALFORMED_KEY)
+    except WorthlessError as exc:
+        if exc.code != ErrorCode.KEY_REFUSED:
+            raise
+        # The file itself was refused — no key was checked, so no alias is
+        # "can't unlock". status names this refusal and its own fix.
+        record_unopenable(home, [])
+        record_key_file_refused(home, exc.message)
+        if not is_service_managed():
+            raise
+        console.print_error(exc)
+    else:
+        record_key_file_refused(home, None)
+        return key
+    _wait_for_a_key_that_opens(home)
+    return None
 
 
 async def _sidecar_open_probe_material(
@@ -448,7 +492,8 @@ def start_supervised_proxy(
     log_fd: int = -1
     try:
         log_fd = os.open(str(log_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        subprocess.Popen(  # nosec B603 — argv is this interpreter + fixed flags
+        log_start = os.fstat(log_fd).st_size
+        proc = subprocess.Popen(  # nosec B603 — argv is this interpreter + fixed flags
             cmd,
             # `-m` puts the cwd first on sys.path; the cwd is the user's project,
             # so a `worthless/` package in a cloned repo would run as the proxy.
@@ -473,17 +518,67 @@ def start_supervised_proxy(
         if log_fd >= 0:
             os.close(log_fd)
 
-    resolved_pid = poll_health_pid(port, timeout=30.0)
+    deadline = time.monotonic() + 30.0
+    while True:
+        resolved_pid = poll_health_pid(port, timeout=1.0)
+        if resolved_pid is not None or proc.poll() is not None or time.monotonic() > deadline:
+            break
     if resolved_pid is None:
-        console.print_warning(
-            "Supervised proxy starting but health check timed out. Check ~/.worthless/proxy.log"
+        # worthless-jywo: say why, and fail — it used to wait out the timeout and
+        # exit 0 with the cause only in proxy.log.
+        if proc.poll() is not None:
+            cause = _last_error_line(log_file, log_start)
+        else:
+            # Never report "didn't start" while a slow one comes up behind us.
+            _stop_child(proc)
+            cause = (
+                "it didn't answer within 30 s, so it was stopped (a cold start, "
+                "e.g. on WSL, can be slow). Run `worthless up` to watch it start."
+            )
+        raise WorthlessError(
+            ErrorCode.PROXY_UNREACHABLE, f"The proxy didn't start: {cause} (log: {log_file})"
         )
-        pf = pid_path(home)
-        info = read_pid(pf)
-        return info[0] if info else 0
 
     console.print_success(f"Proxy running on 127.0.0.1:{port} (PID {resolved_pid})")
     return resolved_pid
+
+
+def _stop_child(proc: subprocess.Popen) -> None:
+    """SIGTERM the ``up`` we started (it tears down its sidecar + proxy), then kill.
+
+    The kill takes its whole process group — it runs in its own session — so a
+    sidecar or proxy it had already spawned can't outlive it.
+    """
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        logger.warning("Proxy process %s did not exit after SIGKILL", proc.pid)
+
+
+def _last_error_line(log_file: Path, start: int) -> str:
+    """The last WRTLS error the failed ``up`` wrote to its log (else its last line).
+
+    The console wraps long errors, so it runs from that line to the end.
+    """
+    try:
+        with log_file.open("rb") as fh:
+            fh.seek(start)
+            lines = [ln.strip() for ln in fh.read().decode("utf-8", "replace").splitlines()]
+    except OSError:
+        lines = []
+    lines = [ln for ln in lines if ln] or ["it exited without a message."]
+    first = max((i for i, ln in enumerate(lines) if "WRTLS-" in ln), default=len(lines) - 1)
+    return " ".join(lines[first:])[:500]
 
 
 def _upgrade_pidfile_if_trusted(
@@ -835,6 +930,13 @@ def register_up_commands(app: typer.Typer) -> None:
                     # Stale PID file -- reclaim
                     cleanup_stale_pid(pid_file)
                     console.print_warning(f"Reclaimed stale PID file (was PID {existing_pid})")
+
+        # First key read (build_proxy_env reads it without a keyring): a refused
+        # key file parks a service here rather than exiting (worthless-srto).
+        key = _read_key_or_wait(home, console)
+        if key is None:
+            return
+        zero_buf(key)  # a copy; home keeps its own cached key for the reads below
 
         # Build proxy env
         proxy_env = build_proxy_env(home)
