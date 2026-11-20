@@ -908,3 +908,83 @@ ignore:
     package: {name: openssl-provider-legacy, version: "3.5.7-1~deb13u3", type: deb}
     reason: "Out-of-bounds read in server-side TLS 1.3 key-share parsing, reached only when the server calls SSL_CTX_set_cert_flags() with SSL_CERT_FLAG_SUITEB_128_LOS; OpenSSL rates it Low and states default configurations do not reach it. Measured 2026-11-18 (amd64 + arm64): the flag is set only by SSL_CTX_set_cert_flags() or a SUITEB cipher string, and nothing here sets either: the image's OpenSSL config has no CipherString, Worthless never calls set_ciphers() or builds a server-side TLS context, and it serves no TLS (uvicorn gets no --ssl-* options from deploy/start.py or the CLI). fix=not-fixed: no Debian trixie update yet (upstream fix 3.5.10). Added in WOR-1157; re-check owned by WOR-1155."
     expiry: "2026-12-15"
+
+  # ── OpenSSL 3.5.7 (trixie), CVE-2026-84786 DANE client (worthless-3g4u) ─
+  # Turned main's required `scan` red on 2026-11-20 (b49a2007). The flaw: a TLS
+  # client that has DANE switched on can dereference NULL and crash on an
+  # unusual mix of server certificate and TLSA records. Grype reports High from
+  # a mechanical CVSS score (7.5, availability only; EPSS 0.09%).
+  #
+  # SOURCE. Upstream fix: https://github.com/openssl/openssl/pull/33634. Its
+  # author calls it Low in a review reply ("hence the Low severity"); the PR's
+  # `severity: important` label is OpenSSL's tag for any security fix, not a
+  # rating. Trigger: the client must enable both PKIX-TA/EE and
+  # DANE-TA(2) SPKI(1) Full(0) TLSA usages, and the server's self-signed EE
+  # cert must already sit in the client's trust store. Read 2026-11-20
+  # (`gh pr view 33634 --repo openssl/openssl`): state OPEN, not merged,
+  # labelled for branches 3.5, 4.0, 4.1 and master. So 3.5.10 on 2026-12-01
+  # may not carry it. Grype's database (schema v6.1.10, built 2026-11-20
+  # 06:21 UTC, `grype db search --vuln CVE-2026-84786`) has four providers:
+  #   Debian  https://security-tracker.debian.org/tracker/CVE-2026-84786
+  #           openssl fix=not-fixed in debian 12, 13, 14 and unstable. The
+  #           record names no Debian bug.
+  #   Red Hat https://access.redhat.com/security/cve/CVE-2026-84786 (NVD:
+  #           https://nvd.nist.gov/vuln/detail/CVE-2026-84786)
+  #   Ubuntu  https://ubuntu.com/security/CVE-2026-84786
+  #   Echo    https://www.cve.org/CVERecord?id=CVE-2026-84786
+  # Because sid is unfixed too, no base-image bump fixes this.
+  #
+  # DANE is opt-in per connection: the client must call SSL_CTX_dane_enable()
+  # or SSL_dane_enable(), then add TLSA records with SSL_dane_tlsa_add(). libssl
+  # gives the verifier a DANE context only when DANE is enabled on that
+  # connection. Without those calls, certificate checks take the normal PKIX
+  # path.
+  #
+  # MEASURED 2026-11-20 on BOTH architectures, openssl/libssl3t64/
+  # openssl-provider-legacy 3.5.7-1~deb13u3 on each:
+  #   arm64  image built natively from main b49a2007, 758 ELFs
+  #   amd64  ghcr.io/oblangatas/worthless-proxy:0.3.17, revision label
+  #          3dc5d05d (b49a2007's parent; no change to Dockerfile, uv.lock,
+  #          pyproject.toml, deploy/ or src/ between them), 759 ELFs. Its rootfs
+  #          was exported, never run, and swept with x86_64-linux-gnu-nm.
+  #   Re-measured independently the same day on local buildx images of
+  #   3dc5d05d, with pyelftools over ELFs that have a .dynsym (758 amd64, 757
+  #   arm64; counts differ from the nm sweep by method, the result does not).
+  # Same result on both arches, from undefined dynamic symbols of every ELF:
+  #
+  #   SSL_dane_enable, SSL_CTX_dane_enable, SSL_dane_tlsa_add -> /usr/bin/openssl only
+  #   ELFs that link the system libssl: /usr/bin/openssl, Python's _ssl,
+  #     apt's http method. _ssl and apt import no DANE symbol.
+  #   The DANE_* strings inside _ssl are OpenSSL's error-reason table (the
+  #     same as the SUITEB note above), not calls. No openssl.cnf in /etc/ssl
+  #     or /usr/lib/ssl mentions DANE.
+  #   Outbound TLS to providers uses ssl.create_default_context() /
+  #     SSLContext(PROTOCOL_TLS_CLIENT) in src/worthless/proxy, and Python's
+  #     ssl module has no DANE API. src has no dane/tlsa/pyOpenSSL reference,
+  #     and pyOpenSSL is not installed. Nothing at runtime runs /usr/bin/openssl.
+  #
+  # NOT COVERED: the cryptography 50.0.2 wheel bundles its own static OpenSSL
+  # 4.0.3 (the OpenSSL version, not cryptography's), and its _rust.abi3.so does
+  # contain SSL_dane_* code. Grype does not flag it. Treat 4.0.3 as affected:
+  # the upstream fix above is labelled for the 4.0 branch. It is unreachable
+  # today: cryptography's Python API has no TLS client, and Worthless imports
+  # only Fernet, hashes and HKDF. ALSO NOT COVERED: a `docker exec` user who
+  # runs `openssl s_client -dane_tlsa_rrdata ...` by hand. They already have a
+  # shell, and the crash only takes down their own s_client process.
+  #
+  # Pinned to the exact Debian version, like the batches above. At expiry,
+  # delete these if Debian has shipped; otherwise re-measure with the same
+  # sweep on both arches. Delete them at once if anything in the image starts
+  # calling SSL_dane_enable (for example a DANE-capable HTTP or SMTP client).
+  - vulnerability: CVE-2026-84786
+    package: {name: openssl, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 on arm64 (main b49a2007) and amd64 (ghcr 0.3.17 @ 3dc5d05d): only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. Source: grype DB (Debian/Red Hat/Ubuntu records); Debian fix=not-fixed in 12/13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-84786
+    package: {name: libssl3t64, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 on arm64 (main b49a2007) and amd64 (ghcr 0.3.17 @ 3dc5d05d): only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. Source: grype DB (Debian/Red Hat/Ubuntu records); Debian fix=not-fixed in 12/13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-15"
+  - vulnerability: CVE-2026-84786
+    package: {name: openssl-provider-legacy, version: "3.5.7-1~deb13u3", type: deb}
+    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 on arm64 (main b49a2007) and amd64 (ghcr 0.3.17 @ 3dc5d05d): only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. Source: grype DB (Debian/Red Hat/Ubuntu records); Debian fix=not-fixed in 12/13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-15"
