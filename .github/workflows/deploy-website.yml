@@ -52,14 +52,14 @@ jobs:
           persist-credentials: false
 
       - name: Validate release source freeze
-        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        if: github.event_name == 'pull_request' && github.base_ref == 'main' && github.head_ref == 'release/wor-757-promote-website'
         run: |
           git remote set-branches --add origin website-dev
           git fetch --no-tags --depth=1 origin website-dev
           test "$(git rev-parse origin/website-dev)" = "$WEBSITE_RELEASE_SOURCE"
 
       - name: Validate release source tree
-        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        if: github.event_name == 'pull_request' && github.base_ref == 'main' && github.head_ref == 'release/wor-757-promote-website'
         run: |
           rm -rf /tmp/website-release-source
           mkdir -p /tmp/website-release-source
@@ -68,7 +68,7 @@ jobs:
           diff -qr -x install-openclaw.md /tmp/website-release-source website
 
       - name: Validate release PR scope
-        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        if: github.event_name == 'pull_request' && github.base_ref == 'main' && github.head_ref == 'release/wor-757-promote-website'
         run: |
           git fetch --no-tags origin main
           git diff --name-only origin/main...HEAD > /tmp/changed-files
