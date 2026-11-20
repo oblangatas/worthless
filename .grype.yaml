@@ -910,12 +910,24 @@ ignore:
     expiry: "2026-12-15"
 
   # ── OpenSSL 3.5.7 (trixie), CVE-2026-84786 DANE client (worthless-3g4u) ─
-  # Turned main's required `scan` red on 2026-11-20 (b49a2007) with grype's
-  # database of 2026-11-19. The flaw: a TLS client that has DANE switched on
-  # can dereference NULL and crash on an unusual mix of server certificate and
-  # TLSA records. Grype reports High from a mechanical CVSS score (7.5,
-  # availability only; EPSS 0.09%). fix=not-fixed in Debian 12, 13, 14 AND sid,
-  # so no base-image bump fixes it.
+  # Turned main's required `scan` red on 2026-11-20 (b49a2007). The flaw: a TLS
+  # client that has DANE switched on can dereference NULL and crash on an
+  # unusual mix of server certificate and TLSA records. Grype reports High from
+  # a mechanical CVSS score (7.5, availability only; EPSS 0.09%).
+  #
+  # SOURCE. The only source checked is grype's own database (schema v6.1.10,
+  # built 2026-11-20 06:21 UTC, `grype db search --vuln CVE-2026-84786`). From
+  # the measuring machine I could not open the web pages it cites, and I found
+  # no OpenSSL advisory or fix commit. Four separate providers in that
+  # database record the CVE:
+  #   Debian  https://security-tracker.debian.org/tracker/CVE-2026-84786
+  #           openssl fix=not-fixed in debian 12, 13, 14 and unstable. The
+  #           record names no Debian bug.
+  #   Red Hat https://access.redhat.com/security/cve/CVE-2026-84786 (NVD:
+  #           https://nvd.nist.gov/vuln/detail/CVE-2026-84786)
+  #   Ubuntu  https://ubuntu.com/security/CVE-2026-84786
+  #   Echo    https://www.cve.org/CVERecord?id=CVE-2026-84786
+  # Because sid is unfixed too, no base-image bump fixes this.
   #
   # DANE is opt-in per connection: the client must call SSL_CTX_dane_enable()
   # or SSL_dane_enable(), then add TLSA records with SSL_dane_tlsa_add(). libssl
@@ -923,10 +935,14 @@ ignore:
   # connection. Without those calls, certificate checks take the normal PKIX
   # path.
   #
-  # Measured 2026-11-20 on the image built from main b49a2007 (arm64, native
-  # Apple Silicon build; amd64 could not be emulated on that machine), with
-  # openssl/libssl3t64/openssl-provider-legacy 3.5.7-1~deb13u3. Undefined
-  # dynamic symbols of all 758 ELFs in the image:
+  # MEASURED 2026-11-20 on BOTH architectures, openssl/libssl3t64/
+  # openssl-provider-legacy 3.5.7-1~deb13u3 on each:
+  #   arm64  image built natively from main b49a2007, 758 ELFs
+  #   amd64  ghcr.io/oblangatas/worthless-proxy:0.3.17, revision label
+  #          3dc5d05d (b49a2007's parent; no change to Dockerfile, uv.lock,
+  #          pyproject.toml, deploy/ or src/ between them), 759 ELFs. Its rootfs
+  #          was exported, never run, and swept with x86_64-linux-gnu-nm.
+  # Same result on both arches, from undefined dynamic symbols of every ELF:
   #
   #   SSL_dane_enable, SSL_CTX_dane_enable, SSL_dane_tlsa_add -> /usr/bin/openssl only
   #   ELFs that link the system libssl: /usr/bin/openssl, Python's _ssl,
@@ -939,27 +955,28 @@ ignore:
   #     ssl module has no DANE API. src has no dane/tlsa/pyOpenSSL reference,
   #     and pyOpenSSL is not installed. Nothing at runtime runs /usr/bin/openssl.
   #
-  # NOT COVERED: cryptography 50.0.2 bundles its own static OpenSSL, and its
-  # _rust.abi3.so does contain SSL_dane_* code. Grype does not flag it and we
-  # did not check whether 4.0.3 is affected. It is unreachable today: the
-  # cryptography Python API has no TLS client, and Worthless imports only
-  # Fernet, hashes and HKDF. ALSO NOT COVERED: a `docker exec` user who runs
-  # `openssl s_client -dane_tlsa_rrdata ...` by hand. They already have a
+  # NOT COVERED: the cryptography 50.0.2 wheel bundles its own static OpenSSL
+  # 4.0.3 (the OpenSSL version, not cryptography's), and its _rust.abi3.so does
+  # contain SSL_dane_* code. Grype does not flag it. I did not check whether
+  # OpenSSL 4.0.3 is affected (follow-up on worthless-3g4u). It is unreachable
+  # today: cryptography's Python API has no TLS client, and Worthless imports
+  # only Fernet, hashes and HKDF. ALSO NOT COVERED: a `docker exec` user who
+  # runs `openssl s_client -dane_tlsa_rrdata ...` by hand. They already have a
   # shell, and the crash only takes down their own s_client process.
   #
   # Pinned to the exact Debian version, like the batches above. At expiry,
   # delete these if Debian has shipped; otherwise re-measure with the same
-  # sweep. Delete them at once if anything in the image starts calling
-  # SSL_dane_enable (for example a DANE-capable HTTP client or SMTP library).
+  # sweep on both arches. Delete them at once if anything in the image starts
+  # calling SSL_dane_enable (for example a DANE-capable HTTP or SMTP client).
   - vulnerability: CVE-2026-84786
     package: {name: openssl, version: "3.5.7-1~deb13u3", type: deb}
-    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 (arm64, main b49a2007): of 758 ELFs only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. fix=not-fixed in every Debian release including sid. Tracking worthless-3g4u."
+    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 on arm64 (main b49a2007) and amd64 (ghcr 0.3.17 @ 3dc5d05d): only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. Source: grype DB (Debian/Red Hat/Ubuntu records); Debian fix=not-fixed in 12/13/14/sid. Tracking worthless-3g4u."
     expiry: "2026-12-15"
   - vulnerability: CVE-2026-84786
     package: {name: libssl3t64, version: "3.5.7-1~deb13u3", type: deb}
-    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 (arm64, main b49a2007): of 758 ELFs only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. fix=not-fixed in every Debian release including sid. Tracking worthless-3g4u."
+    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 on arm64 (main b49a2007) and amd64 (ghcr 0.3.17 @ 3dc5d05d): only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. Source: grype DB (Debian/Red Hat/Ubuntu records); Debian fix=not-fixed in 12/13/14/sid. Tracking worthless-3g4u."
     expiry: "2026-12-15"
   - vulnerability: CVE-2026-84786
     package: {name: openssl-provider-legacy, version: "3.5.7-1~deb13u3", type: deb}
-    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 (arm64, main b49a2007): of 758 ELFs only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. fix=not-fixed in every Debian release including sid. Tracking worthless-3g4u."
+    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 on arm64 (main b49a2007) and amd64 (ghcr 0.3.17 @ 3dc5d05d): only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. Source: grype DB (Debian/Red Hat/Ubuntu records); Debian fix=not-fixed in 12/13/14/sid. Tracking worthless-3g4u."
     expiry: "2026-12-15"
