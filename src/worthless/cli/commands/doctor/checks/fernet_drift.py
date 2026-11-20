@@ -21,11 +21,9 @@ import logging
 import stat
 from typing import Literal
 
-import keyring as _keyring
-
 from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
 from worthless.cli.key_check import KEY_FIX, aliases_key_cannot_open
-from worthless.cli.keystore import _SERVICE, _keyring_username, keyring_available
+from worthless.cli.keystore import _keyring_username, keyring_available
 
 logger = logging.getLogger(__name__)
 check_id = "fernet_drift"
@@ -61,11 +59,13 @@ def _read_keyring(home) -> bytes | None:  # noqa: ANN001 — WorthlessHome
     if not keyring_available():
         return None
     try:
-        value = _keyring.get_password(_SERVICE, _keyring_username(home.base_dir))
+        # Reuses the value the key load already read: a second read can be a
+        # second macOS Keychain prompt in one doctor run (worthless-e4j4).
+        value = home._keyring_fernet()
     except Exception as exc:  # noqa: BLE001 - SR-04
         logger.debug("keyring read failed in fernet_drift: %s", type(exc).__name__)
         return None
-    return value.encode("utf-8") if value is not None else None
+    return bytes(value) if value is not None else None
 
 
 def _sources_differ(ctx: CheckContext, checked: dict[str, tuple[int, list[str]]]) -> CheckResult:

@@ -25,6 +25,13 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - `worthless doctor` checks the key itself and doesn't read what the proxy recorded.
   - `worthless down` still can't see a service that is waiting for a fixed key. Use `worthless service stop`, or fix the key.
 
+- **`worthless doctor` reads your keychain once per run** (worthless-e4j4).
+  Before: `worthless doctor` read the Fernet key from the keychain two times, and `worthless doctor --json` read it two or three times. On macOS, each read can show a Keychain prompt.
+  Now: each run reads the keychain one time. The drift check uses the value that doctor already read.
+
+  **Limits.**
+  - With no key in the keychain (a file-only setup), doctor still looks in the keychain more than one time. On macOS, a lookup that finds no entry shows no prompt.
+
 ## [0.3.17] — 2026-11-18
 
 ### Upgrading from 0.3.16
