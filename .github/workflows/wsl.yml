@@ -47,6 +47,11 @@ on:
   schedule:
     - cron: "17 6 * * 1"  # Mondays; off the hour to avoid the top-of-hour rush
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Released-install leg: version to test (empty = what worthless.sh pins)"
+        required: false
+        default: ""
   pull_request:
     paths:
       - ".github/workflows/wsl.yml"
@@ -76,6 +81,9 @@ jobs:
     name: WSL (${{ matrix.leg }})
     runs-on: windows-latest
     timeout-minutes: 40
+    # The released-install leg tests a SHIPPED release, which a PR cannot fix:
+    # its red is reported, not allowed to fail unrelated PRs.
+    continue-on-error: ${{ matrix.install == 'release' }}
     strategy:
       fail-fast: false
       matrix:
@@ -107,9 +115,9 @@ jobs:
             systemd: "on"
             idle: restart
             install: release
-            # Empty = the version worthless.sh pins today (0.3.16 on 2026-11-20).
-            # Set e.g. "0.3.18" to test a release before worthless.sh serves it.
-            release_version: ""
+            # Empty = the version worthless.sh pins. Set e.g. "0.3.18" (or the
+            # dispatch input) to test a release before worthless.sh serves it.
+            release_version: ${{ inputs.release_version }}
             wslconf: |
               [boot]
               systemd=true
@@ -145,6 +153,12 @@ jobs:
           Set-Content -Path "$env:USERPROFILE\.wslconfig" -Encoding ascii -Value "[general]`ninstanceIdleTimeout=-1"
           Get-Content "$env:USERPROFILE\.wslconfig"
           wsl --shutdown
+
+      - name: "Released install: known shipped gap"
+        if: matrix.install == 'release'
+        shell: pwsh
+        run: |
+          "::warning::KNOWN: releases before 0.3.17 (incl. 0.3.16) lack the worthless-8kn5 fix (PR #734). A service-install/linger red on this leg is that shipped bug, not the PR under test."
 
       - name: Run the lifecycle inside WSL
         shell: wsl-bash {0}

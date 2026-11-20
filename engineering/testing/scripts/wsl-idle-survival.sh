@@ -36,20 +36,27 @@ PLOG="$HOME/wsl-provider.log"
 # exact original key (written by wsl-live-lifecycle.sh), so a 200 it logged as
 # key_matches=True proves the proxy rebuilt the real key. /healthz does not.
 real_request() {
-  local pid mark code
-  touch "$PLOG"
+  local pid mark code base ok=1
+  # Stand alone: a 200 only proves protection if the request went via the proxy.
+  base=$(sed -n 's/^LOCALMOCK_BASE_URL=//p' "$(getent passwd "$USER_NAME" | cut -d: -f6)/proj/.env")
+  case "$base" in
+    "http://127.0.0.1:$PORT/"*) ;;
+    *) echo "real request ($1): LOCALMOCK_BASE_URL '$base' is not the proxy on $PORT"; return 1 ;;
+  esac
   EXPECTED_KEY="$(cat "$HOME/wsl-localmock.key")" python3 "$HERE/fake_provider.py" "$PROVIDER_PORT" >> "$PLOG" 2>&1 &
   pid=$!
   for _ in $(seq 20); do (exec 3<>"/dev/tcp/127.0.0.1/$PROVIDER_PORT") 2>/dev/null && break; sleep 0.5; done
   mark=$(wc -l < "$PLOG")
   # shellcheck disable=SC2016  # expanded by the user's shell, from their .env
-  code=$(runuser -l "$USER_NAME" -c 'set -a; . ~/proj/.env; set +a; curl -s -o /dev/null -w "%{http_code}" \
+  code=$(runuser -l "$USER_NAME" -c 'set -a; . ~/proj/.env; set +a; curl -s --max-time 20 -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer $LOCALMOCK_API_KEY" -H "content-type: application/json" \
     -d "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" \
-    "$LOCALMOCK_BASE_URL/chat/completions"' 2>/dev/null)
+    "$LOCALMOCK_BASE_URL/chat/completions"')
   kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   echo "real request through the proxy ($1): ${code:-none}"
-  [ "$code" = 200 ] && tail -n +"$((mark + 1))" "$PLOG" | grep -q "key_matches=True"
+  [ "$code" = 200 ] && tail -n +"$((mark + 1))" "$PLOG" | grep -q "key_matches=True" && ok=0
+  [ "$ok" = 0 ] || { echo "fake provider log (last 10 lines):"; tail -10 "$PLOG" | sed 's/^/  | /'; }
+  return "$ok"
 }
 
 inv() {

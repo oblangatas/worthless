@@ -60,13 +60,16 @@ HOME_DIR=$(getent passwd "$USER_NAME" | cut -d: -f6)
 if [ "$INSTALL_FROM" = release ]; then
   # WOR-854: what a user gets is the installer https://worthless.sh serves today
   # and the release IT pins — not this checkout's install.sh, which on main can
-  # pin a version not yet on PyPI (0.3.17 vs a served 0.3.16, 2026-11-20).
+  # pin a version not yet on PyPI.
   curl -fsSL https://worthless.sh -o /tmp/worthless-install.sh || { echo "  FAIL  could not download https://worthless.sh"; exit 1; }
-  chmod 0644 /tmp/worthless-install.sh
-  # RELEASE_VERSION (matrix `release_version`) tests a newer release before
-  # worthless.sh pins it; empty = the pin users get. install.sh validates it.
+  # RELEASE_VERSION (matrix `release_version`, or the workflow_dispatch input)
+  # tests a newer release before worthless.sh pins it; empty = the pin users get.
   EXPECT="${RELEASE_VERSION:-$(sed -n 's/^WORTHLESS_VERSION_PIN="\(.*\)"$/\1/p' /tmp/worthless-install.sh)}"
+  # It goes into a shell string below, and a dispatch input is typed by a person.
+  [[ "$EXPECT" =~ ^[0-9][0-9A-Za-z.+-]*$ ]] || { echo "  FAIL  not a version: '$EXPECT'"; exit 1; }
   runuser -l "$USER_NAME" -c "WORTHLESS_VERSION='$EXPECT' sh /tmp/worthless-install.sh" 2>&1 | tail -5
+  INSTALL_RC=${PIPESTATUS[0]}  # `| tail` would otherwise hide a failed install
+  [ "$INSTALL_RC" -eq 0 ] || { echo "  FAIL  install.sh exited $INSTALL_RC"; exit 1; }
   BIN="$HOME_DIR/.local/bin/worthless"
 else
   SRC=/tmp/worthless-src
