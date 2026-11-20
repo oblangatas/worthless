@@ -139,7 +139,7 @@ class TestFernetKeyPropertyUsesKeystore:
             return_value=bytearray(b"test-key-value-padded-to-44-bytes-12345678901"),
         ) as mock_read:
             _ = home.fernet_key
-            mock_read.assert_called_once_with(home.base_dir)
+            mock_read.assert_called_once_with(home.base_dir, keyring_reader=home._keyring_fernet)
 
     def test_returns_bytearray(self, tmp_path: Path):
         """fernet_key property returns bytearray per SR-01."""
@@ -190,13 +190,13 @@ class TestFernetKeyMemoization:
         """
         home = WorthlessHome(base_dir=tmp_path / ".worthless")
 
-        # ``side_effect=lambda *_: bytearray(...)`` returns a NEW bytearray on
+        # ``side_effect=lambda *_, **__: bytearray(...)`` returns a NEW bytearray on
         # every underlying call so the cache cannot inadvertently alias a
         # test-owned reference; ``call_count`` becomes the only honest proof
         # of memoization (CodeRabbit nit #2 on PR #125).
         with patch(
             "worthless.cli.bootstrap.read_fernet_key",
-            side_effect=lambda *_: bytearray(b"memoized-key-padded-to-44-bytes-12345678901"),
+            side_effect=lambda *_, **__: bytearray(b"memoized-key-padded-to-44-bytes-12345678901"),
         ) as mock_read:
             for _ in range(5):
                 _ = home.fernet_key
@@ -219,7 +219,7 @@ class TestFernetKeyMemoization:
         # test_property_memoizes_first_read — see CodeRabbit nit #2 on PR #125.
         with patch(
             "worthless.cli.bootstrap.read_fernet_key",
-            side_effect=lambda *_: bytearray(b"shared-fake-key-padded-to-44-bytes-1234567"),
+            side_effect=lambda *_, **__: bytearray(b"shared-fake-key-padded-to-44-bytes-1234567"),
         ) as mock_read:
             _ = home_a.fernet_key
             _ = home_a.fernet_key
@@ -249,7 +249,7 @@ class TestFernetKeyMemoization:
         # bytearray (not a reference the test holds onto).
         with patch(
             "worthless.cli.bootstrap.read_fernet_key",
-            side_effect=lambda *_: bytearray(clean_key),
+            side_effect=lambda *_, **__: bytearray(clean_key),
         ):
             first = home.fernet_key
             # Caller zeros their copy — simulates SR-01 ``zero_buf()`` after use.
@@ -295,7 +295,7 @@ class TestFernetKeyMemoization:
         # checks cannot false-pass.
         with patch(
             "worthless.cli.bootstrap.read_fernet_key",
-            side_effect=lambda *_: bytearray(b"sr01-check-padded-to-44-bytes-1234567890123"),
+            side_effect=lambda *_, **__: bytearray(b"sr01-check-padded-to-44-bytes-1234567890123"),
         ) as mock_read:
             first = home.fernet_key
             second = home.fernet_key
@@ -347,7 +347,7 @@ class TestFernetKeyMemoization:
 
         with patch(
             "worthless.cli.bootstrap.read_fernet_key",
-            side_effect=lambda *_: bytearray(b"thread-safe-padded-to-44-bytes-12345678901a"),
+            side_effect=lambda *_, **__: bytearray(b"thread-safe-padded-to-44-bytes-12345678901a"),
         ) as mock_read:
             with ThreadPoolExecutor(max_workers=4) as ex:
                 results = list(ex.map(access_fernet_key, range(4)))
@@ -477,7 +477,7 @@ class TestObservabilityAndCascadePaths:
         home = WorthlessHome(base_dir=tmp_path / ".worthless")
         with patch(
             "worthless.cli.bootstrap.read_fernet_key",
-            side_effect=lambda *_: bytearray(b"log-test-padded-to-44-bytes-1234567890123"),
+            side_effect=lambda *_, **__: bytearray(b"log-test-padded-to-44-bytes-1234567890123"),
         ):
             _ = home.fernet_key  # cache MISS
             _ = home.fernet_key  # cache HIT (warm path)

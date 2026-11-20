@@ -247,7 +247,9 @@ def _doctor_run_json(*, fix: bool, dry_run: bool) -> None:
         typer.echo(json.dumps(_aggregate([_broken_install_result()])))
         return
     try:
-        fernet_key = bytearray(read_fernet_key(home.base_dir))  # SR-01: mutable for zeroing
+        # SR-01: mutable for zeroing. The home's reader lets fernet_drift reuse
+        # this keychain read instead of making its own (worthless-e4j4).
+        fernet_key = bytearray(read_fernet_key(home.base_dir, keyring_reader=home._keyring_fernet))
     except WorthlessError as exc:
         if _emit_if_refused(exc):
             return

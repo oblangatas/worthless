@@ -211,7 +211,7 @@ class TestPreflightFernetSync:
         with (
             patch("worthless.cli.commands.service._common.sync_fernet_for_launchd") as mock_sync,
             patch.object(fernet_drift, "keyring_available", return_value=True),
-            patch("worthless.cli.commands.doctor.checks.fernet_drift._keyring") as mock_kr,
+            patch("worthless.cli.keystore.keyring") as mock_kr,
         ):
             mock_kr.get_password.return_value = _canonical_key().decode()
             with pytest.raises(WorthlessError) as exc_info:
@@ -343,7 +343,7 @@ class TestFernetSyncAdversarial:
 
         with (
             patch.object(fernet_drift, "keyring_available", return_value=True),
-            patch("worthless.cli.commands.doctor.checks.fernet_drift._keyring") as mock_kr,
+            patch("worthless.cli.keystore.keyring") as mock_kr,
         ):
             mock_kr.get_password.return_value = canonical.decode()
             with pytest.raises(WorthlessError) as exc_info:

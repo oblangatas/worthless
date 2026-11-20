@@ -49,7 +49,7 @@ def test_fixable_false_even_with_fix_flag(ctx, fake_home) -> None:
 
     with (
         patch.object(fernet_drift, "keyring_available", return_value=True),
-        patch("worthless.cli.commands.doctor.checks.fernet_drift._keyring") as kr,
+        patch("worthless.cli.keystore.keyring") as kr,
     ):
         kr.get_password.return_value = "KEYRING_VALUE_DIFFERS" + "=" * 23
         ctx.fix = True
@@ -67,7 +67,7 @@ def test_no_drift_when_only_keyring_present(ctx, fake_home) -> None:
 
     with (
         patch.object(fernet_drift, "keyring_available", return_value=True),
-        patch("worthless.cli.commands.doctor.checks.fernet_drift._keyring") as kr,
+        patch("worthless.cli.keystore.keyring") as kr,
     ):
         kr.get_password.return_value = "SOME_VALUE" + "=" * 33
         result = fernet_drift.run(ctx)
@@ -82,7 +82,7 @@ def test_drift_detected_when_values_differ(ctx, fake_home) -> None:
 
     with (
         patch.object(fernet_drift, "keyring_available", return_value=True),
-        patch("worthless.cli.commands.doctor.checks.fernet_drift._keyring") as kr,
+        patch("worthless.cli.keystore.keyring") as kr,
     ):
         kr.get_password.return_value = "BBB" + "=" * 41
         result = fernet_drift.run(ctx)
@@ -99,7 +99,7 @@ def test_no_drift_when_values_match(ctx, fake_home) -> None:
 
     with (
         patch.object(fernet_drift, "keyring_available", return_value=True),
-        patch("worthless.cli.commands.doctor.checks.fernet_drift._keyring") as kr,
+        patch("worthless.cli.keystore.keyring") as kr,
     ):
         kr.get_password.return_value = same.decode("utf-8")
         result = fernet_drift.run(ctx)
@@ -152,7 +152,7 @@ def test_drift_says_which_source_opens_your_keys(ctx, fake_home) -> None:
     _seal(fake_home, _file_key(fake_home), "work")
     with (
         patch.object(fernet_drift, "keyring_available", return_value=True),
-        patch("worthless.cli.commands.doctor.checks.fernet_drift._keyring") as kr,
+        patch("worthless.cli.keystore.keyring") as kr,
     ):
         kr.get_password.return_value = OTHER.decode()
         result = fernet_drift.run(ctx)
