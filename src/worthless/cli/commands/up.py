@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import signal
@@ -76,6 +77,8 @@ from worthless.sidecar.health import (
     list_sidecar_sockets,
     probe_socket,
 )
+
+logger = logging.getLogger(__name__)
 
 # A refused service that sees fernet.key fixed (or gone) exits with this so
 # launchd/systemd restart it on the new key. Non-zero: systemd's
@@ -541,13 +544,25 @@ def start_supervised_proxy(
 
 
 def _stop_child(proc: subprocess.Popen) -> None:
-    """SIGTERM the ``up`` we started (it tears down its sidecar + proxy), then kill."""
+    """SIGTERM the ``up`` we started (it tears down its sidecar + proxy), then kill.
+
+    The kill takes its whole process group — it runs in its own session — so a
+    sidecar or proxy it had already spawned can't outlive it.
+    """
     proc.terminate()
     try:
         proc.wait(timeout=10)
+        return
     except subprocess.TimeoutExpired:
-        proc.kill()
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
         proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        logger.warning("Proxy process %s did not exit after SIGKILL", proc.pid)
 
 
 def _last_error_line(log_file: Path, start: int) -> str:

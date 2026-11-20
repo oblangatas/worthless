@@ -182,6 +182,7 @@ def _status_verdict(
     *,
     survives_restart: bool = False,
     key_file_refused: str | None = None,
+    key_check_error: str | None = None,
 ) -> tuple[str, str | None]:
     """WOR-779: derive the worst-component verdict. Returns ``(enum, header)``.
 
@@ -247,19 +248,9 @@ def _status_verdict(
             f"(a lock was cut off) — run `{UNLOCKED_FIX_PHRASE}` there."
         )
 
-    # worthless-n2bj: not an outage `worthless up` fixes — every request
-    # fails until the key is fixed, so red, and named. A refused key FILE
-    # (symlink, mode, owner) carries its own fix, not fernet_drift's.
-    if key_file_refused:
-        return "key_refused", (
-            f"🔴 Not working — the proxy won't read fernet.key: {key_file_refused}"
-        )
-    unreadable = sorted(k["alias"] for k in keys if k["status"] == "UNREADABLE")
-    if unreadable:
-        return "key_refused", (
-            f"🔴 Not working — the proxy's key can't unlock {', '.join(unreadable)}, "
-            f"so requests for them fail. {KEY_FIX}"
-        )
+    refused = _proxy_key_verdict(keys, key_file_refused)
+    if refused:
+        return refused
 
     broken = sum(1 for k in keys if k["status"] == "BROKEN")
     if broken:
@@ -268,6 +259,10 @@ def _status_verdict(
             f"🟡 Attention — {broken} {b_noun} can't be restored "
             f"(the .env line is gone) — see below."
         )
+
+    # An unreadable notes file must never read as "every key unlocks".
+    if key_check_error:
+        return "key_check_unknown", f"🟡 Can't tell if you're protected — {key_check_error}"
 
     if proxy_healthy and not proxy_identified:
         return "proxy_unrecognised", (
@@ -288,6 +283,29 @@ def _status_verdict(
     )
 
 
+def _proxy_key_verdict(
+    keys: list[dict[str, str]], key_file_refused: str | None
+) -> tuple[str, str] | None:
+    """worthless-n2bj: 🔴 when the proxy can't use its key, else None.
+
+    Not an outage `worthless up` fixes — every request fails until the key is
+    fixed, so red, and named. A refused key FILE (symlink, mode, owner,
+    corrupted) carries its own fix, not fernet_drift's.
+    """
+    if key_file_refused:
+        return (
+            "key_refused",
+            f"🔴 Not working — the proxy won't read fernet.key: {key_file_refused}",
+        )
+    unreadable = sorted(k["alias"] for k in keys if k["status"] == "UNREADABLE")
+    if unreadable:
+        return "key_refused", (
+            f"🔴 Not working — the proxy's key can't unlock {', '.join(unreadable)}, "
+            f"so requests for them fail. {KEY_FIX}"
+        )
+    return None
+
+
 def _proxy_key_hints(home: WorthlessHome | None) -> tuple[str | None, str | None]:
     """(why the proxy refused fernet.key, why status couldn't read the proxy's notes).
 
@@ -301,7 +319,7 @@ def _proxy_key_hints(home: WorthlessHome | None) -> tuple[str | None, str | None
         return read_key_file_refused(home), None
     except OSError as exc:
         return None, (
-            f"Couldn't read the proxy's notes in {unopenable_path(home).parent} "
+            f"couldn't read the proxy's notes in {unopenable_path(home).parent} "
             f"({exc.strerror or exc}), so status can't tell whether the proxy's key "
             f"unlocks your keys. Run `worthless doctor`."
         )
@@ -381,6 +399,7 @@ def register_status_commands(app: typer.Typer) -> None:
             identified,
             survives_restart=survives,
             key_file_refused=key_file_refused,
+            key_check_error=key_check_error,
         )
 
         # Output. Sub-command --json mirrors scan/wrap; honors top-level --json too.
@@ -400,8 +419,6 @@ def register_status_commands(app: typer.Typer) -> None:
             # WOR-779: lead with the glanceable verdict, then the detail.
             if header:
                 sys.stderr.write(header + "\n\n")
-            if key_check_error:
-                sys.stderr.write(f"[WARN] {key_check_error}\n\n")
 
             if not keys:
                 # Keep the "No keys enrolled" signal AND nudge to lock
@@ -477,4 +494,5 @@ def register_status_commands(app: typer.Typer) -> None:
         # Trust-fix exit: at_risk (degraded sentinel, or an EXPOSED key) = non-zero exit so callers
         # (CI scripts, shell pipelines, agents polling status) get the
         # signal even if they ignored the original lock exit code.
-        raise typer.Exit(code=73 if degraded or verdict in ("at_risk", "key_refused") else 0)
+        act = ("at_risk", "key_refused", "key_check_unknown")
+        raise typer.Exit(code=73 if degraded or verdict in act else 0)

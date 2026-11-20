@@ -7,6 +7,8 @@ One answer for ``up``, ``lock`` and ``doctor``. Checks each shard's HMAC
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import os
 from pathlib import Path
@@ -23,16 +25,35 @@ logger = logging.getLogger(__name__)
 KEY_FIX = "Run `worthless doctor --explain fernet_drift` to find the right key."
 
 
-_B64URL = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 MALFORMED_KEY = (
-    "fernet.key isn't a valid key (44 characters of URL-safe base64) — it may be "
-    f"corrupted. Restore it from a backup. {KEY_FIX}"
+    "fernet.key isn't a valid key (it doesn't decode to a 32-byte Fernet key) — it "
+    f"may be corrupted. Restore it from a backup. {KEY_FIX}"
 )
 
 
 def key_is_well_formed(key: bytes | bytearray) -> bool:
-    """A Fernet key's shape, checked in place (no copy of the key is made)."""
-    return len(key) == 44 and key[43] == ord("=") and all(key[i] in _B64URL for i in range(43))
+    """Exactly what ``Fernet(key)`` accepts, and readable as text.
+
+    Fernet runs ``urlsafe_b64decode`` (which skips whitespace and takes both
+    base64 alphabets) and wants 32 bytes; a stricter shape check refused keys
+    that work today, such as one with a trailing CR from a systemd value. Text:
+    ``build_proxy_env`` passes the key on decoded, so raw garbage crashed there.
+    """
+    try:
+        decoded = bytearray(base64.urlsafe_b64decode(key))
+    except (binascii.Error, ValueError):
+        return False
+    fits = len(decoded) == 32
+    zero_buf(decoded)
+    if not fits:
+        return False
+    if key.isascii():  # no copy on the common path
+        return True
+    try:
+        key.decode("utf-8")  # rare path; build_proxy_env makes the same str
+    except UnicodeDecodeError:
+        return False
+    return True
 
 
 def unopenable_path(home: WorthlessHome) -> Path:

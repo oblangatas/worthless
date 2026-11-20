@@ -15,6 +15,7 @@ sealed with real Fernet keys, so "stale" and "mixed" are genuine, not mocked.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import sqlite3
 from pathlib import Path
@@ -157,6 +158,49 @@ class TestWhatUpDoes:
             key_check.read_unopenable(home)
         _refused, warning = status_mod._proxy_key_hints(home)
         assert warning and "can't tell whether the proxy's key unlocks" in warning
+        keys = [{"alias": "work", "provider": "openai", "status": "PROTECTED"}]
+        verdict, header = status_mod._status_verdict(
+            keys, True, False, True, survives_restart=True, key_check_error=warning
+        )
+        assert verdict == "key_check_unknown", "never green when status couldn't check"
+        assert header is not None and "🟢" not in header and "Can't tell" in header
+
+
+# A key that encodes 0xfb/0xff bytes uses both '+' and '/' in standard base64.
+_STD_ALPHABET_KEY = base64.b64encode(bytes([0xFB, 0xFF, 0xBF] * 10 + [0xFB, 0xFF]))
+
+
+class TestWhatAKeyMustLookLike:
+    """Round-2 review B1: accept exactly what Fernet accepts, or upgrades lock people out."""
+
+    @pytest.mark.parametrize(
+        "key",
+        [K1, K1 + b"\n", K1 + b"\r\n", K1 + b"  ", _STD_ALPHABET_KEY],
+        ids=["plain", "trailing-LF", "trailing-CRLF", "trailing-spaces", "standard-base64"],
+    )
+    def test_keys_fernet_accepts_today_are_accepted(self, key: bytes) -> None:
+        if key is _STD_ALPHABET_KEY:
+            assert b"+" in key and b"/" in key
+        Fernet(key)  # the ground truth: these work today
+        assert key_check.key_is_well_formed(bytearray(key))
+
+    @pytest.mark.parametrize(
+        "key",
+        [b"\x00\xffnot-a-fernet-key\n", b"", base64.urlsafe_b64encode(b"k" * 16), b"\xff" + K1],
+        ids=["garbage", "empty", "16-byte", "not-text"],
+    )
+    def test_garbage_is_refused(self, key: bytes) -> None:
+        assert not key_check.key_is_well_formed(bytearray(key))
+
+    def test_an_env_key_with_a_trailing_cr_starts_instead_of_waiting(
+        self, home: WorthlessHome, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A systemd Environment= value can carry a CR; it worked before this PR."""
+        monkeypatch.setenv("WORTHLESS_FERNET_KEY", K1.decode() + "\r\n")
+        with patch.object(up_mod, "is_service_managed", return_value=True):
+            key = up_mod._read_key_or_wait(home, MagicMock())
+        assert key is not None
+        assert key_check.read_key_file_refused(home) is None
 
 
 def _symlink_key(home: WorthlessHome) -> None:

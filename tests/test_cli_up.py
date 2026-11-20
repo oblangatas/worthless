@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import collections
 import os
+import signal
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -12,7 +14,7 @@ from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
-from worthless.cli.commands.up import _resolve_port
+from worthless.cli.commands.up import _resolve_port, _stop_child
 from worthless.cli.errors import WorthlessError
 from worthless.cli.process import (
     check_pid,
@@ -538,6 +540,14 @@ class TestStartSupervisedProxy:
         child.terminate.assert_called_once()
         child.wait.assert_called()
         assert "proxy.log" in str(exc.value) and "worthless up" in str(exc.value)
+
+    def test_a_child_that_ignores_sigterm_loses_its_whole_group(self) -> None:
+        """Review B2/B3: kill the session (sidecar + proxy too); a hung wait never raises."""
+        child = MagicMock(pid=4321)
+        child.wait.side_effect = subprocess.TimeoutExpired("up", 10)
+        with patch("worthless.cli.commands.up.os.killpg") as killpg:
+            _stop_child(child)  # must not raise
+        killpg.assert_called_once_with(4321, signal.SIGKILL)
 
     def test_spawn_failure_exits(self, home_with_key: WorthlessHome, tmp_path: Path) -> None:
         import typer
