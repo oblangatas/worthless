@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from tests.user_flows import render_traces
@@ -131,3 +132,16 @@ def test_install_lifecycle_trace_documents_current_install_contract(
     )
     assert "uv tool uninstall worthless" in report
     assert "worthless uninstall" not in report
+
+    # worthless-t8ak. macOS assesses every NEW executable on its first run
+    # (~0.25 s each, through one shared daemon, so far worse under load); a
+    # symlink to an already-run file costs ~5 ms. Eight cases writing fresh
+    # copies of the same stubs made this test ~8 s alone and >30 s at load ~10,
+    # where the global timeout killed its xdist worker. Identical stubs must be
+    # one file. `worthless` stubs are exempt (see render_traces.run_install).
+    copies: dict[bytes, set[Path]] = {}
+    for stub in (tmp_path / "install-lifecycle").rglob("*"):
+        if stub.name != "worthless" and stub.is_file() and os.access(stub, os.X_OK):
+            copies.setdefault(stub.read_bytes(), set()).add(stub.resolve())
+    duplicated = {next(iter(p)).name: len(p) for p in copies.values() if len(p) > 1}
+    assert not duplicated, f"identical stubs written as separate new files: {duplicated}"

@@ -4,6 +4,17 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- **Ctrl-C during the service offer's first check no longer makes a finished `worthless lock` exit 130** (worthless-5oug).
+  Before: after `lock` protected your keys, it checks whether a background service is already installed before it asks you anything. Ctrl-C during that check stopped `lock` with exit code 130, so a script saw a failure although the keys were already protected.
+  Now: `lock` skips the offer and exits 0. Ctrl-C during the install itself was already handled this way.
+- **A Kubernetes pod or a Codespace is not asked to start the proxy at login** (worthless-g5rw).
+  Before: `lock` skipped the question only when Docker's or Podman's marker file was present. Pods and some Codespaces images have neither file, so they were asked, and the install could only fail.
+  Now: `lock` also skips the question when `KUBERNETES_SERVICE_HOST` or `CODESPACES` is set, and shows the same container hint (`worthless up`).
+
+  **Limits.**
+  - LXC, systemd-nspawn and other containers that set neither variable nor marker file are still asked.
+
 ## [0.3.17] — 2026-11-18
 
 ### Upgrading from 0.3.16
