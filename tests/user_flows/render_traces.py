@@ -26,10 +26,39 @@ if str(REPO_ROOT) not in sys.path:
 
 from tests._install_helpers import (  # noqa: E402
     read_install_pin,
-    run_install,
+    run_install as _run_install,
     write_happy_path_stubs,
     write_stub,
 )
+
+
+def run_install(bin_dir: Path, **kwargs) -> subprocess.CompletedProcess[str]:
+    """Run install.sh after pointing identical stubs at one shared file.
+
+    macOS assesses every new executable on its first run (~0.25 s, through one
+    shared daemon, so much worse under load); a symlink to a file that already
+    ran is ~5 ms. Without this, eight cases of fresh `uname`/`sw_vers`/`uv`
+    copies made the install trace ~8 s, and >30 s on a busy machine
+    (worthless-t8ak). `worthless` stubs stay real files: install.sh compares
+    them with `-ef`, so two same-content copies sharing one file would read as
+    a healthy install. No current case writes such a pair; this keeps a future
+    one from silently losing its shadow warning.
+    """
+    case_root = bin_dir.parent
+    shared_dir = case_root.parent / ".shared-stubs"
+    shared_dir.mkdir(exist_ok=True)
+    for stub in case_root.rglob("*"):
+        if stub.name == "worthless" or stub.is_symlink() or not stub.is_file():
+            continue
+        if not os.access(stub, os.X_OK):
+            continue
+        shared = shared_dir / hashlib.sha256(stub.read_bytes()).hexdigest()
+        if shared.exists():
+            stub.unlink()
+        else:
+            stub.rename(shared)
+        stub.symlink_to(shared)
+    return _run_install(bin_dir, **kwargs)
 
 
 TRACE_ROOT = Path(tempfile.gettempdir()) / "worthless-terminal-traces"

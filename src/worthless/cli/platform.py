@@ -39,7 +39,11 @@ def _read_kernel_osrelease() -> str:
 
 
 def _in_container() -> bool:
-    """Docker / Podman marker files. Separate so tests can inject."""
+    """Docker / Podman marker files, plus the variables Kubernetes and
+    Codespaces set, since pods and some Codespaces images have neither file
+    (worthless-g5rw). Separate so tests can inject."""
+    if os.environ.get("KUBERNETES_SERVICE_HOST") or os.environ.get("CODESPACES"):
+        return True
     return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
 
 

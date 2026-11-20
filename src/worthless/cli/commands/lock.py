@@ -3585,9 +3585,10 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int, ask: b
     try:
         if _backend().detect_status(home, port).state is not ServiceState.NOT_INSTALLED:
             return False
-    except (WorthlessError, subprocess.CalledProcessError, OSError):
+    except (WorthlessError, subprocess.CalledProcessError, OSError, KeyboardInterrupt):
         # Cannot tell. Saying nothing beats crashing a lock that worked, and
-        # beats installing over something we failed to inspect.
+        # beats installing over something we failed to inspect. Ctrl-C here
+        # used to exit 130 on a committed lock (worthless-5oug).
         return False
 
     # WOR-859 ruling: only a typed "y" installs. --yes means "don't stop to
