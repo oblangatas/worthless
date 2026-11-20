@@ -915,11 +915,14 @@ ignore:
   # unusual mix of server certificate and TLSA records. Grype reports High from
   # a mechanical CVSS score (7.5, availability only; EPSS 0.09%).
   #
-  # SOURCE. The only source checked is grype's own database (schema v6.1.10,
-  # built 2026-11-20 06:21 UTC, `grype db search --vuln CVE-2026-84786`). From
-  # the measuring machine I could not open the web pages it cites, and I found
-  # no OpenSSL advisory or fix commit. Four separate providers in that
-  # database record the CVE:
+  # SOURCE. Upstream fix: https://github.com/openssl/openssl/pull/33634. Its
+  # author rates the flaw Low: the client must enable both PKIX-TA/EE and
+  # DANE-TA(2) SPKI(1) Full(0) TLSA usages, and the server's self-signed EE
+  # cert must already sit in the client's trust store. Read 2026-11-20
+  # (`gh pr view 33634 --repo openssl/openssl`): state OPEN, not merged,
+  # labelled for branches 3.5, 4.0, 4.1 and master. So 3.5.10 on 2026-12-01
+  # may not carry it. Grype's database (schema v6.1.10, built 2026-11-20
+  # 06:21 UTC, `grype db search --vuln CVE-2026-84786`) has four providers:
   #   Debian  https://security-tracker.debian.org/tracker/CVE-2026-84786
   #           openssl fix=not-fixed in debian 12, 13, 14 and unstable. The
   #           record names no Debian bug.
@@ -957,8 +960,8 @@ ignore:
   #
   # NOT COVERED: the cryptography 50.0.2 wheel bundles its own static OpenSSL
   # 4.0.3 (the OpenSSL version, not cryptography's), and its _rust.abi3.so does
-  # contain SSL_dane_* code. Grype does not flag it. I did not check whether
-  # OpenSSL 4.0.3 is affected (follow-up on worthless-3g4u). It is unreachable
+  # contain SSL_dane_* code. Grype does not flag it. Treat 4.0.3 as affected:
+  # the upstream fix above is labelled for the 4.0 branch. It is unreachable
   # today: cryptography's Python API has no TLS client, and Worthless imports
   # only Fernet, hashes and HKDF. ALSO NOT COVERED: a `docker exec` user who
   # runs `openssl s_client -dane_tlsa_rrdata ...` by hand. They already have a
