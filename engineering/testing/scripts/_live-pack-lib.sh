@@ -6,6 +6,8 @@
 #   WORTHLESS_BIN=<path>  — test THIS binary instead of whatever PATH resolves
 #                           (worthless-d4h2). Point it at an installed wheel to
 #                           exercise the artifact users actually get.
+#   WORTHLESS_EXPECT_VERSION=<x.y.z> — stop before any check if the binary
+#                           under test reports a different version (WOR-854).
 
 _live_pack_lib_loaded=1
 
@@ -56,8 +58,17 @@ lp_use_binary() {
     echo "resolved '$resolved' is not WORTHLESS_BIN '$WORTHLESS_BIN'" >&2
     exit 1
   fi
+  local version
+  version="$(worthless --version 2>&1 | tail -1)"
   echo "  binary under test: ${WORTHLESS_BIN:-$resolved}"
-  echo "  version:           $(worthless --version 2>&1 | tail -1)"
+  echo "  version:           $version"
+  # WOR-854: a path proves WHICH file ran, not WHICH release. An exact match on
+  # the version word (0.3.1 must not pass for 0.3.17) stops a run that would
+  # otherwise report a green result about some other build.
+  if [[ -n "${WORTHLESS_EXPECT_VERSION:-}" && "$(awk '{print $2}' <<<"$version")" != "$WORTHLESS_EXPECT_VERSION" ]]; then
+    echo "binary under test is '$version', not the intended $WORTHLESS_EXPECT_VERSION" >&2
+    exit 1
+  fi
 }
 
 lp_banner() {

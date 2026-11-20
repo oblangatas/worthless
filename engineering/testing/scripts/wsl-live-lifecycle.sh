@@ -16,9 +16,14 @@ set -uo pipefail
 
 REPO="${REPO:-$(pwd)}"
 SYSTEMD_EXPECTED="${SYSTEMD_EXPECTED:?set SYSTEMD_EXPECTED=on|off|default}"
+# checkout = this branch's code; release = what `curl worthless.sh | sh` installs.
+INSTALL_FROM="${INSTALL_FROM:-checkout}"
 USER_NAME=worthless-wsl
 PORT=8787
+PROVIDER_PORT=9999  # fake_provider.py, for the restart leg's real request
 FAILURES=0
+# shellcheck source=engineering/testing/scripts/_live-pack-lib.sh
+source "$(dirname "$0")/_live-pack-lib.sh"
 
 say()  { printf '\n=== %s ===\n' "$1"; }
 fact() { printf '  %-28s %s\n' "$1" "$2"; }
@@ -49,18 +54,40 @@ else
   check "systemd is NOT PID 1" '[ "$PID1" != "systemd" ]'
 fi
 
-say "3. install worthless as a normal user"
+say "3. install worthless as a normal user (from: $INSTALL_FROM)"
 id -u "$USER_NAME" >/dev/null 2>&1 || useradd -m -s /bin/bash "$USER_NAME"
 HOME_DIR=$(getent passwd "$USER_NAME" | cut -d: -f6)
-SRC=/tmp/worthless-src
-rm -rf "$SRC"; mkdir -p "$SRC"
-cp -R "$REPO/pyproject.toml" "$REPO/src" "$REPO/README.md" "$SRC"/
-rm -rf "$SRC"/src/*.egg-info
-chown -R "$USER_NAME:$USER_NAME" "$SRC"
-runuser -l "$USER_NAME" -c "python3 -m venv ~/venv && ~/venv/bin/pip install -q --no-input $SRC" 2>&1 | tail -3
+if [ "$INSTALL_FROM" = release ]; then
+  # WOR-854: what a user gets is the installer https://worthless.sh serves today
+  # and the release IT pins — not this checkout's install.sh, which on main can
+  # pin a version not yet on PyPI (0.3.17 vs a served 0.3.16, 2026-11-20).
+  curl -fsSL https://worthless.sh -o /tmp/worthless-install.sh || { echo "  FAIL  could not download https://worthless.sh"; exit 1; }
+  chmod 0644 /tmp/worthless-install.sh
+  # RELEASE_VERSION (matrix `release_version`) tests a newer release before
+  # worthless.sh pins it; empty = the pin users get. install.sh validates it.
+  EXPECT="${RELEASE_VERSION:-$(sed -n 's/^WORTHLESS_VERSION_PIN="\(.*\)"$/\1/p' /tmp/worthless-install.sh)}"
+  runuser -l "$USER_NAME" -c "WORTHLESS_VERSION='$EXPECT' sh /tmp/worthless-install.sh" 2>&1 | tail -5
+  BIN="$HOME_DIR/.local/bin/worthless"
+else
+  SRC=/tmp/worthless-src
+  rm -rf "$SRC"; mkdir -p "$SRC"
+  cp -R "$REPO/pyproject.toml" "$REPO/src" "$REPO/README.md" "$SRC"/
+  rm -rf "$SRC"/src/*.egg-info
+  chown -R "$USER_NAME:$USER_NAME" "$SRC"
+  runuser -l "$USER_NAME" -c "python3 -m venv ~/venv && ~/venv/bin/pip install -q --no-input $SRC" 2>&1 | tail -3
+  EXPECT=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$REPO/pyproject.toml" | head -1)
+  BIN="$HOME_DIR/venv/bin/worthless"
+fi
+# Before any worthless check: name the binary and its version, and stop if it is
+# not the build this run means to test (lp_use_binary exits on a mismatch). An
+# empty EXPECT would skip that comparison, so it is a failure, not a default.
+[ -n "$EXPECT" ] || { echo "  FAIL  could not tell which version this run should test"; exit 1; }
+# Root runs the user's binary here; leave no root-owned bytecode in their install.
+PYTHONDONTWRITEBYTECODE=1 WORTHLESS_BIN="$BIN" WORTHLESS_EXPECT_VERSION="$EXPECT" lp_use_binary
+echo "$BIN" > "$HOME/wsl-worthless-bin"  # the restart leg uninstalls with it
 # A real install puts worthless on PATH; the service installer resolves the
 # binary from PATH, so mirror that rather than calling it by absolute path.
-RUN="export PATH=\$HOME/venv/bin:\$PATH &&"
+RUN="export PATH=$(dirname "$BIN"):\$PATH &&"
 check "worthless installed and runs" "runuser -l $USER_NAME -c '$RUN worthless --version' >/dev/null 2>&1"
 
 say "4. which keyring does WSL actually pick?"
@@ -72,12 +99,19 @@ say "5. lock a .env"
 PROJ="$HOME_DIR/proj"
 runuser -l "$USER_NAME" -c "mkdir -p $PROJ"
 KEY="sk-proj-$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)"
-runuser -l "$USER_NAME" -c "printf 'OPENAI_API_KEY=%s\n' '$KEY' > $PROJ/.env"
+# worthless-vck0: a second, stand-in key routed to fake_provider.py, which says
+# 200 only for this exact key. The restart leg sends a real request with it:
+# /healthz never touches the key, so it cannot show protection still works.
+MOCK_KEY="sk-live-$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)"
+(umask 077; printf '%s' "$MOCK_KEY" > "$HOME/wsl-localmock.key")
+runuser -l "$USER_NAME" -c "mkdir -p ~/.worthless && printf '[provider.localmock]\nurl = \"http://127.0.0.1:$PROVIDER_PORT/v1\"\nprotocol = \"openai\"\n' > ~/.worthless/providers.toml"
+runuser -l "$USER_NAME" -c "printf 'OPENAI_API_KEY=%s\nLOCALMOCK_API_KEY=%s\nLOCALMOCK_BASE_URL=http://127.0.0.1:$PROVIDER_PORT/v1\n' '$KEY' '$MOCK_KEY' > $PROJ/.env"
 runuser -l "$USER_NAME" -c "$RUN cd $PROJ && worthless lock" > /tmp/lock.log 2>&1
 LOCK_RC=$?
 sed 's/^/  | /' /tmp/lock.log | tail -15
 check "lock exits 0" "[ $LOCK_RC -eq 0 ]"
 check "the real key is gone from .env" "! grep -q '$KEY' $PROJ/.env"
+check "the stand-in key is gone from .env" "! grep -q '$MOCK_KEY' $PROJ/.env"
 
 say "5b. an unreadable key is refused, never replaced (worthless-6hu7)"
 # WSL is where modes drift: drvfs/\/mnt\/c mounts, copies from Windows, and

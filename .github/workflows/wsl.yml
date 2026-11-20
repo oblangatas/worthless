@@ -20,8 +20,16 @@ name: WSL
 #   on (restart) the reboot question: stop the distro with `wsl --terminate`,
 #                start it again, and check the proxy came back on its own. This
 #                is not a Windows reboot — a hosted runner cannot reboot — but
-#                it is the same event from the distro's side.
-#   default      no wsl.conf written: records what Ubuntu 24.04 really ships.
+#                it is the same event from the distro's side. Before and after,
+#                a real request must reach fake_provider.py with the rebuilt key
+#                (/healthz never touches the key); then uninstall must leave
+#                nothing (worthless-vck0).
+#   on (restart, released install)  the same restart leg, but worthless comes
+#                from `curl worthless.sh | sh` — the release users get today —
+#                not this checkout (WOR-854). It prints the binary and version
+#                and stops if they are not what worthless.sh pins. It tests the
+#                RELEASE, so a red here can be a shipped bug no PR caused.
+#   default     no wsl.conf written: records what Ubuntu 24.04 really ships.
 #                (Current Ubuntu images ship systemd=true, not off.)
 #
 # NOT a required check, deliberately. WSL install is slow and windows-latest is
@@ -44,6 +52,8 @@ on:
       - ".github/workflows/wsl.yml"
       - "engineering/testing/scripts/wsl-live-lifecycle.sh"
       - "engineering/testing/scripts/wsl-idle-survival.sh"
+      - "engineering/testing/scripts/_live-pack-lib.sh"
+      - "engineering/testing/scripts/fake_provider.py"
       # The code whose WSL behaviour this job exercises.
       - "src/worthless/cli/commands/service/**"
       # worthless-6hu7: key-file mode handling — WSL mounts are where
@@ -93,6 +103,16 @@ jobs:
             wslconf: |
               [boot]
               systemd=true
+          - leg: "systemd on, restart, released install"
+            systemd: "on"
+            idle: restart
+            install: release
+            # Empty = the version worthless.sh pins today (0.3.16 on 2026-11-20).
+            # Set e.g. "0.3.18" to test a release before worthless.sh serves it.
+            release_version: ""
+            wslconf: |
+              [boot]
+              systemd=true
           # No wslconf: setup-wsl only writes /etc/wsl.conf when it is non-empty.
           - leg: "distro default"
             systemd: "default"
@@ -132,7 +152,9 @@ jobs:
           # Passed through env, never interpolated into the script body —
           # interpolating a matrix value into `run:` is a script-injection shape.
           SYSTEMD_EXPECTED: ${{ matrix.systemd }}
-          WSLENV: SYSTEMD_EXPECTED/u
+          INSTALL_FROM: ${{ matrix.install || 'checkout' }}
+          RELEASE_VERSION: ${{ matrix.release_version || '' }}
+          WSLENV: SYSTEMD_EXPECTED/u:INSTALL_FROM/u:RELEASE_VERSION/u
         run: bash engineering/testing/scripts/wsl-live-lifecycle.sh
 
       - name: "Idle 1: record boot_id and service InvocationID"
