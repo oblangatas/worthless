@@ -183,10 +183,11 @@ Walks every `.env` Worthless locked on this machine, reconstructs each real key 
 
 **Options:**
 - `--yes` / `-y`: Skip the permission prompt (for agents / scripts); clamps loose modes to `0o600` by default.
+- `--force`: Last resort. Removes Worthless even when keys can't be restored, destroying them (it names each one). Agents never add `--force` unless the user explicitly asks to destroy those keys.
 
 **Behavior:**
 - Restore-all-then-wipe: if ANY `.env` can't be restored, nothing is wiped (Shard B is kept for a retry)
-- Exception: a key with no link (unlock reports WRTLS-102) is not checked and IS wiped. Never run `uninstall` while unlock reports WRTLS-102
+- Refuses (exit 103, nothing changed) while a key could still be rescued: a key with no link (unlock reports WRTLS-102, the v0.3.7–v0.3.14 doctor bug) or a locked project whose `.env` is missing (moved or deleted). It names each key and the options. Agents: stop and report this to the user; never retry with `--force` or run `revoke` on your own
 - Enroll-only keys (no `.env`) warn and are removed, but never block the uninstall
 - OpenClaw symmetric undo is best-effort and never blocks the wipe
 
@@ -362,13 +363,15 @@ worthless service logs -f
 
 **Interaction with default command:** Bare `worthless` starts a supervised proxy for the session; `worthless service install` is opt-in persistence (post-lock banner in a future release points here).
 
-#### `worthless revoke [OPTIONS] ALIAS`
+#### `worthless revoke --alias ALIAS`
 **Wipe an enrolled key (delete shards and all DB records).**
+
+Permanent: a revoked key can't be recovered. Agents run `revoke` only when the user names the key to destroy.
 
 Deletes Shard B and all associated records (enrollments, spend logs, time windows) from the database in a single atomic transaction. Removes shard-A from `.env` if still present.
 
 **Options:**
-- (None — takes alias as argument)
+- `--alias` / `-a` (required): alias of the key to revoke
 
 **Alias format:**
 - Deterministic: `{provider}-{first8hexofsha256(key)}`
@@ -629,7 +632,7 @@ worthless scan --code             # source files — hardcoded provider URLs (ro
 
 ### Permanently delete a key
 ```bash
-worthless revoke openai-69ccc444
+worthless revoke --alias openai-69ccc444
 ```
 
 ### Restore original key from shards (temporary)

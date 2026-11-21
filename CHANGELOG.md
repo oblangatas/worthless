@@ -5,6 +5,13 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- **`worthless uninstall` and `worthless lock` no longer destroy a key that can still be rescued** (WOR-1135).
+  Before: a key that lost its link (the v0.3.7–v0.3.14 doctor bug, WRTLS-102) was deleted by `worthless uninstall --yes` with exit 0. A key whose project folder you moved or deleted was deleted the same way. `worthless lock` on a `--keys-only` value of such a key split it again, and the original key was lost. `worthless doctor` suggested `worthless uninstall --force` for a project whose `.env` was missing.
+  Now: `uninstall` stops before it changes anything (exit 103). It names each key that can still be rescued and gives the options: keep `~/.worthless` for the re-link release, or `worthless revoke --alias <alias>` to give up one key. `uninstall --force` still removes everything, but it names every key it destroys, also with `--quiet`. `lock` does not split a value that is half of a stored key. `doctor` no longer suggests `--force` for a missing `.env`. Plain `worthless unlock` names the keys that lost their link. If the database is busy, `uninstall` stops and tells you to run `worthless down`.
+
+  **Limits.**
+  - This release does not bring the keys back. Re-linking comes in a later release; search "WRTLS-102" in the Worthless GitHub issues.
+  - `worthless revoke` still deletes a key with no question. Run it only for a key you want to lose.
 - **On Linux, `worthless service uninstall` turns lingering off again if `worthless service install` turned it on** (worthless-fzas).
   Before: `service install` ran `loginctl enable-linger`, so your account's user services kept running after logout and started at boot. `service uninstall` and `worthless uninstall` left lingering on. A failed install also left it on. The banner told you to run `loginctl disable-linger` yourself.
   Now: when `service install` turns lingering on, it records that in `~/.worthless`. `service uninstall`, `worthless uninstall` and a failed first install turn lingering off again. If lingering was already on before the install, it stays on. If the system refuses to turn it off, you see a warning with the command to run.

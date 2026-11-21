@@ -1075,8 +1075,8 @@ def register_unlock_commands(app: typer.Typer) -> None:
                     f"{', '.join(unrecognised)}. Keep these lines: don't delete "
                     f"them, re-lock, or uninstall Worthless. If Worthless's doctor "
                     f"repair ran on this machine (v0.3.7–v0.3.14), the key is "
-                    f"probably still recoverable and an upcoming release re-links "
-                    f'it; search "WRTLS-102" in the Worthless GitHub issues. If '
+                    f"probably still recoverable. Re-linking is being built; search "
+                    f'"WRTLS-102" in the Worthless GitHub issues to follow it. If '
                     f"this .env was copied from another machine, re-lock from the "
                     f"original machine.",
                 )
@@ -1135,6 +1135,20 @@ def register_unlock_commands(app: typer.Typer) -> None:
                     if not aliases:
                         await _raise_unrecognised_shards(repo)
                         console.print_warning("No enrolled keys found.")
+                        # WOR-1135: a doctor-bug victim's first try is plain
+                        # `unlock`; silence there reads as "the key is gone".
+                        linked = {e.key_alias for e in all_enrollments}
+                        unlinked = sorted(set(await repo.list_keys()) - linked)
+                        if unlinked:
+                            console.print_key_note(
+                                f"{len(unlinked)} key(s) on this machine lost the link "
+                                f"to their project (the Worthless doctor bug, "
+                                f"v0.3.7–v0.3.14): {', '.join(unlinked)}. They can "
+                                f"probably still be recovered: keep ~/.worthless and "
+                                f"don't uninstall Worthless. Re-linking is being built; "
+                                f'search "WRTLS-102" in the Worthless GitHub issues to '
+                                f"follow it."
+                            )
                         return False
 
                     planned = await _unlock_batch(

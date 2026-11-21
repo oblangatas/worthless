@@ -28,8 +28,9 @@ check_id = "stranded_shards"
 # No destructive command in here: agents run whatever a remediation names.
 KEPT_REMEDIATION = (
     "This key is probably still recoverable: its link was removed, but both halves "
-    "are still on this machine. Keep this file and don't uninstall Worthless. An "
-    'upcoming release re-links it; search "WRTLS-102" in the Worthless GitHub issues.'
+    "are still on this machine. Keep this file and don't uninstall Worthless. "
+    'Re-linking is being built; search "WRTLS-102" in the Worthless GitHub issues '
+    "to follow it."
 )
 
 

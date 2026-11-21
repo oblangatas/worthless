@@ -255,3 +255,40 @@ def test_force_names_keys_even_when_the_fernet_key_is_unreadable(home_dir, tmp_p
 
     assert result.exit_code == 0, result.output
     assert alias in _flat(result.output), f"--force must name what it destroyed:\n{result.output}"
+
+
+def test_plain_unlock_points_at_a_key_that_lost_its_link(home_dir, tmp_path, monkeypatch) -> None:
+    env = _project(tmp_path, "app", "plain-unlock")
+    _lock(env, home_dir)
+    alias = _unlink_like_the_bug(home_dir, env)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / ".env").write_text("DEBUG=1\n")
+    monkeypatch.chdir(elsewhere)
+
+    result = cli_invoke(["--quiet", "unlock"], home_dir)
+    out = _flat(result.output)
+
+    assert alias in out and "WRTLS-102" in out, result.output
+    assert "--force" not in out and "revoke" not in out, result.output
+    assert _shard_aliases(home_dir) == [alias]
+
+
+def test_a_busy_database_refuses_without_offering_force(home_dir, tmp_path, monkeypatch) -> None:
+    env = _project(tmp_path, "app", "busy-db")
+    _lock(env, home_dir)
+    alias = _unlink_like_the_bug(home_dir, env)
+    real_connect = sqlite3.connect
+
+    def busy(target, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if str(target).endswith("?mode=ro"):
+            raise sqlite3.OperationalError("database is locked")
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr("worthless.cli.commands.uninstall.sqlite3.connect", busy)
+    result = cli_invoke(["uninstall", "--yes"], home_dir)
+    out = _flat(result.output)
+
+    assert result.exit_code == 1 and "WRTLS-105" in out, result.output  # same as the restore path
+    assert "worthless down" in out and "--force" not in out, result.output
+    assert _shard_aliases(home_dir) == [alias]

@@ -3,7 +3,7 @@
 RED-first. ``doctor`` is the operator's escape hatch: when ``uninstall`` refuses
 a broken install (BUG-1) or has to skip an orphaned enrollment (BUG-2), the user
 needs ``doctor`` to (a) name the problem and (b) point at the fix —
-``worthless uninstall --force``.
+``worthless uninstall --force`` (7a), or plain ``worthless uninstall`` for 7b (WOR-1135).
 
 Two diagnoses are required:
 
@@ -168,15 +168,15 @@ def test_doctor_json_reports_orphaned_enrollment(home_dir: WorthlessHome, tmp_pa
     assert "ghost-alias" in flat, f"the orphaned enrollment alias is not surfaced: {doc}"
 
 
-def test_doctor_json_recommends_uninstall_force_for_orphans(
+def test_doctor_json_routes_orphans_to_plain_uninstall_not_force(
     home_dir: WorthlessHome, tmp_path
 ) -> None:
-    """7b (BUG-2): for orphaned enrollments, ``doctor --json`` must offer
-    ``worthless uninstall --force`` as a route to a clean machine — not only the
-    surgical ``doctor --fix`` purge.
-
-    A user who wants Worthless GONE (not just tidied) needs to be told the
-    forced-uninstall path works here too.
+    """7b (BUG-2), revised by WOR-1135 (operator decision 2026-11-15): a
+    missing ``.env`` may be a MOVED project whose key is still rescuable, and
+    ``--force`` would wipe it. Doctor still offers a route to a clean machine,
+    but via plain ``worthless uninstall`` — which now stops, names the key and
+    lists the options. ``--force`` stays a last resort that uninstall itself
+    explains; doctor never suggests it here (agents run what doctor names).
     """
     missing = tmp_path / "deleted-project" / ".env"
     _seed_missing_env_enrollment(home_dir, str(missing))
@@ -185,8 +185,9 @@ def test_doctor_json_recommends_uninstall_force_for_orphans(
     doc = json.loads(result.stdout)
 
     flat = _all_text(doc)
-    assert "uninstall --force" in flat, (
-        f"doctor must recommend `worthless uninstall --force` for orphaned enrollments, got: {doc}"
+    assert "worthless uninstall" in flat, f"doctor must still offer a clean removal: {doc}"
+    assert "uninstall --force" not in flat, (
+        f"doctor must not steer a possibly-moved key into `--force`, got: {doc}"
     )
 
 
