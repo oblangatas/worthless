@@ -41,6 +41,12 @@ DELETED_FIX_PHRASE = (
     "Removed it (`git worktree remove` takes its `.env` with it)? Then that key is "
     "gone, and `worthless revoke --alias {alias}` removes it"
 )
+# WOR-1135: one copy each, so a promise about re-linking can't drift between
+# the commands that print it.
+RESCUE_ISSUE_URL = "https://github.com/oblangatas/worthless/issues/719"
+RELINK_PENDING = (
+    'Re-linking is being built; search "WRTLS-102" in the Worthless GitHub issues to follow it.'
+)
 SHARED_KEY_PHRASE = (
     "Removed it? Leave this record: the same key is also locked at {other}, and "
     "removing the key by its alias would break that copy too"

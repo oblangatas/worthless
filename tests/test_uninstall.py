@@ -559,12 +559,14 @@ def test_uninstall_zeros_keys_when_a_restore_fails(
 # --- f2ge: symlink .env classification (real symlinks, no mocking) ---------
 
 
-def test_uninstall_dangling_symlink_env_is_skipped_not_blocked(
+def test_uninstall_dangling_symlink_env_blocks_unless_forced(
     home_dir: WorthlessHome, tmp_path
 ) -> None:
     """worthless-f2ge: a locked .env replaced by a DANGLING symlink (target
-    deleted) classifies as `missing` — the shard-A file is already gone, so
-    the wipe proceeds. Real symlink; safe_rewrite's real refusal drives it.
+    deleted) classifies as `missing`. WOR-1135: a missing .env may be a moved
+    project still holding shard-A, so uninstall refuses; with --force it is
+    skipped and the wipe proceeds. Real symlink; safe_rewrite's real refusal
+    drives it.
     """
     from tests.helpers import fake_key
 
@@ -575,13 +577,19 @@ def test_uninstall_dangling_symlink_env_is_skipped_not_blocked(
     env.unlink()
     env.symlink_to(tmp_path / "deleted-target")  # dangling: target does not exist
 
-    result = runner.invoke(
+    refused = runner.invoke(
         app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert refused.exit_code == 103, refused.output
+    assert home_dir.base_dir.exists(), "refused, so nothing may be wiped"
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes", "--force"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
     )
     assert result.exit_code == 0, result.output
     # Rich wraps at 80 columns, and where depends on the tmp path's length.
     assert "nothing to restore" in " ".join(result.output.lower().split()), result.output
-    assert not home_dir.base_dir.exists(), "a dangling symlink must NOT block the wipe"
+    assert not home_dir.base_dir.exists(), "--force must still get past a dangling symlink"
 
 
 def test_uninstall_live_symlink_env_blocks_wipe(home_dir: WorthlessHome, tmp_path) -> None:
@@ -1492,9 +1500,11 @@ class TestQuietUninstallStillSaysWhatYouLose:
         missing = tmp_path / "deleted-project" / ".env"
         seed_enrollment(home_dir.db_path, "ghost-alias", "GHOST_KEY", str(missing))
 
-        result = _quiet_uninstall(home_dir)
+        # WOR-1135: a missing .env blocks uninstall; --force is what removes it.
+        result = _quiet_uninstall(home_dir, "--force")
 
         assert result.exit_code == 0, result.output
+        assert "ghost-alias" in result.output, "--force must name the key it destroys"
         assert f"skipping {missing}: the project file is gone" in result.output
         # A project that was moved, not deleted, still has its shard-A elsewhere.
         assert "If you moved the project, rotate its key" in result.output
