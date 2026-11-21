@@ -44,6 +44,16 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   **Limits.**
   - With no key in the keychain (a file-only setup), doctor still looks in the keychain more than one time. On macOS, a lookup that finds no entry shows no prompt.
 
+### Known issues
+- **The Docker image ships 7 OpenSSL flaws that have no fix in Debian yet** ([#793](https://github.com/oblangatas/worthless/pull/793), [#797](https://github.com/oblangatas/worthless/pull/797)).
+  The image uses Debian trixie's OpenSSL 3.5.9-1~deb13u1. CVE-2026-84786, CVE-2026-88823, CVE-2026-95691, CVE-2026-95692, CVE-2026-107493, CVE-2026-107496 and CVE-2026-124709 are not fixed in it. The upstream fix is OpenSSL 3.5.10.
+  The affected code is DANE, CMS/S-MIME, AES-GCM-SIV, QUIC, and one PEM certificate-list reader. Worthless doesn't call any of it. The proxy's TLS to your provider uses Python's `ssl` without DANE or QUIC.
+
+  **Limits.**
+  - The "doesn't call it" check was measured on the 3.5.7 image, not re-run on 3.5.9.
+  - The scan exemptions for these flaws in `.grype.yaml` expire on 2026-12-15. After that the scan fails until each one is fixed or argued again.
+  - This applies to the Docker image only. An install outside Docker uses your system's OpenSSL for Python's `ssl`.
+
 ## [0.3.17] — 2026-11-18
 
 ### Upgrading from 0.3.16
