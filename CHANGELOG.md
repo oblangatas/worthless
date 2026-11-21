@@ -52,7 +52,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   **Limits.**
   - The "doesn't call it" check was measured on the 3.5.7 image, not re-run on 3.5.9.
   - The scan exemptions for these flaws in `.grype.yaml` expire on 2026-12-15. After that the scan fails until each one is fixed or argued again.
-  - This applies to the Docker image only. An install outside Docker uses your system's OpenSSL for Python's `ssl`.
+  - Every install, with or without Docker, also has the OpenSSL 4.0.3 that the `cryptography` 50.0.2 package bundles. Five of these flaws (CVE-2026-84786, CVE-2026-88823, CVE-2026-95692, CVE-2026-107493, CVE-2026-124709) are treated as present in it. The fix is OpenSSL 4.0.4. Worthless uses only Fernet, hashes and HKDF from `cryptography`, and none of these reach the flaws. The scan doesn't report this copy. WOR-1155 tracks the `cryptography` upgrade.
 
 ## [0.3.17] — 2026-11-18
 
