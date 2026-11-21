@@ -763,8 +763,8 @@ ignore:
   # ── OpenSSL 3.5.7 (trixie), advisory of 2026-11-10 (WOR-1155) ──────────
   # Four advisories turned main's required `scan` red on 2026-11-17. OpenSSL
   # rates all four LOW; grype reports High from a mechanical CVSS score. All are
-  # fix=not-fixed: upstream ships 3.5.10 on 2026-12-01 and Debian trixie has no
-  # update yet, so there is nothing to bump to. The claim is the WEAKER one,
+  # fix=not-fixed: upstream ships 3.5.10 on 2026-12-01 and trixie's
+  # 3.5.9-1~deb13u1 (2026-11-21) does not fix these, so there is nothing to bump to. The claim is the WEAKER one,
   # "we do not call this code", not "the code is absent" (trixie's 3.5 has QUIC
   # compiled in):
   #
@@ -943,8 +943,8 @@ ignore:
   #   SSL_dane_enable, SSL_CTX_dane_enable, SSL_dane_tlsa_add -> /usr/bin/openssl only
   #   ELFs that link the system libssl: /usr/bin/openssl, Python's _ssl,
   #     apt's http method. _ssl and apt import no DANE symbol.
-  #   The DANE_* strings inside _ssl are OpenSSL's error-reason table (the
-  #     same as the SUITEB note above), not calls. No openssl.cnf in /etc/ssl
+  #   The DANE_* strings inside _ssl are OpenSSL's error-reason table,
+  #     not calls. No openssl.cnf in /etc/ssl
   #     or /usr/lib/ssl mentions DANE.
   #   Outbound TLS to providers uses ssl.create_default_context() /
   #     SSLContext(PROTOCOL_TLS_CLIENT) in src/worthless/proxy, and Python's
