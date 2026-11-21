@@ -78,7 +78,8 @@ def test_uninstall_refuses_while_a_key_has_no_link(home_dir, tmp_path) -> None:
     assert home_dir.base_dir.exists(), "uninstall wiped a key that can still be rescued"
     assert _shard_aliases(home_dir) == [alias]
     assert env.read_text() == before
-    assert alias in out and "nothing was changed" in out.lower(), result.output
+    assert alias in out, result.output
+    assert "nothing was changed" in out.lower(), result.output
 
 
 def test_uninstall_refuses_while_a_project_was_moved(home_dir, tmp_path) -> None:
@@ -93,7 +94,8 @@ def test_uninstall_refuses_while_a_project_was_moved(home_dir, tmp_path) -> None
     assert result.exit_code == REFUSED, result.output
     assert home_dir.base_dir.exists(), "uninstall wiped the key of a project that moved"
     assert _shard_aliases(home_dir) == [alias]
-    assert alias in out and "moved or was deleted" in out, result.output
+    assert alias in out, result.output
+    assert "moved or was deleted" in out, result.output
 
 
 def test_refusal_happens_before_any_key_is_restored(home_dir, tmp_path) -> None:
@@ -152,9 +154,8 @@ def test_force_names_every_key_it_destroys_even_when_quiet(home_dir, tmp_path) -
 
     assert result.exit_code == 0, result.output
     assert not home_dir.base_dir.exists()
-    assert unlinked in out and moved in out, (
-        f"--force must name what it destroyed:\n{result.output}"
-    )
+    assert unlinked in out, f"--force must name what it destroyed:\n{result.output}"
+    assert moved in out, f"--force must name what it destroyed:\n{result.output}"
     assert "rotate" in out.lower(), result.output
 
 
@@ -269,8 +270,10 @@ def test_plain_unlock_points_at_a_key_that_lost_its_link(home_dir, tmp_path, mon
     result = cli_invoke(["--quiet", "unlock"], home_dir)
     out = _flat(result.output)
 
-    assert alias in out and "WRTLS-102" in out, result.output
-    assert "--force" not in out and "revoke" not in out, result.output
+    assert alias in out, result.output
+    assert "WRTLS-102" in out, result.output
+    assert "--force" not in out, result.output
+    assert "revoke" not in out, result.output
     assert _shard_aliases(home_dir) == [alias]
 
 
@@ -289,8 +292,10 @@ def test_a_busy_database_refuses_without_offering_force(home_dir, tmp_path, monk
     result = cli_invoke(["uninstall", "--yes"], home_dir)
     out = _flat(result.output)
 
-    assert result.exit_code == 1 and "WRTLS-105" in out, result.output  # same as the restore path
-    assert "worthless down" in out and "--force" not in out, result.output
+    assert result.exit_code == 1, result.output  # same as the restore path
+    assert "WRTLS-105" in out, result.output
+    assert "worthless down" in out, result.output
+    assert "--force" not in out, result.output
     assert _shard_aliases(home_dir) == [alias]
 
 

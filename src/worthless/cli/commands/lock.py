@@ -611,32 +611,37 @@ async def _halves_of_stored_keys(
                 continue
             decrypted.append((alias, prefix, charset, stored))
         for var_name, value, _provider in scanned:
-            for alias, prefix, charset, stored in decrypted:
-                if not value.startswith(prefix):
-                    continue
-                shard_a = bytearray(value.encode("utf-8"))
-                reconstructed: bytearray | None = None
-                try:
-                    reconstructed = reconstruct_key_fp(
-                        shard_a,
-                        stored.shard_b,
-                        stored.commitment,
-                        stored.nonce,
-                        prefix,
-                        charset,
-                    )
-                    found.append((var_name, alias))
-                    break
-                except (ShardTamperedError, ValueError, KeyError, UnicodeDecodeError, IndexError):
-                    continue  # not this key's half; same safe-fail set as above
-                finally:
-                    zero_buf(shard_a)
-                    if reconstructed is not None:
-                        zero_buf(reconstructed)
+            alias = next(
+                (
+                    a
+                    for a, prefix, charset, stored in decrypted
+                    if value.startswith(prefix) and _is_half_of(value, stored, prefix, charset)
+                ),
+                None,
+            )
+            if alias is not None:
+                found.append((var_name, alias))
     finally:
         for _alias, _prefix, _charset, stored in decrypted:
             stored.zero()
     return found
+
+
+def _is_half_of(value: str, stored: StoredShard, prefix: str, charset: str) -> bool:
+    """True when *value* is Shard A of *stored*. Both buffers are zeroed either way."""
+    shard_a = bytearray(value.encode("utf-8"))
+    reconstructed: bytearray | None = None
+    try:
+        reconstructed = reconstruct_key_fp(
+            shard_a, stored.shard_b, stored.commitment, stored.nonce, prefix, charset
+        )
+        return True
+    except (ShardTamperedError, ValueError, KeyError, IndexError):
+        return False  # not this key's half; same safe-fail set as _select_unlocked_keys
+    finally:
+        zero_buf(shard_a)
+        if reconstructed is not None:
+            zero_buf(reconstructed)
 
 
 async def _delete_superseded_location_enrollments(

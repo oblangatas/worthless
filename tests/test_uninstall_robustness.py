@@ -106,7 +106,8 @@ def test_uninstall_missing_env_file_blocks_unless_forced(home_dir: WorthlessHome
         app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
     )
     assert refused.exit_code == 103, refused.output
-    assert "ghost-alias" in refused.output and home_dir.base_dir.exists(), refused.output
+    assert "ghost-alias" in refused.output, refused.output
+    assert home_dir.base_dir.exists(), refused.output
 
     result = runner.invoke(
         app, ["uninstall", "--yes", "--force"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
