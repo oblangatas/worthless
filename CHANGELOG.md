@@ -4,6 +4,8 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.18] — 2026-11-21
+
 ### Fixed
 - **On Linux, `worthless service uninstall` turns lingering off again if `worthless service install` turned it on** (worthless-fzas).
   Before: `service install` ran `loginctl enable-linger`, so your account's user services kept running after logout and started at boot. `service uninstall` and `worthless uninstall` left lingering on. A failed install also left it on. The banner told you to run `loginctl disable-linger` yourself.
@@ -961,6 +963,7 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.18]: https://github.com/oblangatas/worthless/releases/tag/v0.3.18
 [0.3.17]: https://github.com/oblangatas/worthless/releases/tag/v0.3.17
 [0.3.16]: https://github.com/oblangatas/worthless/releases/tag/v0.3.16
 [0.3.15]: https://github.com/oblangatas/worthless/releases/tag/v0.3.15
