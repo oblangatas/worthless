@@ -202,11 +202,17 @@ def _rescuable_keys(
     return unlinked, moved
 
 
+def _read_only_uri(home) -> str:  # noqa: ANN001
+    """``as_uri`` percent-encodes the path: a raw '#', '?' or '%' in it would
+    end the filename early and blind the guard."""
+    return f"{Path(home.db_path).resolve().as_uri()}?mode=ro"
+
+
 def _holds_no_keys(home) -> bool:  # noqa: ANN001
     """True when the DB reads fine and has no shard rows. Read without the
     Fernet key, read-only; any failure (missing or corrupt DB) is False."""
     try:
-        con = sqlite3.connect(f"file:{home.db_path}?mode=ro", uri=True)
+        con = sqlite3.connect(_read_only_uri(home), uri=True)
         try:
             return con.execute("SELECT COUNT(*) FROM shards").fetchone()[0] == 0
         finally:
@@ -224,7 +230,7 @@ def _find_rescuable(home) -> tuple[list[str], list[tuple[str, str]]]:  # noqa: A
     decides exactly as before.
     """
     try:
-        con = sqlite3.connect(f"file:{home.db_path}?mode=ro", uri=True)
+        con = sqlite3.connect(_read_only_uri(home), uri=True)
         try:
             aliases = [row[0] for row in con.execute("SELECT key_alias FROM shards")]
             enrollments = con.execute("SELECT key_alias, env_path FROM enrollments").fetchall()
@@ -250,6 +256,9 @@ def _guard_rescuable(
     every such key first; ``print_key_note`` shows even under ``--quiet``."""
     if not unlinked and not moved:
         return
+    # Names come from the DB: no control characters for the terminal.
+    unlinked = [_shown(alias) for alias in unlinked]
+    moved = [(_shown(alias), path) for alias, path in moved]
     rows = [f"  {alias}   lost its link to its project" for alias in unlinked]
     rows += [
         f"  {alias}   its project moved or was deleted: {_shown(path)}" for alias, path in moved
@@ -812,7 +821,8 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
     ``force`` is the escape hatch for broken states: it wipes even when keys
     can't be restored — a broken repo (no fernet key / corrupt DB) or a
     present-but-unrestorable ``.env``. Without it, an unrestorable REAL key
-    blocks the wipe (key-shredder guard); a MISSING ``.env`` never blocks.
+    blocks the wipe (key-shredder guard). A key whose every ``.env`` is missing,
+    or that lost its link, blocks too (WOR-1135): it may still be rescued.
     """
     console = get_console()
     # Don't bootstrap a home we're about to delete: resolve it directly so a

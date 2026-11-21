@@ -605,8 +605,8 @@ async def _halves_of_stored_keys(
             try:
                 stored = await repo.decrypt_shard(encrypted)
             except (InvalidToken, IPCBackendError):
-                # Sealed under another Fernet key: nothing here can rescue it,
-                # and one stale key must not block every later lock.
+                # Sealed under another Fernet key. It comes back only if that
+                # key returns; one such key must not block every later lock.
                 continue
             decrypted.append((alias, prefix, charset, stored))
         for var_name, value, _provider in scanned:
@@ -3211,7 +3211,8 @@ def _lock_keys(
                     ErrorCode.ENV_ALREADY_LOCKED,
                     f"{_oc_audit.sanitise_for_message(var_name)} in "
                     f"{_oc_audit.sanitise_for_message(str(env_path))} is already half of a "
-                    f"stored key ({alias}). Locking it again would destroy that key, so "
+                    f"stored key ({_oc_audit.sanitise_for_message(alias)}). Locking it "
+                    "again would destroy that key, so "
                     "nothing was changed. If you moved this project, see "
                     "https://github.com/oblangatas/worthless/issues/719.",
                     exit_code=ErrorCode.ENV_ALREADY_LOCKED.value,

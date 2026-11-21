@@ -1143,7 +1143,9 @@ def register_unlock_commands(app: typer.Typer) -> None:
                             console.print_key_note(
                                 f"{len(unlinked)} key(s) on this machine lost the link "
                                 f"to their project (the Worthless doctor bug, "
-                                f"v0.3.7–v0.3.14): {', '.join(unlinked)}. They can "
+                                f"v0.3.7–v0.3.14): "
+                                f"{', '.join(map(_oc_audit.sanitise_for_message, unlinked))}. "
+                                f"They can "
                                 f"probably still be recovered: keep ~/.worthless and "
                                 f"don't uninstall Worthless. Re-linking is being built; "
                                 f'search "WRTLS-102" in the Worthless GitHub issues to '

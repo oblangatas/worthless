@@ -23,7 +23,7 @@ from pathlib import Path
 
 from tests.cli.conftest import cli_invoke, list_enrollments
 from tests.helpers import fake_key
-from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.storage.repository import ShardRepository
 
 REFUSED = 103  # ErrorCode.SHARD_STORAGE_FAILED, same as the existing uninstall guard
@@ -168,7 +168,7 @@ def test_lock_never_resplits_half_of_a_rescuable_keys_only_key(home_dir, tmp_pat
 
     result = cli_invoke(["lock", "--keys-only", "--env", str(env)], home_dir)
 
-    assert result.exit_code != 0, result.output
+    assert result.exit_code == 117, result.output  # ENV_ALREADY_LOCKED
     assert env.read_text() == before, "lock overwrote half of a rescuable key"
     assert _shard_aliases(home_dir) == [alias], "lock stored a new key"
     assert alias in _flat(result.output), result.output
@@ -184,7 +184,7 @@ def test_lock_never_resplits_a_moved_keys_only_project(home_dir, tmp_path) -> No
 
     result = cli_invoke(["lock", "--keys-only", "--env", str(moved)], home_dir)
 
-    assert result.exit_code != 0, result.output
+    assert result.exit_code == 117, result.output  # ENV_ALREADY_LOCKED
     assert moved.read_text() == before, "lock overwrote half of a moved project's key"
     assert _shard_aliases(home_dir) == [alias], "lock stored a new key"
 
@@ -292,3 +292,29 @@ def test_a_busy_database_refuses_without_offering_force(home_dir, tmp_path, monk
     assert result.exit_code == 1 and "WRTLS-105" in out, result.output  # same as the restore path
     assert "worthless down" in out and "--force" not in out, result.output
     assert _shard_aliases(home_dir) == [alias]
+
+
+def test_a_home_path_with_uri_characters_still_guards(tmp_path) -> None:
+    """A '#', '?' or '%' in the home path must not blind the read-only guard."""
+    home = ensure_home(tmp_path / "odd#dir?x%41" / ".worthless")
+    env = _project(tmp_path, "app", "uri-path")
+    _lock(env, home)
+    alias = _unlink_like_the_bug(home, env)
+
+    result = cli_invoke(["uninstall", "--yes"], home)
+
+    assert result.exit_code == REFUSED, result.output
+    assert _shard_aliases(home) == [alias]
+
+
+def test_lock_never_resplits_a_rescuable_proxy_url_key(home_dir, tmp_path) -> None:
+    env = _project(tmp_path, "app", "url-relock")
+    _lock(env, home_dir)
+    alias = _unlink_like_the_bug(home_dir, env)
+    before = env.read_text()
+
+    result = cli_invoke(["lock", "--env", str(env)], home_dir)
+
+    assert result.exit_code == 117, result.output
+    assert _shard_aliases(home_dir) == [alias]
+    assert env.read_text() == before
