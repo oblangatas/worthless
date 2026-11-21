@@ -45,6 +45,7 @@ RELEASE_FANIN_SCRIPT = REPO_ROOT / ".github" / "scripts" / "release-fanin.sh"
 EXTRACT_CHANGELOG_SCRIPT = REPO_ROOT / ".github" / "scripts" / "extract_changelog.py"
 RELEASE_WATCHDOG_SCRIPT = REPO_ROOT / ".github" / "scripts" / "release-watchdog.sh"
 RELEASE_WATCHDOG_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-watchdog.yml"
+APPROVE_RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "approve-release.yml"
 # The four independent publishers the auto-Release job fans in over.
 PUBLISHER_WORKFLOWS = ["publish.yml", "publish-npm.yml", "publish-docker.yml", "deploy-worker.yml"]
 
@@ -2719,6 +2720,79 @@ GUARD_MUTATIONS = [
         "          persist-credentials: false",
         "test_runs_no_untrusted_tag_content",
     ),
+    # --- one-click release approval (WOR-1167) -------------------------------
+    (
+        "let a push start the approver",
+        ".github/workflows/approve-release.yml",
+        "  workflow_dispatch:\n",
+        "  push:\n  workflow_dispatch:\n",
+        "test_approver_runs_only_by_hand",
+    ),
+    (
+        "loosen the tag check",
+        ".github/workflows/approve-release.yml",
+        r'[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]',
+        r'[[ "$TAG" =~ ^v ]]',
+        "test_approver_rejects_a_malformed_tag",
+    ),
+    (
+        "go back to a line-based tag check",
+        ".github/workflows/approve-release.yml",
+        r'[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]',
+        "printf '%s' \"$TAG\" | grep -Eq '^v[0-9]+\\.[0-9]+\\.[0-9]+$'",
+        "test_approver_rejects_a_malformed_tag",
+    ),
+    (
+        "template the tag straight into shell",
+        ".github/workflows/approve-release.yml",
+        'bash scripts/approve-release.sh "$TAG"',
+        'bash scripts/approve-release.sh "${{ inputs.tag }}"',
+        "test_approver_never_templates_inputs_into_shell",
+    ),
+    (
+        "drop the approver's own approval gate",
+        ".github/workflows/approve-release.yml",
+        "    environment: release-approver\n",
+        "",
+        "test_approver_waits_on_its_own_environment",
+    ),
+    (
+        "hand the PAT to the whole job",
+        ".github/workflows/approve-release.yml",
+        "    environment: release-approver\n",
+        "    environment: release-approver\n"
+        "    env:\n"
+        "      LEAK: ${{ secrets.RELEASE_APPROVER_TOKEN }}\n",
+        "test_approver_token_reaches_only_the_approve_step",
+    ),
+    (
+        "widen the job token",
+        ".github/workflows/approve-release.yml",
+        "      actions: read\n",
+        "      actions: write\n",
+        "test_approver_permissions_are_minimal",
+    ),
+    (
+        "give the workflow a default token",
+        ".github/workflows/approve-release.yml",
+        "permissions: {}\n",
+        "permissions: write-all\n",
+        "test_approver_permissions_are_minimal",
+    ),
+    (
+        "make the script prompt (it would hang until timeout)",
+        ".github/workflows/approve-release.yml",
+        '"$TAG" --yes',
+        '"$TAG"',
+        "test_approver_runs_the_script_unattended",
+    ),
+    (
+        "skip the empty-secret check",
+        ".github/workflows/approve-release.yml",
+        'if [ -z "$GH_TOKEN" ]; then',
+        "if false; then",
+        "test_approver_runs_the_script_unattended",
+    ),
     # --- release watchdog (WOR-922) -----------------------------------------
     (
         # WOR-922's done-when: removing the watchdog must turn something red.
@@ -3942,6 +4016,135 @@ class TestReleaseWatchdogWiring:
         assert step in [s.get("name") for s in job["steps"]], (
             f"no step named {step!r} in {job_id}. The watchdog counts a tag as released "
             "only when that step succeeded, so a rename false-alarms every release."
+        )
+
+
+# ------------------------------------------------------------------
+# One-click release approval from GitHub (WOR-1167)
+# ------------------------------------------------------------------
+
+_APPROVER_PAT_EXPR = "secrets.RELEASE_APPROVER_TOKEN"
+_APPROVER_SCRIPT_CALL = 'bash scripts/approve-release.sh "$TAG" --yes'
+
+
+def _approver_doc() -> dict:
+    return yaml.safe_load(APPROVE_RELEASE_WORKFLOW.read_text())
+
+
+def _approver_job() -> dict:
+    (job,) = _approver_doc()["jobs"].values()
+    return job
+
+
+def _approver_step() -> dict:
+    steps = [
+        s for s in _approver_job()["steps"] if "scripts/approve-release.sh" in s.get("run", "")
+    ]
+    assert len(steps) == 1, "approve-release.yml must call scripts/approve-release.sh exactly once"
+    return steps[0]
+
+
+def _run_approver_step(tmp_path: Path, tag: str, gh_token: str) -> tuple[int, str | None]:
+    """Run the REAL approve step's shell, the way Actions runs it, against a fake
+    approve-release.sh that records its argv. Returns (exit code, recorded argv)."""
+    (tmp_path / "scripts").mkdir(exist_ok=True)
+    record = tmp_path / "argv"
+    record.unlink(missing_ok=True)
+    (tmp_path / "scripts" / "approve-release.sh").write_text(
+        f'#!/usr/bin/env bash\nprintf "%s " "$@" > "{record}"\n'
+    )
+    env = {"PATH": os.environ["PATH"], "TAG": tag, "GH_TOKEN": gh_token, "GH_REPO": "o/r"}
+    proc = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", _approver_step()["run"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    return proc.returncode, (record.read_text() if record.exists() else None)
+
+
+class TestApproveReleaseWiring:
+    """approve-release.yml spends the owner's PAT to approve four release gates.
+    Each test pins one thing that keeps that power behind the owner's own click.
+    WOR-1167."""
+
+    def test_approver_runs_only_by_hand(self):
+        doc = _approver_doc()
+        triggers = doc.get(True) or doc.get("on") or {}
+        assert set(triggers) == {"workflow_dispatch"}, (
+            f"approve-release.yml triggers on {sorted(triggers)}. It approves releases "
+            "with the owner's PAT; anything but a manual dispatch could start that "
+            "without the owner asking."
+        )
+        tag_input = triggers["workflow_dispatch"]["inputs"]["tag"]
+        assert tag_input.get("required") is True
+
+    # One test, not parametrized: GUARD_MUTATIONS' control run requires "1 passed".
+    def test_approver_rejects_a_malformed_tag(self, tmp_path):
+        for tag in ("1.2.3", "v1.2", "v1.2.3-rc1", "v1.2.3;id", "v1.2.3\nv9.9.9", "v1.2.3 ", ""):
+            rc, argv = _run_approver_step(tmp_path, tag, "t")
+            assert rc != 0 and argv is None, (
+                f"the approve step ran approve-release.sh for tag {tag!r}. Only vX.Y.Z may "
+                "reach it; a line-based check (grep) passes 'v1.2.3<newline>junk'."
+            )
+        rc, argv = _run_approver_step(tmp_path, "v1.2.3", "t")
+        assert rc == 0 and argv is not None and argv.startswith("v1.2.3 "), (
+            "control: a well-formed tag must reach the script"
+        )
+
+    def test_approver_never_templates_inputs_into_shell(self):
+        for step in _approver_job()["steps"]:
+            run = step.get("run", "")
+            assert "${{" not in run, (
+                f"step {step.get('name')!r} expands an expression inside run:. Inputs must "
+                "reach shell through env, or a crafted tag becomes code (zizmor "
+                "template-injection)."
+            )
+
+    def test_approver_waits_on_its_own_environment(self):
+        env = _approver_job().get("environment")
+        name = env.get("name") if isinstance(env, dict) else env
+        assert name == "release-approver", (
+            "the approve job must run in the release-approver environment. That "
+            "environment's required reviewer is the human click, and it is the only "
+            "place RELEASE_APPROVER_TOKEN is stored."
+        )
+
+    def test_approver_token_reaches_only_the_approve_step(self):
+        text = APPROVE_RELEASE_WORKFLOW.read_text()
+        code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+        assert code.count("secrets.") == 1 and code.count(_APPROVER_PAT_EXPR) == 1, (
+            "approve-release.yml must reference exactly one secret, once: "
+            f"{_APPROVER_PAT_EXPR}, in the approve step's env."
+        )
+        step = _approver_step()
+        assert _APPROVER_PAT_EXPR in str(step.get("env", {}).get("GH_TOKEN", "")), (
+            "RELEASE_APPROVER_TOKEN must be the approve step's GH_TOKEN and nowhere else; "
+            "job-level env hands the owner's PAT to every step, checkout included."
+        )
+
+    def test_approver_permissions_are_minimal(self):
+        doc = _approver_doc()
+        assert doc.get("permissions") == {}, "top-level permissions must be {}"
+        assert _approver_job().get("permissions") == {"contents": "read", "actions": "read"}, (
+            "the job token needs only contents: read and actions: read. The approvals "
+            "are made with the PAT; GITHUB_TOKEN cannot make them anyway."
+        )
+
+    def test_approver_runs_the_script_unattended(self, tmp_path):
+        step = _approver_step()
+        assert _APPROVER_SCRIPT_CALL in step["run"], (
+            f"the approve step must run `{_APPROVER_SCRIPT_CALL}`. Without --yes the "
+            "script prompts, and a runner has no one to answer."
+        )
+        assert step["env"].get("GH_REPO") == "${{ github.repository }}"
+        rc, argv = _run_approver_step(tmp_path, "v1.2.3", "")
+        assert rc != 0 and argv is None, (
+            "an empty RELEASE_APPROVER_TOKEN must stop the step before the script runs; "
+            "gh would otherwise fail later with a vaguer error."
         )
 
 

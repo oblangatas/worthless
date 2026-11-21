@@ -1,0 +1,69 @@
+name: Approve release
+
+# One click approves all four release gates for a tag. WOR-1167.
+#
+# A release waits on four protected environments: pypi, npm-publish and
+# worthless-sh-production (the publishers), then release (Create GitHub Release).
+# scripts/approve-release.sh (WOR-1165) finds those runs for the tag, approves
+# them in order, and prints the Release URL.
+#
+# GitHub accepts a deployment approval only from a human required reviewer, so
+# GITHUB_TOKEN cannot do it. This job uses the owner's fine-grained PAT, stored
+# as an ENVIRONMENT secret of `release-approver`. The secret is released to the
+# job only after the owner approves this job's own environment — that click is
+# the human decision. Setup and what this does NOT protect against: RELEASING.md,
+# "Approve from GitHub (one click)". Pinned by TestApproveReleaseWiring in
+# tests/test_deploy_static.py.
+#
+# The GPG signing key is never involved: tagging stays on the maintainer's machine.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to approve, e.g. v0.3.15"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: approve-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release-approver
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Exit codes from approve-release.sh: 0 ok, 1 a publisher failed,
+      # 2 timeout, 3 declined. Any non-zero fails this run.
+      # --timeout-min 35 ends the script before timeout-minutes kills the step,
+      # so a stuck release fails as "timeout" (exit 2), not "cancelled".
+      # The tag reaches shell only through env, never through ${{ }} inside run:,
+      # so a crafted input cannot become code (zizmor template-injection).
+      - name: Approve the four release gates
+        timeout-minutes: 40
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.RELEASE_APPROVER_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::RELEASE_APPROVER_TOKEN is empty. Store the owner's fine-grained PAT as an environment secret of release-approver (RELEASING.md)."
+            exit 1
+          fi
+          # [[ =~ ]] matches the whole string; grep would pass "v1.2.3<newline>junk".
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must look like v1.2.3"
+            exit 1
+          fi
+          bash scripts/approve-release.sh "$TAG" --yes --timeout-min 35
