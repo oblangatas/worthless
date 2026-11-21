@@ -39,6 +39,7 @@ from worthless.cli.commands.unlock import (
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import delete_fernet_key
+from worthless.cli.orphans import RESCUE_ISSUE_URL
 from worthless.cli.platform import IS_WINDOWS
 from worthless.crypto.types import zero_buf
 from worthless.openclaw import audit as _oc_audit
@@ -46,7 +47,6 @@ from worthless.openclaw import audit as _oc_audit
 logger = logging.getLogger(__name__)
 
 # Pinned issue that tells people hit by the doctor bug what to do (WOR-959).
-_RESCUE_ISSUE_URL = "https://github.com/oblangatas/worthless/issues/719"
 
 
 def _scrub_exc(exc: BaseException) -> str:
@@ -193,12 +193,12 @@ def _rescuable_keys(
     Worthless can't see, so the wipe would make the key unrecoverable.
     """
     unlinked = sorted(set(aliases) - {alias for alias, _ in enrollments})
-    gone = [(alias, path) for alias, path in enrollments if path is not None and _file_gone(path)]
+    gone = {(alias, path) for alias, path in enrollments if path is not None and _file_gone(path)}
     # A key still locked in a project that exists comes back through it, so a
     # moved copy doesn't put it at risk — and `revoke --alias` would break that
     # live project, so it must never be suggested for such a key.
     live = {alias for alias, path in enrollments if path is not None and (alias, path) not in gone}
-    moved = [(alias, path) for alias, path in gone if alias not in live]
+    moved = sorted((alias, path) for alias, path in gone if alias not in live)
     return unlinked, moved
 
 
@@ -208,15 +208,21 @@ def _read_only_uri(home) -> str:  # noqa: ANN001
     return f"{Path(home.db_path).resolve().as_uri()}?mode=ro"
 
 
-def _holds_no_keys(home) -> bool:  # noqa: ANN001
-    """True when the DB reads fine and has no shard rows. Read without the
-    Fernet key, read-only; any failure (missing or corrupt DB) is False."""
+def _read_keys(home) -> tuple[list[str], list[tuple[str, str | None]]]:  # noqa: ANN001
+    """Stored aliases and (alias, env_path) enrollments. Read-only, without the
+    Fernet key, so a locked keychain can't hide them. Raises ``sqlite3.Error``."""
+    con = sqlite3.connect(_read_only_uri(home), uri=True)
     try:
-        con = sqlite3.connect(_read_only_uri(home), uri=True)
-        try:
-            return con.execute("SELECT COUNT(*) FROM shards").fetchone()[0] == 0
-        finally:
-            con.close()
+        aliases = [row[0] for row in con.execute("SELECT key_alias FROM shards")]
+        return aliases, con.execute("SELECT key_alias, env_path FROM enrollments").fetchall()
+    finally:
+        con.close()
+
+
+def _holds_no_keys(home) -> bool:  # noqa: ANN001
+    """True when the DB reads fine and has no shard rows; any failure is False."""
+    try:
+        return not _read_keys(home)[0]
     except sqlite3.Error:
         return False
 
@@ -230,12 +236,7 @@ def _find_rescuable(home) -> tuple[list[str], list[tuple[str, str]]]:  # noqa: A
     decides exactly as before.
     """
     try:
-        con = sqlite3.connect(_read_only_uri(home), uri=True)
-        try:
-            aliases = [row[0] for row in con.execute("SELECT key_alias FROM shards")]
-            enrollments = con.execute("SELECT key_alias, env_path FROM enrollments").fetchall()
-        finally:
-            con.close()
+        aliases, enrollments = _read_keys(home)
     except sqlite3.Error as exc:
         if _is_recoverable_repo_error(exc):
             raise WorthlessError(
@@ -263,11 +264,11 @@ def _guard_rescuable(
     rows += [
         f"  {alias}   its project moved or was deleted: {_shown(path)}" for alias, path in moved
     ]
+    aliases = dict.fromkeys([*unlinked, *(alias for alias, _ in moved)])
     if force:
-        doomed = dict.fromkeys([*unlinked, *(alias for alias, _ in moved)])
         console.print_key_note(
-            f"--force: destroying {len(doomed)} key(s) that could have been rescued: "
-            f"{', '.join(doomed)}. "
+            f"--force: destroying {len(aliases)} key(s) that could have been rescued: "
+            f"{', '.join(aliases)}. "
             "Rotate them at your provider."
         )
         return
@@ -291,9 +292,8 @@ def _guard_rescuable(
             f"locked with a proxy URL has a .env line containing /{tip}/. If an earlier "
             "uninstall stopped partway, that key may already be back in its .env."
         )
-    aliases = dict.fromkeys([*unlinked, *(alias for alias, _ in moved)])
     lines += [
-        f"See {_RESCUE_ISSUE_URL}",
+        f"See {RESCUE_ISSUE_URL}",
         "",
         "Sure you'll never need one of these keys? Remove just that key:",
         *(f"  worthless revoke --alias {alias}" for alias in aliases),

@@ -51,6 +51,7 @@ from worthless.cli.process import (
     resolve_port,
 )
 from worthless.cli.console import WorthlessConsole, get_console
+from worthless.cli.orphans import RESCUE_ISSUE_URL
 from worthless.cli.platform import _in_container, is_wsl
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
 from worthless.cli.sentinel import is_partial, read_sentinel
@@ -3213,8 +3214,7 @@ def _lock_keys(
                     f"{_oc_audit.sanitise_for_message(str(env_path))} is already half of a "
                     f"stored key ({_oc_audit.sanitise_for_message(alias)}). Locking it "
                     "again would destroy that key, so "
-                    "nothing was changed. If you moved this project, see "
-                    "https://github.com/oblangatas/worthless/issues/719.",
+                    f"nothing was changed. If you moved this project, see {RESCUE_ISSUE_URL}.",
                     exit_code=ErrorCode.ENV_ALREADY_LOCKED.value,
                 )
 

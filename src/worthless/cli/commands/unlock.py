@@ -41,7 +41,7 @@ from worthless.cli.dotenv_rewriter import (
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.key_patterns import detect_provider
 from worthless.cli.log_redaction import _redact
-from worthless.cli.orphans import format_orphan_error
+from worthless.cli.orphans import RELINK_PENDING, format_orphan_error
 from worthless.cli.providers import is_bundled_url, lookup_by_name, lookup_by_url
 from worthless.cli.process import disable_core_dumps
 from worthless.crypto.reconstruction import reconstruct_key, reconstruct_key_fp
@@ -1075,8 +1075,7 @@ def register_unlock_commands(app: typer.Typer) -> None:
                     f"{', '.join(unrecognised)}. Keep these lines: don't delete "
                     f"them, re-lock, or uninstall Worthless. If Worthless's doctor "
                     f"repair ran on this machine (v0.3.7–v0.3.14), the key is "
-                    f"probably still recoverable. Re-linking is being built; search "
-                    f'"WRTLS-102" in the Worthless GitHub issues to follow it. If '
+                    f"probably still recoverable. {RELINK_PENDING} If "
                     f"this .env was copied from another machine, re-lock from the "
                     f"original machine.",
                 )
@@ -1147,9 +1146,7 @@ def register_unlock_commands(app: typer.Typer) -> None:
                                 f"{', '.join(map(_oc_audit.sanitise_for_message, unlinked))}. "
                                 f"They can "
                                 f"probably still be recovered: keep ~/.worthless and "
-                                f"don't uninstall Worthless. Re-linking is being built; "
-                                f'search "WRTLS-102" in the Worthless GitHub issues to '
-                                f"follow it."
+                                f"don't uninstall Worthless. {RELINK_PENDING}"
                             )
                         return False
 
