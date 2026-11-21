@@ -8,6 +8,7 @@ ship in that tree.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEBSITE = REPO_ROOT / "website"
@@ -17,10 +18,10 @@ ALLOWED_RELATIVE_PATHS = frozenset(
     {
         ".well-known/security.txt",
         "CNAME",
-        "PROTOCOL.md",
         "android-chrome-192x192.png",
         "android-chrome-512x512.png",
         "apple-touch-icon.png",
+        "blog/blog.js",
         "blog/index.html",
         "coming-soon.html",
         "favicon-16x16.png",
@@ -29,9 +30,12 @@ ALLOWED_RELATIVE_PATHS = frozenset(
         "favicon.png",
         "features.html",
         "hero.png",
+        "homepage.js",
         "how-it-works.html",
         "index.html",
         "install-openclaw.md",
+        "legal.css",
+        "license.html",
         "llms.txt",
         "logo-transparent.png",
         "meme-jenga.png",
@@ -39,11 +43,25 @@ ALLOWED_RELATIVE_PATHS = frozenset(
         "memes.html",
         "news-feed.js",
         "news-feed.json",
-        "news-feed.md",
         "og-image.png",
+        "privacy.html",
+        "red/claims.html",
+        "red/incidents.html",
+        "red/index.html",
+        "red/posts/axios-rat.html",
+        "red/posts/bitwarden-cli-npm.html",
+        "red/posts/github-action-secrets.html",
+        "red/posts/package-before-build.html",
+        "red/posts/post.css",
+        "red/posts/shai-hulud.html",
+        "red/posts/trapdoor.html",
+        "red/red-posts.js",
+        "red/security-model.html",
         "robots.txt",
+        "security.html",
         "site.webmanifest",
         "sitemap.xml",
+        "terms.html",
     }
 )
 
@@ -54,8 +72,11 @@ PROHIBITED_PATHS = [
     WEBSITE / "security-model.md",
     WEBSITE / "risk-key-material-in-python-memory.md",
     WEBSITE / "DOMAIN_PLAN.md",
+    WEBSITE / "PROTOCOL.md",
+    WEBSITE / "news-feed.md",
     WEBSITE / "superpowers",
     WEBSITE / "planning",
+    WEBSITE / ".planning",
 ]
 
 TEXT_SUFFIXES = {".css", ".html", ".js", ".json", ".md", ".txt", ".xml", ""}
@@ -70,6 +91,35 @@ EXTRA_REFERENCE_NEEDLES = (
     ".planning/",
     "ROADMAP.md",
     "worthless" + "-" + "cloud",
+    "PROTOCOL.md",
+    "install-openclaw.md",
+    "news-feed.md",
+)
+
+REQUIRED_LAUNCH_URLS = {
+    "https://wless.io/",
+    "https://wless.io/features.html",
+    "https://wless.io/how-it-works.html",
+    "https://wless.io/blog/",
+    "https://wless.io/red/",
+    "https://wless.io/red/posts/package-before-build.html",
+    "https://wless.io/red/posts/bitwarden-cli-npm.html",
+    "https://wless.io/red/posts/axios-rat.html",
+    "https://wless.io/red/posts/trapdoor.html",
+    "https://wless.io/red/posts/shai-hulud.html",
+    "https://wless.io/red/posts/github-action-secrets.html",
+    "https://wless.io/privacy.html",
+    "https://wless.io/terms.html",
+    "https://wless.io/security.html",
+    "https://wless.io/license.html",
+    "https://wless.io/memes.html",
+}
+
+LEGAL_LINK_TARGETS = (
+    "privacy.html",
+    "terms.html",
+    "security.html",
+    "license.html",
 )
 
 
@@ -138,12 +188,219 @@ def test_website_tree_matches_publish_allowlist() -> None:
     assert missing == [], f"Allowlist entries missing from tree: {missing}"
 
 
+# The OpenClaw install guide is user-facing and maintained on main; it is the
+# one Markdown file the site publishes.
+PUBLIC_MARKDOWN = frozenset({WEBSITE / "install-openclaw.md"})
+
+
+def test_website_tree_contains_no_public_markdown() -> None:
+    markdown_files = sorted(
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in WEBSITE.rglob("*.md")
+        if path.is_file() and path not in PUBLIC_MARKDOWN
+    )
+
+    assert markdown_files == []
+
+
 def test_website_tree_excludes_internal_planning_sources() -> None:
     offenders = [
         path.relative_to(REPO_ROOT).as_posix()
         for path in PROHIBITED_PATHS
         if path.is_file() or (path.is_dir() and any(path.rglob("*")))
     ]
+
+    assert offenders == []
+
+
+def test_website_discovery_surfaces_match_launch_policy() -> None:
+    sitemap = (WEBSITE / "sitemap.xml").read_text(encoding="utf-8")
+    robots = (WEBSITE / "robots.txt").read_text(encoding="utf-8")
+    llms = (WEBSITE / "llms.txt").read_text(encoding="utf-8")
+
+    assert "User-agent: *" in robots
+    assert "Allow: /" in robots
+    assert "Sitemap: https://wless.io/sitemap.xml" in robots
+
+    for url in REQUIRED_LAUNCH_URLS:
+        assert url in sitemap
+
+    assert "https://wless.io/red/claims.html" not in sitemap
+    assert "https://wless.io/red/incidents.html" not in sitemap
+    assert "https://wless.io/red/security-model.html" not in sitemap
+
+    discovery_text = "\n".join((sitemap, robots, llms))
+    for stale_path in ("PROTOCOL.md", "install-openclaw.md", "news-feed.md"):
+        assert stale_path not in discovery_text
+
+
+def test_website_security_txt_is_rfc9116_public_surface() -> None:
+    security_txt = (WEBSITE / ".well-known" / "security.txt").read_text(encoding="utf-8")
+
+    assert "Contact: mailto:security@wless.io" in security_txt
+    assert (
+        "Contact: https://github.com/oblangatas/worthless/security/advisories/new" in security_txt
+    )
+    assert "Expires:" in security_txt
+    assert "Canonical: https://wless.io/.well-known/security.txt" in security_txt
+    assert "Policy: https://wless.io/security.html" in security_txt
+
+
+def test_website_homepage_launch_affordances_survive_promotion() -> None:
+    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
+    primary_nav = re.search(
+        r'<nav class="nav" aria-label="Primary">(?P<nav>.*?)</nav>',
+        index,
+        re.DOTALL,
+    )
+    assert primary_nav, "homepage must expose a primary navigation block"
+    primary_nav_html = primary_nav.group("nav")
+
+    assert "curl -sSL https://worthless.sh | sh" in index
+    assert 'href="https://docs.wless.io/"' in primary_nav_html
+    assert 'href="blog/index.html"' in primary_nav_html
+    assert 'href="red/index.html"' in primary_nav_html
+    assert 'href="memes.html"' in primary_nav_html
+    assert 'href="#early-access"' in primary_nav_html
+    assert 'href="https://ko-fi.com/shacharme"' in primary_nav_html
+    assert '<span class="scroll-hint__text">Follow the leak</span>' in index
+    assert "Hosted Worthless" in index
+    assert "A separate managed product we're exploring for later" in index
+    assert "not the open-source tool on this page" in index
+
+
+def test_website_never_names_a_cli_version() -> None:
+    """The site must not print a Worthless version number.
+
+    The CLI ships every couple of weeks and the site is frozen between
+    releases, so any version on it is stale within days: the June copy said
+    v0.3.8 while 0.3.14 was on PyPI. Decision (WOR-946, 2026-10-15): delete the
+    number instead of chasing it. Third-party versions in the Red Blog (e.g.
+    Bitwarden's 2026.4.0) are fine -- they carry no "v" prefix and aren't 0.x.
+    """
+    # The one allowed tag: the audit prompt's link to the released installer.
+    hits = _site_text_hits(r"(?<!worthless/)\bv\d+\.\d+\.\d+\b|\bversion 0\.\d+")
+    assert not hits, f"version-style text on the site: {hits}"
+
+
+def test_ai_audit_reads_the_installer_that_actually_runs() -> None:
+    """`curl worthless.sh` runs the released installer; browsers and AI fetchers
+    get an HTML page from that host, and `main` can differ from the release.
+    So the "Audit the installer with AI" prompt must point at a release tag,
+    never at main (checked 2026-11-13: the v0.3.16 tag file is byte-identical
+    to what curl receives)."""
+    js = (WEBSITE / "homepage.js").read_text(encoding="utf-8")
+    assert "/main/install.sh" not in js, "the audit prompt must not read main"
+    assert re.search(
+        r"raw\.githubusercontent\.com/oblangatas/worthless/v\d+\.\d+\.\d+/install\.sh", js
+    )
+
+
+def test_website_drops_claims_the_cli_does_not_keep() -> None:
+    """Phrases retired because the published CLI contradicts them (WOR-946).
+
+    Proven against the released CLI in containers by
+    tests/test_site_claims_match_cli.py: `unlock` leaves the proxy running, the
+    real key is never stored, a shard keeps the provider prefix and length, and
+    a Gemini key is skipped and left as plaintext. The split is format-preserving
+    modular arithmetic (crypto/splitter.py), not XOR, and the product's word for
+    a key half is "shard".
+    """
+    retired = (
+        r"\bXOR\b|Proxy gone|proxy stopped|stored encrypted locally"
+        r"|reveals nothing|reveals zero bits|wrls_share|Two commands|key\(s\) protected"
+        # The noun for a key half, not the verb ("share it" is fine).
+        r"|\bshares\b|\b(?:a|the|other|one|stored|each|first|second) share\b"
+        r"|\bshare (?:useless|reveals|that)\b"
+        # Pointers to the repo were labelled as proof; they're "How to check" now.
+        r"|Proof hook"
+    )
+    hits = _site_text_hits(retired)
+    assert not hits, f"retired claims on the site: {hits}"
+
+    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
+    gemini_row = index[index.index("<strong>GEMINI_API_KEY</strong>") :][:200]
+    assert "Not supported yet" in gemini_row, "the homepage must not show Gemini as protected"
+
+
+def test_website_legal_pages_match_the_owner_decisions() -> None:
+    """Legal-page decisions from the WOR-757 legal panel, applied in WOR-946.
+
+    The Terms cover the website only; the software is AGPL-3.0-only and nobody
+    has to accept the Terms to use it. The commercial-license pitch is cut. The
+    privacy page names every service a visitor's browser contacts.
+    """
+    terms = (WEBSITE / "terms.html").read_text(encoding="utf-8")
+    assert "These Terms cover the wless.io website only." in terms
+    assert "you need not accept these Terms to use, modify or share it" in terms
+
+    hits = _site_text_hits(
+        r"Shard C\b|never leave your control|commercial licen|third-party JavaScript by default"
+    )
+    assert not hits, f"retired legal wording on the site: {hits}"
+
+    privacy = (WEBSITE / "privacy.html").read_text(encoding="utf-8")
+    for service in ("Cloudflare", "Google Fonts", "gist.githubusercontent.com", "Tally"):
+        assert service in privacy, f"privacy.html must name {service}"
+
+
+def test_homepage_connects_the_maintainer_handles() -> None:
+    """WOR-950 (owner decision 2026-10-15): link the GitHub and Ko-fi handles so
+    visitors can tell they're the same maintainer; no real name on the homepage."""
+    footer = (WEBSITE / "index.html").read_text(encoding="utf-8").split('class="footer-bottom"')[1]
+    footer = footer.split("</div>")[0]
+    assert 'href="https://github.com/oblangatas"' in footer
+    assert 'href="https://ko-fi.com/shacharme"' in footer
+
+
+def test_website_ships_no_drafts_and_busts_the_old_feed_script() -> None:
+    """WOR-946 publish hygiene.
+
+    Unpublished Red Blog drafts were hidden with `published: false` but still
+    readable in page source. And the live site already serves a different
+    news-feed.js with max-age=14400, so the new page must request it under a new
+    URL or returning visitors run the old script for up to four hours.
+    """
+    red_posts = (WEBSITE / "red" / "red-posts.js").read_text(encoding="utf-8")
+    assert "published: false" not in red_posts, "draft posts must not ship in page source"
+    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
+    assert '<script src="news-feed.js?v=' in index, "news-feed.js needs a cache-busting query"
+
+
+def _site_text_hits(pattern: str) -> list[str]:
+    banned = re.compile(pattern, re.IGNORECASE)
+    return [
+        f"{path.relative_to(WEBSITE)}: {match.group(0)}"
+        for path in sorted(WEBSITE.rglob("*"))
+        if path.suffix in {".html", ".js", ".txt", ".json", ".xml"}
+        for match in banned.finditer(path.read_text(encoding="utf-8"))
+    ]
+
+
+def test_website_waitlist_processing_is_disclosed_and_scoped() -> None:
+    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
+    coming_soon = (WEBSITE / "coming-soon.html").read_text(encoding="utf-8")
+    privacy = (WEBSITE / "privacy.html").read_text(encoding="utf-8")
+
+    assert "https://tally.so/r/WOpNVL" in index
+    assert "https://tally.so/r/WOpNVL" in coming_soon
+    assert "Hosted Worthless is a separate managed product being explored for later" in coming_soon
+    assert (
+        "does not imply current hosted service, team support, or protection for every secret type"
+        in coming_soon
+    )
+    assert "Tally" in privacy
+    assert "https://tally.so/help/privacy-policy" in privacy
+    assert "separate future Hosted Worthless managed product" in privacy
+
+
+def test_every_public_html_page_links_legal_footer_cluster() -> None:
+    offenders: list[str] = []
+    for path in sorted(WEBSITE.rglob("*.html")):
+        text = path.read_text(encoding="utf-8")
+        missing = [target for target in LEGAL_LINK_TARGETS if target not in text]
+        if missing:
+            offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}: {missing}")
 
     assert offenders == []
 
