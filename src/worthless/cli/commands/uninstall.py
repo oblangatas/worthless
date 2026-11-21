@@ -271,8 +271,8 @@ def _guard_rescuable(
     ]
     if moved:
         lines.append(
-            "If a project moved, put it back at that path (or wait for the next release, "
-            "which can follow it), then run uninstall again."
+            "If a project moved, put it back at that path, then run uninstall again "
+            "(you can move it afterwards)."
         )
     if unlinked:
         tip = unlinked[0]
