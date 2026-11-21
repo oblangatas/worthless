@@ -278,7 +278,7 @@ def _guard_rescuable(
         tip = unlinked[0]
         lines.append(
             "A lost link is usually the Worthless doctor bug (v0.3.7–v0.3.14). Keep "
-            "~/.worthless: the next Worthless release brings these keys back. A project "
+            "~/.worthless: re-linking them is being built. A project "
             f"locked with a proxy URL has a .env line containing /{tip}/. If an earlier "
             "uninstall stopped partway, that key may already be back in its .env."
         )
