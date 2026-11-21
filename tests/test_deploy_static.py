@@ -2909,6 +2909,22 @@ GUARD_MUTATIONS = [
         "test_stuck_release_run_alarms_after_three_days",
     ),
     (
+        # The live tree has ONE commit matching -S'run-name:', so -1 and tail -1 agree
+        # today and this mutation is the only thing that can tell them apart.
+        "walk the run-label floor forward to the last edit",
+        ".github/scripts/release-watchdog.sh",
+        "-S'run-name:' -- .github/workflows/release-notes.yml 2>/dev/null | tail -1",
+        "-S'run-name:' -- .github/workflows/release-notes.yml 2>/dev/null | head -1",
+        "test_editing_release_notes_later_does_not_blind_the_watchdog",
+    ),
+    (
+        "report a quiet run without saying what it saw",
+        ".github/scripts/release-watchdog.sh",
+        'Newest tag: ${newest%% *}, $(((now - ${newest##* }) / 3600))h old."',
+        '"',
+        "test_watching_nothing_says_which_tag_it_looked_at",
+    ),
+    (
         "judge tags older than the run labels",
         ".github/scripts/release-watchdog.sh",
         'if [ -n "$run_labels_since" ] && [ "$created" -lt "$run_labels_since" ]; then',
@@ -3562,18 +3578,28 @@ class TestReleaseWatchdogBehaviour:
         rn_jobs_older=None,
         issues=None,
         run_name_landed_hours_ago: float | None = None,
+        run_name_touched_hours_ago: float | None = None,
         env_extra: dict | None = None,
     ):
         """Tag v9.9.9 `hours_ago`; placeholders SHA/TITLE in fixtures resolve to it."""
         repo = _seed_repo(tmp_path)
+        wf_file = repo / ".github" / "workflows" / "release-notes.yml"
         if run_name_landed_hours_ago is not None:
             # The commit that gave release-notes.yml its run-name: tags older than
             # this have runs the watchdog cannot recognise.
-            wf = repo / ".github" / "workflows"
-            wf.mkdir(parents=True)
-            (wf / "release-notes.yml").write_text("run-name: Create GitHub Release x y\n")
+            wf_file.parent.mkdir(parents=True)
+            wf_file.write_text("run-name: Create GitHub Release x y\n")
             _git(repo, "add", ".github/workflows/release-notes.yml")
             _git(repo, "commit", "-q", "-m", "run-name", when=_hours_ago(run_name_landed_hours_ago))
+        if run_name_touched_hours_ago is not None:
+            # A LATER commit that changes how many times "run-name:" appears — a
+            # second occurrence, or a comment naming it. `git log -S` counts those
+            # too, so taking the newest match moves the floor to this commit.
+            wf_file.write_text(
+                "run-name: Create GitHub Release x y\n# keep run-name: in sync with the watchdog\n"
+            )
+            _git(repo, "add", ".github/workflows/release-notes.yml")
+            _git(repo, "commit", "-q", "-m", "touch", when=_hours_ago(run_name_touched_hours_ago))
         _git(repo, "tag", "-a", "v9.9.9", "-m", "v9.9.9", when=_hours_ago(hours_ago))
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
@@ -3871,6 +3897,34 @@ class TestReleaseWatchdogBehaviour:
         assert "unfinished for 80h" in body, (
             "the issue must say the run is wedged, not blame the create step — "
             f"otherwise it sends you looking in the wrong place:\n{body}"
+        )
+
+    def test_editing_release_notes_later_does_not_blind_the_watchdog(self, tmp_path):
+        """The floor is when run labels ARRIVED, not the last time that line moved.
+
+        `git log -S` matches every commit that changes how many times the string
+        appears, so taking the newest match walks the floor forward to whenever
+        release-notes.yml was last touched near run-name — and every live tag then
+        reads "not watched". Silent, exit 0: the failure WOR-922 exists to prevent,
+        one layer down (worthless-v412a).
+        """
+        proc, writes, _ = self._run(
+            tmp_path, 30, run_name_landed_hours_ago=100, run_name_touched_hours_ago=5
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert len(self._created(writes)) == 1, (
+            "the tag was cut AFTER run labels arrived, so it must still be judged; "
+            f"editing release-notes.yml later silenced the watchdog:\n{proc.stdout}"
+        )
+
+    def test_watching_nothing_says_which_tag_it_looked_at(self, tmp_path):
+        """ "Watched 0 tag(s)" is identical whether all is well or the checkout has no
+        tags at all. Name the newest tag and its age so the log is falsifiable."""
+        proc, _, _ = self._run(tmp_path, 400)  # one tag, far outside the window
+        assert proc.returncode == 0, proc.stderr
+        assert "v9.9.9" in proc.stdout, (
+            "a run that watches nothing must still say what it saw, or a watchdog "
+            f"with no tags at all looks exactly like a healthy one:\n{proc.stdout}"
         )
 
     def test_tag_from_before_the_run_labels_is_ignored(self, tmp_path):

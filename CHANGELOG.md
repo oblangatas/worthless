@@ -4,6 +4,44 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- **On Linux, `worthless service uninstall` turns lingering off again if `worthless service install` turned it on** (worthless-fzas).
+  Before: `service install` ran `loginctl enable-linger`, so your account's user services kept running after logout and started at boot. `service uninstall` and `worthless uninstall` left lingering on. A failed install also left it on. The banner told you to run `loginctl disable-linger` yourself.
+  Now: when `service install` turns lingering on, it records that in `~/.worthless`. `service uninstall`, `worthless uninstall` and a failed first install turn lingering off again. If lingering was already on before the install, it stays on. If the system refuses to turn it off, you see a warning with the command to run.
+
+  **Limits.**
+  - The record is kept in `~/.worthless`. If you delete that folder yourself before you uninstall the service, lingering stays on.
+  - Tested with mocked `loginctl` and `systemctl`, not on a real systemd host.
+- **A failed `worthless service install` says which command failed and why** (worthless-3j8x).
+  Before: when `launchctl` or `systemctl` failed during `service install`, you saw "WRTLS-199: an internal error occurred".
+  Now: you see WRTLS-119 with the command that failed, its exit code, the last lines of its error output, and what to do next (`worthless doctor`, or `worthless up` until then).
+- **Ctrl-C during the service offer's first check no longer makes a finished `worthless lock` exit 130** (worthless-5oug).
+  Before: after `lock` protected your keys, it checks whether a background service is already installed before it asks you anything. Ctrl-C during that check stopped `lock` with exit code 130, so a script saw a failure although the keys were already protected.
+  Now: `lock` skips the offer and exits 0. Ctrl-C during the install itself was already handled this way.
+- **A Kubernetes pod or a Codespace is not asked to start the proxy at login** (worthless-g5rw).
+  Before: `lock` skipped the question only when Docker's or Podman's marker file was present. Pods and some Codespaces images have neither file, so they were asked, and the install could only fail.
+  Now: `lock` also skips the question when `KUBERNETES_SERVICE_HOST` or `CODESPACES` is set, and shows the same container hint (`worthless up`).
+
+  **Limits.**
+  - LXC, systemd-nspawn and other containers that set neither variable nor marker file are still asked.
+- **A broken key now shows in `worthless status`, plain `worthless` and the background service: `worthless status` turns red and names the keys, plain `worthless` fails with the cause, and the background service stops restarting every 5 seconds** (worthless-n2bj, worthless-jywo, worthless-srto).
+  Before: if `fernet.key` could unlock only some of your locked keys, the proxy served the rest and `worthless status` still said 🟢 "You're protected". If it unlocked none, plain `worthless` waited about 40 seconds, printed "Proxy started but health check failed", and exited 0. The real cause was only in `proxy.log`. A `fernet.key` that was a symlink made the background service exit, so launchd or systemd restarted it every 5 seconds and logged the same refusal each time.
+  Now: `worthless status` shows 🔴 "Not working", names each key the proxy's key can't unlock, marks them `UNREADABLE`, and exits 73. If the proxy refused the `fernet.key` file itself (a symlink, wrong permissions, or a file that isn't a valid key at all), `status` says that, with that fix. Plain `worthless` stops as soon as the proxy refuses to start, prints the proxy's own error (for example "can't unlock any of your 1 locked key(s)"), and exits non-zero. A corrupted `fernet.key` used to stop it with "WRTLS-199: an internal error occurred"; now it says the file isn't a valid key. A proxy that doesn't answer within 30 seconds is stopped and reported, so a slow start can't come up behind the error. A refused `fernet.key` makes the background service log the refusal once and wait; when you put the real file back, it restarts on its own. If `status` can't read the proxy's notes, it shows 🟡 "Can't tell if you're protected" and exits 73, never green.
+
+  **Limits.**
+  - `status` reports what the proxy found when it last started. If you fix the key while the proxy is stopped, `status` stays red until the next `worthless up`. If you lock a key under a different key while the proxy runs, `status` stays green until the proxy restarts.
+  - Re-locking a key doesn't clear its `UNREADABLE` mark until the next `worthless up`.
+  - With a symlinked or wrong-permission `fernet.key`, `status` itself fails with that error and doesn't list your keys, unless it reads the key from your keychain.
+  - `worthless doctor` checks the key itself and doesn't read what the proxy recorded.
+  - `worthless down` still can't see a service that is waiting for a fixed key. Use `worthless service stop`, or fix the key.
+
+- **`worthless doctor` reads your keychain once per run** (worthless-e4j4).
+  Before: `worthless doctor` read the Fernet key from the keychain two times, and `worthless doctor --json` read it two or three times. On macOS, each read can show a Keychain prompt.
+  Now: each run reads the keychain one time. The drift check uses the value that doctor already read.
+
+  **Limits.**
+  - With no key in the keychain (a file-only setup), doctor still looks in the keychain more than one time. On macOS, a lookup that finds no entry shows no prompt.
+
 ## [0.3.17] — 2026-11-18
 
 ### Upgrading from 0.3.16

@@ -278,3 +278,109 @@ def test_a_key_that_opens_only_some_projects_serves_them_and_names_the_rest(
 
     plain = _said(world.run("doctor").stdout)
     assert "side-project" in plain and "can't unlock" in plain
+
+
+def _status(world: _World) -> tuple[int, str, dict]:
+    plain = world.run("status")
+    machine = world.run("status", "--json")
+    return plain.returncode, _said(plain.stdout + plain.stderr), json.loads(machine.stdout)
+
+
+def test_status_turns_red_and_names_the_projects_the_service_cannot_unlock(
+    world: _World, tmp_path: Path
+) -> None:
+    """worthless-n2bj: a part-broken key served the rest while status said 🟢."""
+    work = world.project("proj1")
+    assert world.lock(work).returncode == 0
+    seal_enrolled(world.wl / "worthless.db", Fernet.generate_key(), "side-project")
+
+    world.start_service(tmp_path / "up.log")
+    assert world.healthz(within=30), (tmp_path / "up.log").read_text()
+
+    code, said, data = _status(world)
+    assert code != 0, said
+    assert "🔴" in said and "side-project" in said, said
+    assert "You're protected" not in said, said
+    assert data["verdict"] == "key_refused"
+    rows = {k["alias"]: k["status"] for k in data["keys"]}
+    assert rows["side-project"] == "UNREADABLE"
+    assert [a for a, s in rows.items() if s == "PROTECTED"], "the project it opens stays fine"
+
+
+def test_plain_worthless_says_why_the_proxy_did_not_start_and_exits_non_zero(
+    world: _World, tmp_path: Path
+) -> None:
+    """worthless-jywo: it waited ~42 s, printed "health check failed" and exited 0."""
+    proj = world.project("proj1")
+    assert world.lock(proj).returncode == 0
+    key_file = world.wl / "fernet.key"
+    key_file.write_bytes(Fernet.generate_key())
+    key_file.chmod(0o600)
+
+    plain = world.run("--yes")
+    said = _said(plain.stdout + plain.stderr)
+    assert plain.returncode != 0, said
+    assert "can't unlock any of your 1 locked key" in said, said
+    assert "health check failed" not in said, said
+    assert not world.healthz(within=1)
+
+    code, status_said, data = _status(world)
+    assert code != 0 and "🔴" in status_said, status_said
+    assert data["verdict"] == "key_refused"
+
+
+def test_a_garbage_key_file_is_refused_with_the_cause_and_status_turns_red(
+    world: _World, tmp_path: Path
+) -> None:
+    """A corrupted fernet.key (not a valid key at all) must fail the same honest way."""
+    proj = world.project("proj1")
+    assert world.lock(proj).returncode == 0
+    key_file = world.wl / "fernet.key"
+    key_file.write_bytes(b"\x00\xffnot-a-fernet-key\n")
+    key_file.chmod(0o600)
+
+    plain = world.run("--yes")
+    said = _said(plain.stdout + plain.stderr)
+    assert plain.returncode != 0, said
+    # Before: WRTLS-199 "an internal error occurred" (a UTF-8 decode crash).
+    assert "fernet.key isn't a valid key" in said, said
+    assert "WRTLS-199" not in said, said
+
+    code, status_said, data = _status(world)
+    assert code != 0 and "🔴" in status_said, status_said
+    assert "isn't a valid key" in status_said, status_said
+    assert data["verdict"] == "key_refused"
+
+
+def test_a_symlinked_key_parks_the_service_once_instead_of_restart_looping(
+    world: _World, tmp_path: Path
+) -> None:
+    """worthless-srto: a symlinked fernet.key exited 1, so launchd/systemd relaunched
+    it every 5 s and logged the refusal each time."""
+    proj = world.project("proj1")
+    assert world.lock(proj).returncode == 0
+    key_file = world.wl / "fernet.key"
+    real = world.home / "real-fernet.key"
+    real.write_bytes(key_file.read_bytes())
+    real.chmod(0o600)
+    key_file.unlink()
+    key_file.symlink_to(real)
+
+    log = tmp_path / "up.log"
+    service = world.start_service(log)
+    assert not world.healthz(within=8), "a refused key must never answer /healthz"
+    said = _said(log.read_text())
+    assert "not a regular file" in said, said
+    assert service.poll() is None, "it must wait, not exit — or its manager restart-loops it"
+    assert said.count("not a regular file") == 1, "logged once, not on a loop"
+
+    # status refuses the symlink itself (bootstrap reads the file) — non-zero, with the cause.
+    status = world.run("status")
+    status_said = _said(status.stdout + status.stderr)
+    assert status.returncode != 0 and "not a regular file" in status_said, status_said
+
+    # Put the real file back: the waiting service exits so its manager restarts it.
+    key_file.unlink()
+    key_file.write_bytes(real.read_bytes())
+    key_file.chmod(0o600)
+    assert service.wait(timeout=25) == 75, "75 = restart me on the new key"

@@ -396,7 +396,6 @@ def test_default_command_says_which_proxy_settings_the_proxy_ignores(
         patch("worthless.cli.default_command.detect_proxy_runtime", return_value=stopped),
         patch("worthless.cli.default_command._raise_if_service_requires_start"),
         patch("worthless.cli.default_command.start_supervised_proxy"),
-        patch("worthless.cli.default_command.poll_health", return_value=True),
     ):
         _ensure_proxy_running(home, console)
 

@@ -3566,9 +3566,9 @@ def _offer_question(port: int, home: WorthlessHome) -> str:
     configured to do, while reboot survival is still unproven (WOR-725).
 
     systemd enables lingering, which starts the user manager at BOOT, not at
-    login, and `service uninstall` deliberately leaves it on (worthless-fzas).
-    Uninstall also leaves the key file. The question says both up front:
-    consent given before the irreversible step, not in a banner after it.
+    login. `service uninstall` turns it off again only if this install turned
+    it on (worthless-fzas), and leaves the key file. The question says both up
+    front: consent given before the step, not in a banner after it.
 
     typer.confirm prints plain text, so the terminal does the wrapping. Every
     line is kept under 80 columns by hand.
@@ -3588,7 +3588,7 @@ def _offer_question(port: int, home: WorthlessHome) -> str:
                 "a systemd user service set to start when this computer starts\n"
                 f"{pad}(it tries to turn on lingering for your account)"
             )
-        systemd_extra = f"{pad}then `loginctl disable-linger` if nothing else needs it\n"
+        systemd_extra = f"{pad}(also turns lingering off, if this turned it on)\n"
     if on_wsl:
         headline = (
             "\nInstall a background service for Worthless?\n"
@@ -3642,8 +3642,8 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int, ask: b
         return False
 
     # The terminal gate comes BEFORE --yes, and the order is the point.
-    # Installing the service also runs `loginctl enable-linger`, which
-    # `worthless service uninstall` does not reverse — account-level state. A
+    # Installing the service also runs `loginctl enable-linger` — account-level
+    # state that stays on until `worthless service uninstall` runs. A
     # blanket --yes in someone's Dockerfile or CI job previously created it with
     # no prompt at all (confirmed live, 2026-10-05). --yes auto-approves
     # PROMPTS; where nobody can see a prompt there is nothing to approve.
@@ -3660,9 +3660,10 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int, ask: b
     try:
         if _backend().detect_status(home, port).state is not ServiceState.NOT_INSTALLED:
             return False
-    except (WorthlessError, subprocess.CalledProcessError, OSError):
+    except (WorthlessError, subprocess.CalledProcessError, OSError, KeyboardInterrupt):
         # Cannot tell. Saying nothing beats crashing a lock that worked, and
-        # beats installing over something we failed to inspect.
+        # beats installing over something we failed to inspect. Ctrl-C here
+        # used to exit 130 on a committed lock (worthless-5oug).
         return False
 
     # WOR-859 ruling: only a typed "y" installs. --yes means "don't stop to

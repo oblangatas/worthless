@@ -24,6 +24,7 @@ import typer
 from typer.testing import CliRunner
 
 from worthless.cli import default_command
+from worthless.cli import platform as cli_platform
 from worthless.cli.app import app
 from worthless.cli.commands.lock import _offer_service_after_lock
 from worthless.cli.console import WorthlessConsole
@@ -535,15 +536,69 @@ class TestTheOfferCannotAbortACommittedLock:
         assert "still protected" in out
         assert "worthless service status" in out, "an interrupt may leave it installed; say so"
 
-    def test_the_fernet_sync_happens_before_the_offer(self) -> None:
-        """Ordering, pinned. The offer must not be able to skip post-lock work."""
-        source = Path("src/worthless/cli/commands/lock.py").read_text()
-        sync_at = source.index("_sync_fernet_after_lock(home)")
-        offer_at = source.index("_offer_service_after_lock(console, home=home")
-        assert sync_at < offer_at, (
-            "_sync_fernet_after_lock must run BEFORE the service offer: anything "
-            "raised by the offer would otherwise skip it on a committed lock"
-        )
+    def test_ctrl_c_during_the_installed_check_still_exits_0(self, tmp_path: Path) -> None:
+        """worthless-5oug: the same shape as defect 8, one call earlier.
+
+        Ctrl-C while the offer checks for an existing service (before any
+        question) escaped as exit 130 on a lock that had already committed.
+        """
+        env_file = tmp_path / "proj" / ".env"
+        env_file.parent.mkdir()
+        body = "T3mP9kQw2ZxA7bNf4YrL6hJd8VsG1cUeM5oPi0ElRtXnKaBz"
+        env_file.write_text(f"OPENAI_API_KEY=sk-proj-{body}\n")
+        backend = MagicMock()
+        backend.detect_status.side_effect = KeyboardInterrupt()
+        with (
+            patch("worthless.cli.commands.lock._backend", return_value=backend),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            # "No" to the code-scan prompt, which shares typer.confirm.
+            patch("worthless.cli.commands.lock.typer.confirm", return_value=False),
+            patch("worthless.cli.commands.lock.install_service_for_offer") as install,
+        ):
+            result = CliRunner().invoke(
+                app,
+                ["lock", "--env", str(env_file)],
+                env={
+                    "WORTHLESS_HOME": str(tmp_path / ".worthless"),
+                    "WORTHLESS_KEYRING_BACKEND": "null",
+                    "HOME": str(tmp_path),
+                },
+            )
+
+        backend.detect_status.assert_called_once()
+        assert result.exit_code == 0, result.output
+        assert body not in env_file.read_text(), "the lock itself must have committed"
+        install.assert_not_called()
+
+    def test_an_offer_that_raises_cannot_skip_the_fernet_sync(self, tmp_path: Path) -> None:
+        """Pinned by execution, not by source text order (worthless-oxsv).
+
+        A real `worthless lock` whose offer raises: the post-lock Fernet sync
+        must already have run. Reordering the two calls makes this red.
+        """
+        env_file = tmp_path / "proj" / ".env"
+        env_file.parent.mkdir()
+        body = "T3mP9kQw2ZxA7bNf4YrL6hJd8VsG1cUeM5oPi0ElRtXnKaBz"
+        env_file.write_text(f"OPENAI_API_KEY=sk-proj-{body}\n")
+        with (
+            patch("worthless.cli.commands.lock._sync_fernet_after_lock") as sync,
+            patch(
+                "worthless.cli.commands.lock._offer_service_after_lock",
+                side_effect=RuntimeError("offer blew up"),
+            ) as offer,
+        ):
+            CliRunner().invoke(
+                app,
+                ["lock", "--env", str(env_file)],
+                env={
+                    "WORTHLESS_HOME": str(tmp_path / ".worthless"),
+                    "WORTHLESS_KEYRING_BACKEND": "null",
+                    "HOME": str(tmp_path),
+                },
+            )
+
+        offer.assert_called_once()
+        assert sync.call_count == 1, "the offer raised before the post-lock Fernet sync ran"
 
 
 class TestTheDeclineHintIsHonestOnWsl:
@@ -642,7 +697,7 @@ class TestTheQuestionIsExplicit:
     def test_linux_is_told_about_lingering_before_answering(
         self, console: WorthlessConsole
     ) -> None:
-        """Lingering starts it at boot and outlives uninstall (worthless-fzas).
+        """Lingering starts it at boot; uninstall undoes it only if ours (worthless-fzas).
 
         It used to be said only in the banner AFTER install, and "when you
         log in" was false on systemd.
@@ -650,7 +705,7 @@ class TestTheQuestionIsExplicit:
         question = self._ask(console, backend="systemd")
         assert "when this computer" in question
         assert "lingering" in question
-        assert "loginctl disable-linger" in question
+        assert "turns lingering off, if this turned it on" in question
         assert "when you log in" not in question
 
     def test_a_moved_key_file_is_shown_where_it_really_is(
@@ -712,6 +767,36 @@ class TestContainersAreNotAsked:
         out = _flat(capsys.readouterr())
         assert "service install" not in out
         assert "worthless up" in out
+
+    @pytest.mark.parametrize(
+        ("var", "value"), [("KUBERNETES_SERVICE_HOST", "10.96.0.1"), ("CODESPACES", "true")]
+    )
+    def test_pods_and_codespaces_without_marker_files_are_not_asked(
+        self,
+        console: WorthlessConsole,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        var: str,
+        value: str,
+    ) -> None:
+        """worthless-g5rw: the real detector, not a stub. Pods and some
+        Codespaces images have neither /.dockerenv nor /run/.containerenv."""
+        monkeypatch.setattr(cli_platform, "Path", lambda p: tmp_path / p.lstrip("/"))
+        monkeypatch.setenv(var, value)
+        backend = MagicMock()
+        backend.detect_status.return_value = MagicMock(state=ServiceState.NOT_INSTALLED)
+        with (
+            patch("worthless.cli.commands.lock._in_container", cli_platform._in_container),
+            patch("worthless.cli.commands.lock._backend", return_value=backend),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock.typer.confirm", return_value=True) as confirm,
+            patch("worthless.cli.commands.lock.install_service_for_offer") as install,
+        ):
+            assert _offer_service_after_lock(console, home=_home(), port=8787) is False
+        confirm.assert_not_called()
+        install.assert_not_called()
+        assert "Inside a container" in _flat(capsys.readouterr())
 
 
 # The shape scan_env_keys returns: (variable name, value, provider).

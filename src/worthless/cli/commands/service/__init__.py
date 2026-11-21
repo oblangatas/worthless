@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess  # nosec B404 — only for CalledProcessError
 import sys
 
 import typer
@@ -17,7 +18,7 @@ from worthless.cli.commands.service._common import (
 )
 from worthless.cli.commands.service.proxy_state import detect_proxy_runtime
 from worthless.cli.console import get_console
-from worthless.cli.errors import error_boundary
+from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.platform import fail_if_windows, is_wsl
 from worthless.cli.process import disable_core_dumps, resolve_port
 
@@ -67,15 +68,14 @@ def _print_service_banner(
         # dies ~15 s after their last terminal closes. Linger does not outlive
         # WSL's idle shutdown; the warning above is the true story for them.
         #
-        # `worthless service uninstall` does NOT turn lingering back off.
-        # Deliberately: linger is account-wide, other user services may rely on
-        # it, and switching off state we may not have created is the mistake the
-        # install rollback exists to avoid. Say so instead. (worthless-fzas)
+        # `worthless service uninstall` turns lingering back off only when this
+        # install turned it on: linger is account-wide, and other user services
+        # may rely on it if it was on before. (worthless-fzas)
         if lingering:
             console.print_hint(
                 "Lingering is now on for this account, so the service survives logout. "
-                "`worthless service uninstall` leaves it on — turn it off yourself with "
-                "`loginctl disable-linger` if nothing else needs it."
+                "`worthless service uninstall` turns it off again, unless it was "
+                "already on before this install."
             )
         else:
             # worthless-8kn5: no local login (SSH, a container) — polkit said no.
@@ -87,6 +87,23 @@ def _print_service_banner(
                 "it lets every user service for this account keep running after logout."
             )
     console.print_hint("Status: `worthless service status` · Stop: `worthless service stop`")
+
+
+def _install_failed(exc: subprocess.CalledProcessError) -> WorthlessError:
+    """Name the platform command that failed, what it said, and one thing to try.
+
+    worthless-3j8x: run_cmd uses check=True, so a failing launchctl/systemctl
+    reached @error_boundary raw and printed WRTLS-199 "an internal error".
+    """
+    cmd = exc.cmd if isinstance(exc.cmd, str) else " ".join(map(str, exc.cmd))
+    tail = " ".join((exc.stderr or exc.stdout or "").strip().splitlines()[-2:])[-300:]
+    said = f": {tail}" if tail else "."
+    return WorthlessError(
+        ErrorCode.SERVICE_INSTALL_FAILED,
+        f"`{cmd}` failed (exit {exc.returncode}){said}\n"
+        "Fix: run `worthless doctor`, then `worthless service install` again. "
+        "Until then, start the proxy yourself with `worthless up`.",
+    )
 
 
 def uninstall_service(home: WorthlessHome) -> None:
@@ -138,7 +155,10 @@ def register_service_commands(app: typer.Typer) -> None:
                 raise typer.Exit(code=0)
 
         preflight_service_install(home)
-        lingering = backend.install(home, port=port)
+        try:
+            lingering = backend.install(home, port=port)
+        except subprocess.CalledProcessError as exc:
+            raise _install_failed(exc) from exc
         if console.json_mode:
             if backend is launchd:
                 unit = str(launchd.plist_path())

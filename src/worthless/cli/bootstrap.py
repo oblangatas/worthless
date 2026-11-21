@@ -27,12 +27,11 @@ from worthless._flags import (
 )
 from worthless.cli.errors import ErrorCode, WorthlessError, sanitize_exception
 from worthless.cli.keystore import (
-    _SERVICE,
-    _keyring_username,
     keyring_available,
     migrate_file_to_keyring,
     read_fernet_key,
     read_fernet_key_from_file,
+    read_keyring_fernet,
     store_fernet_key,
 )
 from worthless.cli.platform import IS_WINDOWS
@@ -146,6 +145,26 @@ class WorthlessHome:
     # risk). get_home() discloses this to the user after ensure_home()
     # returns. Same exclusion rationale as _cached_fernet_key above.
     _adoption_note: str | None = field(default=None, init=False, repr=False, compare=False)
+    # worthless-e4j4: the keychain value, once found. See _keyring_fernet().
+    _keyring_found: bytearray | None = field(default=None, init=False, repr=False, compare=False)
+
+    def _keyring_fernet(self) -> bytearray | None:
+        """The keychain's Fernet value; a found one is read once per home (HF2).
+
+        Bootstrap, the key cascade and doctor's drift check each needed it, so
+        one ``doctor`` read the keychain 2-3 times — up to one macOS prompt per
+        read (worthless-e4j4). A miss or a failure is NOT remembered: a miss is
+        a silent re-read, and a key doctor's recovery import adds later in the
+        same command is then still seen. Raises what the backend raises.
+        Returns a copy (SR-01: callers may zero it).
+        """
+        if self._keyring_found is None:
+            found = read_keyring_fernet(self.base_dir)
+            if found is None:
+                return None
+            self._keyring_found = found
+            weakref.finalize(self, zero_buf, found)
+        return bytearray(self._keyring_found)
 
     @property
     def db_path(self) -> Path:
@@ -222,7 +241,9 @@ class WorthlessHome:
                 if self._cached_fernet_key is None:
                     logger.debug("WorthlessHome.fernet_key cache MISS — reading from keystore")
                     try:
-                        self._cached_fernet_key = read_fernet_key(self.base_dir)
+                        self._cached_fernet_key = read_fernet_key(
+                            self.base_dir, keyring_reader=self._keyring_fernet
+                        )
                         # Same finalizer discipline as _seed_cached_fernet_key;
                         # inlined because we already hold _cache_lock here.
                         weakref.finalize(self, zero_buf, self._cached_fernet_key)
@@ -540,13 +561,11 @@ def _seed_cache_from_advisory_source(home: WorthlessHome) -> None:
 
     if keyring_available() and home.fernet_key_path.exists():
         try:
-            import keyring
-
-            kr_val = keyring.get_password(_SERVICE, _keyring_username(home.base_dir))
-            if kr_val is not None:
-                file_key = read_fernet_key_from_file(home.base_dir)
-                kr_buf = bytearray(kr_val.encode())
+            kr_buf = home._keyring_fernet()
+            if kr_buf is not None:
+                file_key = bytearray()
                 try:
+                    file_key = read_fernet_key_from_file(home.base_dir)
                     if not hmac.compare_digest(file_key, kr_buf):
                         logger.warning(
                             "fernet.key differs from keyring; using keyring for this session"

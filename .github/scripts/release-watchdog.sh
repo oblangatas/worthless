@@ -52,7 +52,11 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 now=$(date +%s)
 # When release-notes.yml gained the run-name this matches on. Empty in a checkout
 # without that history, which simply means no floor.
-run_labels_since=$(git log -1 --format=%ct -S'run-name:' -- .github/workflows/release-notes.yml 2>/dev/null || true)
+# tail -1, not -1: `git log -S` matches every commit that CHANGES how many times
+# the string appears, newest first. Taking the newest walks this floor forward to
+# whenever release-notes.yml was last edited near run-name — and every live tag then
+# reads "not watched", silently, exit 0. Take the commit that INTRODUCED the labels.
+run_labels_since=$(git log --format=%ct -S'run-name:' -- .github/workflows/release-notes.yml 2>/dev/null | tail -1 || true)
 since=$(jq -nr --argjson t "$((now - MAX_AGE_H * 3600))" '$t | todate')
 
 # Every release-notes run in the window, one JSON object per line.
@@ -226,4 +230,12 @@ $(grep -E '^::(warning|notice)' "$log" | sed -E 's/^::[a-z]+( title=[^:]*)?::/- 
   rm -f "$out" "$log"
   alarm "$tag" "$sha" "$why"
 done 3< <(git for-each-ref --format='%(refname:lstrip=2) %(creatordate:unix)' 'refs/tags/v*')
-echo "Watched ${watched} tag(s) from the last $((MAX_AGE_H / 24)) days."
+# Name what it looked at, always. "Watched 0 tag(s)" alone is byte-identical whether
+# every release is fine or the checkout has no tags at all (a shallow fetch, a changed
+# tag scheme) — an unfalsifiable green, which is the shape of failure this watches for.
+newest=$(git for-each-ref --sort=-creatordate --format='%(refname:lstrip=2) %(creatordate:unix)' 'refs/tags/v*' | head -n 1)
+if [ -z "$newest" ]; then
+  echo "Watched ${watched} tag(s): this checkout has NO v* tags at all — nothing could be judged."
+else
+  echo "Watched ${watched} tag(s) from the last $((MAX_AGE_H / 24)) days. Newest tag: ${newest%% *}, $(((now - ${newest##* }) / 3600))h old."
+fi

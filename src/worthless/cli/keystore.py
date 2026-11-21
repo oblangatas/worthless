@@ -7,6 +7,7 @@ import logging
 import os
 import stat
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import keyring
@@ -382,8 +383,25 @@ def _service_managed() -> bool:
     return os.environ.get("WORTHLESS_SERVICE_MANAGED", "").strip() == "1"
 
 
-def read_fernet_key(home_dir: Path | None = None) -> bytearray:
+def read_keyring_fernet(home_dir: Path | None = None) -> bytearray | None:
+    """One raw keychain read of the Fernet key, or None if there is no entry.
+
+    Raises whatever the backend raises. Every keychain read of the Fernet key
+    goes through here, so ``WorthlessHome`` can reuse one (worthless-e4j4).
+    """
+    value = keyring.get_password(_SERVICE, _keyring_username(home_dir))
+    return bytearray(value.encode()) if value is not None else None
+
+
+def read_fernet_key(
+    home_dir: Path | None = None,
+    *,
+    keyring_reader: Callable[[], bytearray | None] | None = None,
+) -> bytearray:
     """Read Fernet key from storage backends.
+
+    ``keyring_reader`` replaces the keychain step (``WorthlessHome`` passes
+    its own, which reuses a value already read this command — worthless-e4j4).
 
     Order (interactive): env var -> keyring -> file -> error.
     Order (``WORTHLESS_SERVICE_MANAGED=1``): env var -> file -> keyring -> error.
@@ -412,9 +430,9 @@ def read_fernet_key(home_dir: Path | None = None) -> bytearray:
     keyring_read_failed = False
     if keyring_available():
         try:
-            value = keyring.get_password(_SERVICE, _keyring_username(home_dir))
-            if value is not None:
-                return bytearray(value.encode())
+            found = keyring_reader() if keyring_reader else read_keyring_fernet(home_dir)
+            if found is not None:
+                return found
         except Exception:
             keyring_read_failed = True
             logger.debug("Keyring read failed", exc_info=True)

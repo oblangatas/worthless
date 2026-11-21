@@ -15,6 +15,7 @@ sealed with real Fernet keys, so "stale" and "mixed" are genuine, not mocked.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import sqlite3
 from pathlib import Path
@@ -26,6 +27,7 @@ from cryptography.fernet import Fernet
 
 from worthless.cli import key_check
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.commands import status as status_mod
 from worthless.cli.commands import up as up_mod
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.storage.shard_reader import ShardReader
@@ -142,6 +144,117 @@ class TestWhatUpDoes:
         (message,) = console.print_warning.call_args.args
         assert "side" in message and "work" not in message
         assert "worthless doctor --explain fernet_drift" in message
+        assert key_check.read_unopenable(home) == {"side"}, "status reads this (worthless-n2bj)"
+
+    def test_a_disk_error_recording_the_names_never_stops_up(self, home: WorthlessHome) -> None:
+        """The names file is a hint for `status`; failing to write it must not crash `up`."""
+        seal_enrolled(home.db_path, K1, "work")
+        seal_enrolled(home.db_path, K2, "side")
+        (home.base_dir / "run").write_text("not a directory")  # mkdir/open now fail
+        wait, _console = _check(home, K1, managed=True)
+        assert wait is False
+        # ...and status is told it couldn't read the notes, never a silent "all fine".
+        with pytest.raises(OSError):
+            key_check.read_unopenable(home)
+        _refused, warning = status_mod._proxy_key_hints(home)
+        assert warning and "can't tell whether the proxy's key unlocks" in warning
+        keys = [{"alias": "work", "provider": "openai", "status": "PROTECTED"}]
+        verdict, header = status_mod._status_verdict(
+            keys, True, False, True, survives_restart=True, key_check_error=warning
+        )
+        assert verdict == "key_check_unknown", "never green when status couldn't check"
+        assert header is not None and "🟢" not in header and "Can't tell" in header
+
+
+# A key that encodes 0xfb/0xff bytes uses both '+' and '/' in standard base64.
+_STD_ALPHABET_KEY = base64.b64encode(bytes([0xFB, 0xFF, 0xBF] * 10 + [0xFB, 0xFF]))
+
+
+class TestWhatAKeyMustLookLike:
+    """Round-2 review B1: accept exactly what Fernet accepts, or upgrades lock people out."""
+
+    @pytest.mark.parametrize(
+        "key",
+        [K1, K1 + b"\n", K1 + b"\r\n", K1 + b"  ", _STD_ALPHABET_KEY],
+        ids=["plain", "trailing-LF", "trailing-CRLF", "trailing-spaces", "standard-base64"],
+    )
+    def test_keys_fernet_accepts_today_are_accepted(self, key: bytes) -> None:
+        if key is _STD_ALPHABET_KEY:
+            assert b"+" in key and b"/" in key
+        Fernet(key)  # the ground truth: these work today
+        assert key_check.key_is_well_formed(bytearray(key))
+
+    @pytest.mark.parametrize(
+        "key",
+        [b"\x00\xffnot-a-fernet-key\n", b"", base64.urlsafe_b64encode(b"k" * 16), b"\xff" + K1],
+        ids=["garbage", "empty", "16-byte", "not-text"],
+    )
+    def test_garbage_is_refused(self, key: bytes) -> None:
+        assert not key_check.key_is_well_formed(bytearray(key))
+
+    def test_an_env_key_with_a_trailing_cr_starts_instead_of_waiting(
+        self, home: WorthlessHome, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A systemd Environment= value can carry a CR; it worked before this PR."""
+        monkeypatch.setenv("WORTHLESS_FERNET_KEY", K1.decode() + "\r\n")
+        with patch.object(up_mod, "is_service_managed", return_value=True):
+            key = up_mod._read_key_or_wait(home, MagicMock())
+        assert key is not None
+        assert key_check.read_key_file_refused(home) is None
+
+
+def _symlink_key(home: WorthlessHome) -> None:
+    real = home.base_dir.parent / "real.key"
+    real.write_bytes(K1)
+    real.chmod(0o600)
+    home.fernet_key_path.symlink_to(real)
+
+
+class TestARefusedKeyFile:
+    """worthless-srto + review: a refused FILE is not "this key can't unlock X"."""
+
+    def test_a_service_parks_and_records_the_refusal_not_the_aliases(
+        self, home: WorthlessHome
+    ) -> None:
+        seal_enrolled(home.db_path, K1, "work")
+        key_check.record_unopenable(home, ["work"])  # stale, from an earlier start
+        _symlink_key(home)
+        console = MagicMock()
+        with (
+            patch.object(up_mod, "is_service_managed", return_value=True),
+            patch.object(up_mod, "_wait_for_a_key_that_opens") as wait,
+        ):
+            assert up_mod._read_key_or_wait(home, console) is None
+        wait.assert_called_once()
+        console.print_error.assert_called_once()
+        assert "not a regular file" in (key_check.read_key_file_refused(home) or "")
+        assert key_check.read_unopenable(home) == set(), "no alias was checked"
+
+    def test_you_running_up_still_get_the_error(self, home: WorthlessHome) -> None:
+        _symlink_key(home)
+        with (
+            patch.object(up_mod, "is_service_managed", return_value=False),
+            pytest.raises(WorthlessError) as exc,
+        ):
+            up_mod._read_key_or_wait(home, MagicMock())
+        assert exc.value.code == ErrorCode.KEY_REFUSED
+
+    def test_a_readable_key_clears_the_refusal(self, home: WorthlessHome) -> None:
+        key_check.record_key_file_refused(home, "old refusal")
+        _write_key_file(home, K1)
+        key = up_mod._read_key_or_wait(home, MagicMock())
+        assert key is not None and bytes(key) == K1
+        assert key_check.read_key_file_refused(home) is None
+
+    def test_status_names_the_file_problem_with_its_own_fix(self) -> None:
+        keys = [{"alias": "work", "provider": "openai", "status": "PROTECTED"}]
+        msg = "fernet.key must be mode 0o600 (found 0o644) — refusing to read. Fix it with: chmod"
+        verdict, header = status_mod._status_verdict(
+            keys, False, False, False, key_file_refused=msg
+        )
+        assert verdict == "key_refused"
+        assert header is not None and "🔴" in header and "chmod" in header
+        assert "fernet_drift" not in header
 
     def test_nothing_locked_yet_starts(self, home: WorthlessHome) -> None:
         wait, console = _check(home, K2, managed=False)
