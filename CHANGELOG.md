@@ -5,6 +5,16 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- **On Linux, `worthless service uninstall` turns lingering off again if `worthless service install` turned it on** (worthless-fzas).
+  Before: `service install` ran `loginctl enable-linger`, so your account's user services kept running after logout and started at boot. `service uninstall` and `worthless uninstall` left lingering on. A failed install also left it on. The banner told you to run `loginctl disable-linger` yourself.
+  Now: when `service install` turns lingering on, it records that in `~/.worthless`. `service uninstall`, `worthless uninstall` and a failed first install turn lingering off again. If lingering was already on before the install, it stays on. If the system refuses to turn it off, you see a warning with the command to run.
+
+  **Limits.**
+  - The record is kept in `~/.worthless`. If you delete that folder yourself before you uninstall the service, lingering stays on.
+  - Tested with mocked `loginctl` and `systemctl`, not on a real systemd host.
+- **A failed `worthless service install` says which command failed and why** (worthless-3j8x).
+  Before: when `launchctl` or `systemctl` failed during `service install`, you saw "WRTLS-199: an internal error occurred".
+  Now: you see WRTLS-119 with the command that failed, its exit code, the last lines of its error output, and what to do next (`worthless doctor`, or `worthless up` until then).
 - **Ctrl-C during the service offer's first check no longer makes a finished `worthless lock` exit 130** (worthless-5oug).
   Before: after `lock` protected your keys, it checks whether a background service is already installed before it asks you anything. Ctrl-C during that check stopped `lock` with exit code 130, so a script saw a failure although the keys were already protected.
   Now: `lock` skips the offer and exits 0. Ctrl-C during the install itself was already handled this way.

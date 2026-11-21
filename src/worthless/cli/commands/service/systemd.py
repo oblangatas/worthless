@@ -27,6 +27,7 @@ from worthless.cli.commands.service._common import (
     unit_file_matches_home,
     report_proxy_health,
 )
+from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.platform import is_wsl, systemd_is_running
 from worthless.cli.process import poll_health, resolve_port
@@ -81,7 +82,17 @@ def _linger_enabled() -> bool:
     return "Linger=yes" in (result.stdout or "")
 
 
-def _ensure_linger() -> bool:
+def _linger_marker(home: WorthlessHome) -> Path:
+    """Present only while lingering is on because OUR install turned it on.
+
+    worthless-fzas: linger is account-wide, and other user services may rely
+    on it. So uninstall may only switch off what install switched on, and this
+    file is how it knows.
+    """
+    return home.base_dir / "linger-enabled-by-worthless"
+
+
+def _ensure_linger(home: WorthlessHome) -> bool:
     """Turn lingering on if the system lets us; return whether it is on.
 
     worthless-8kn5: with no local login session (SSH, a container) polkit
@@ -96,7 +107,30 @@ def _ensure_linger() -> bool:
         run_cmd(["loginctl", "--no-ask-password", "enable-linger", _session_user()])
     except subprocess.CalledProcessError:
         return False
+    _linger_marker(home).touch(mode=0o600)
     return True
+
+
+def _release_linger(home: WorthlessHome) -> None:
+    """Turn lingering off again, but only if :func:`_ensure_linger` turned it on."""
+    marker = _linger_marker(home)
+    if not marker.is_file():
+        return
+    try:
+        result = run_cmd(
+            ["loginctl", "--no-ask-password", "disable-linger", _session_user()], check=False
+        )
+        refused = result.returncode != 0
+    except OSError:
+        refused = True
+    if refused:
+        # Keep the marker, so a later uninstall tries again.
+        get_console().print_warning(
+            "Could not turn lingering back off for this account. Run "
+            f"`loginctl disable-linger {_account_name()}` if nothing else needs it."
+        )
+        return
+    marker.unlink(missing_ok=True)
 
 
 def installed_port() -> int | None:
@@ -230,7 +264,7 @@ def install(home: WorthlessHome, *, port: int | None = None) -> bool:
     # Removed only when THIS call created it, so a failed re-install never
     # deletes a unit that was already working.
     try:
-        lingering = _ensure_linger()
+        lingering = _ensure_linger(home)
         try:
             _systemctl("daemon-reload")
         except subprocess.CalledProcessError as exc:
@@ -282,6 +316,10 @@ def install(home: WorthlessHome, *, port: int | None = None) -> bool:
                 path.unlink(missing_ok=True)
             with contextlib.suppress(Exception):
                 _systemctl("daemon-reload", check=False)
+            # Same guard as the unit file: with no unit left, nothing of ours
+            # needs linger. A failed RE-install keeps it for the unit that works.
+            with contextlib.suppress(Exception):
+                _release_linger(home)
         raise
     report_proxy_health(actual_port)
     return lingering
@@ -294,6 +332,7 @@ def uninstall(home: WorthlessHome) -> None:
         _systemctl("disable", "--now", SYSTEMD_UNIT, check=False)
         path.unlink(missing_ok=True)
         _systemctl("daemon-reload", check=False)
+    _release_linger(home)
 
 
 def stop(home: WorthlessHome) -> None:

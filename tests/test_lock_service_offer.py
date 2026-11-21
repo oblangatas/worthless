@@ -697,7 +697,7 @@ class TestTheQuestionIsExplicit:
     def test_linux_is_told_about_lingering_before_answering(
         self, console: WorthlessConsole
     ) -> None:
-        """Lingering starts it at boot and outlives uninstall (worthless-fzas).
+        """Lingering starts it at boot; uninstall undoes it only if ours (worthless-fzas).
 
         It used to be said only in the banner AFTER install, and "when you
         log in" was false on systemd.
@@ -705,7 +705,7 @@ class TestTheQuestionIsExplicit:
         question = self._ask(console, backend="systemd")
         assert "when this computer" in question
         assert "lingering" in question
-        assert "loginctl disable-linger" in question
+        assert "turns lingering off, if this turned it on" in question
         assert "when you log in" not in question
 
     def test_a_moved_key_file_is_shown_where_it_really_is(
