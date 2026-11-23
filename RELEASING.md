@@ -33,7 +33,7 @@ because that sentence was not enforced, and the same bug shipped twice.
    version's section. After the tag, notes go in `[Unreleased]`: the `Changelog placement` check
    fails lines added under a tagged version, unless the PR has the `changelog-released-edit` label.
 
-3. **Approve three publishers.** In Actions, open each waiting run → **Review deployments**:
+3. **Approve three publishers.** `tag-release.sh` ends by running `scripts/approve-release.sh <tag>`: it lists the waiting runs at your tag's commit, asks `Approve all? [y/N]` once, approves these three and then the Release in step 4, and prints the Release URL. If it can't, it prints the manual path. To approve by hand, open each waiting run in Actions → **Review deployments**:
 
    | Run in Actions | Environment |
    | --- | --- |

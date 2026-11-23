@@ -3116,7 +3116,88 @@ GUARD_MUTATIONS = [
         "      - name: Image holds exactly the locked dependency set\n",
         "test_release_checks_the_image_before_pushing_it",
     ),
+    # WOR-1165: one `y` approves a release. Guards live in test_approve_release.py.
+    (
+        "approve-release stops asking before it approves",
+        "scripts/approve-release.sh",
+        'if [ "$assume_yes" != "true" ]; then',
+        "if false; then",
+        "test_answering_no_approves_nothing",
+    ),
+    (
+        "approve-release approves the publishers but never the release environment",
+        "scripts/approve-release.sh",
+        'approve_env "$rn_id" "$rel_eid" release',
+        ":",
+        "test_one_y_approves_the_publishers_then_the_release",
+    ),
+    (
+        "approve-release swallows a failed publisher",
+        "scripts/approve-release.sh",
+        'exit "$EXIT_FAILED" # a publisher failed',
+        ":",
+        "test_a_failed_publisher_is_named_and_exits_1",
+    ),
+    (
+        "approve-release approves runs at any commit",
+        "scripts/approve-release.sh",
+        '.event == "push" and .head_sha == $sha and',
+        '.event == "push" and',
+        "test_a_run_at_another_commit_is_never_approved",
+    ),
+    (
+        "approve-release approves a dispatched run, not only the tag's push",
+        "scripts/approve-release.sh",
+        '.event == "push" and .head_sha == $sha and',
+        ".head_sha == $sha and",
+        "test_a_dispatched_run_on_the_same_environment_is_never_approved",
+    ),
+    (
+        "approve-release approves any environment name",
+        "scripts/approve-release.sh",
+        '    *" $1 "*) return 0 ;;',
+        "    *) return 0 ;;",
+        "test_an_unexpected_environment_is_never_approved",
+    ),
+    (
+        "approve-release trusts GitHub's tag over the local signed one",
+        "scripts/approve-release.sh",
+        'if [ "$remote_sha" != "$sha" ]; then',
+        "if false; then",
+        "test_github_tag_moved_from_the_local_signed_tag_refuses",
+    ),
+    (
+        "approve-release ignores --expect-sha",
+        "scripts/approve-release.sh",
+        'if [ -n "$expect_sha" ] && [ "$expect_sha" != "$sha" ]; then',
+        "if false; then",
+        "test_expect_sha_mismatch_refuses",
+    ),
+    (
+        "approve-release approves a release-titled run that is not a workflow_run",
+        "scripts/approve-release.sh",
+        'select(.event == "workflow_run" and .title == $t',
+        "select(.title == $t",
+        "test_a_release_titled_run_that_is_not_a_workflow_run_is_never_approved",
+    ),
+    (
+        "approve-release times out before the Docker publisher can finish",
+        "scripts/approve-release.sh",
+        "timeout_min=60",
+        "timeout_min=30",
+        "test_default_timeout_outlasts_the_slowest_publisher",
+    ),
+    (
+        "tag-release.sh no longer hands off to approve-release",
+        "scripts/tag-release.sh",
+        './scripts/approve-release.sh "$tag" || approve_rc=$?',
+        ":",
+        "test_tag_release_hands_off_to_approve_after_the_push",
+    ),
 ]
+
+# Guard files the harness copies and runs alongside this one.
+_GUARD_TEST_FILES = (Path(__file__).name, "test_approve_release.py")
 
 
 class TestGuardsCanActuallyFail:
@@ -3156,7 +3237,8 @@ class TestGuardsCanActuallyFail:
         # Dockerfile: the WOR-1077 guards read it.
         shutil.copy(REPO_ROOT / "Dockerfile", tmp_path / "Dockerfile")
         (tmp_path / "tests").mkdir()
-        shutil.copy(Path(__file__), tmp_path / "tests" / Path(__file__).name)
+        for name in _GUARD_TEST_FILES:
+            shutil.copy(Path(__file__).parent / name, tmp_path / "tests" / name)
 
         def run_guard() -> subprocess.CompletedProcess[str]:
             return subprocess.run(
@@ -3164,7 +3246,7 @@ class TestGuardsCanActuallyFail:
                     sys.executable,
                     "-m",
                     "pytest",
-                    str(tmp_path / "tests" / Path(__file__).name),
+                    *(str(tmp_path / "tests" / name) for name in _GUARD_TEST_FILES),
                     # Exclude this harness: `-k <name>` also matches the parametrize
                     # id below, which would make the subprocess re-run the harness
                     # recursively (and mask the guard's own verdict).

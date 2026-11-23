@@ -177,7 +177,9 @@ echo "       refs/tags/v*, which the cosign identity depends on). If either alre
 echo "       has it, release a new version instead — never move a tag that shipped."
 echo
 tag_commit=$(git rev-parse --short "${tag}^{commit}")
-echo "YOU MUST APPROVE FOUR TIMES — Actions → the waiting run → Review deployments:"
+echo "FOUR APPROVALS are needed. At the end, scripts/approve-release.sh lists them and"
+echo "asks ONCE (WOR-1165). If it cannot, approve each one by hand — Actions → the"
+echo "waiting run → Review deployments:"
 echo "  1. Publish to PyPI               (environment: pypi)"
 echo "  2. Publish worthless-mcp to npm  (environment: npm-publish)"
 echo "  3. Deploy Worker (worthless-sh)  (environment: worthless-sh-production)"
@@ -238,3 +240,16 @@ else
     echo "  gh release create $tag --draft --title \"$tag: <headline>\" --verify-tag --generate-notes"
 fi
 echo "Then look at why the automation did not fire before publishing the draft."
+echo
+
+# --- 6. One y approves the release (WOR-1165) ---------------------------------
+# The tag is already pushed. A failed or declined approval must never exit as if
+# tagging failed (and must not trip set -e): print the manual path and stop clean.
+approve_rc=0
+./scripts/approve-release.sh "$tag" || approve_rc=$?
+if [ "$approve_rc" -ne 0 ]; then
+    echo
+    echo "The tag $tag IS pushed. The release is not finished (approve-release exit $approve_rc)."
+    echo "Approve in the GitHub UI instead — the four approvals listed above — or run:"
+    echo "  ./scripts/approve-release.sh $tag"
+fi
