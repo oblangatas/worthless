@@ -174,7 +174,7 @@ const prompt = encodeURIComponent(
   "Please audit the Worthless installer script before I run it. " +
     "Check for data exfiltration, privilege escalation, persistence, " +
     "obfuscation, and unsafe downloads. Raw script: " +
-    "https://raw.githubusercontent.com/oblangatas/worthless/v0.3.16/install.sh",
+    "https://raw.githubusercontent.com/oblangatas/worthless/v0.3.18/install.sh",
 );
 const auditUrls = {
   claude: "https://claude.ai/new?q=" + prompt,
