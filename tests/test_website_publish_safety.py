@@ -337,6 +337,24 @@ def test_website_legal_pages_match_the_owner_decisions() -> None:
         assert service in privacy, f"privacy.html must name {service}"
 
 
+def test_privacy_analytics_claim_matches_the_site() -> None:
+    """The privacy page may claim analytics only if the site loads a beacon.
+    2026-11-26: Cloudflare proxy turned off for wless.io, so no auto-injected
+    beacon; the page says no analytics run."""
+    privacy = (WEBSITE / "privacy.html").read_text(encoding="utf-8")
+    beacon = any(
+        "cloudflareinsights" in p.read_text(encoding="utf-8") for p in WEBSITE.rglob("*.html")
+    )
+    assert ("Web Analytics" in privacy) == beacon, "privacy analytics claim disagrees with the site"
+
+
+def test_site_names_the_operator_by_handle_only() -> None:
+    """Owner decision 2026-11-26: the site names the operator by the GitHub
+    handle, never the legal name or town, and never as a registered business."""
+    hits = _site_text_hits(r"Mendelowitz|Herzliya|sole proprietor")
+    assert not hits, f"operator identity leaked on the site: {hits}"
+
+
 def test_homepage_connects_the_maintainer_handles() -> None:
     """WOR-950 (owner decision 2026-10-15): link the GitHub and Ko-fi handles so
     visitors can tell they're the same maintainer; no real name on the homepage."""
