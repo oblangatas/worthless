@@ -4,6 +4,8 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.18] — 2026-11-21
+
 ### Fixed
 - **`worthless uninstall` and `worthless lock` no longer destroy a key that can still be rescued, and `worthless revoke` asks before it destroys one** (WOR-1135).
   Before: a key that lost its link (the v0.3.7–v0.3.14 doctor bug, WRTLS-102) was deleted by `worthless uninstall --yes` with exit 0. A key whose project folder you moved or deleted was deleted the same way. `worthless lock` on a `--keys-only` value of such a key split it again, and the original key was lost. `worthless doctor` suggested `worthless uninstall --force` for a project whose `.env` was missing. `worthless revoke` destroyed a key with no question, also when an AI agent ran it.
@@ -51,6 +53,16 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
   **Limits.**
   - With no key in the keychain (a file-only setup), doctor still looks in the keychain more than one time. On macOS, a lookup that finds no entry shows no prompt.
+
+### Known issues
+- **The Docker image ships 7 OpenSSL flaws that have no fix in Debian yet** ([#793](https://github.com/oblangatas/worthless/pull/793), [#797](https://github.com/oblangatas/worthless/pull/797)).
+  The image uses Debian trixie's OpenSSL 3.5.9-1~deb13u1. CVE-2026-84786, CVE-2026-88823, CVE-2026-95691, CVE-2026-95692, CVE-2026-107493, CVE-2026-107496 and CVE-2026-124709 are not fixed in it. The upstream fix is OpenSSL 3.5.10.
+  The affected code is DANE, CMS/S-MIME, AES-GCM-SIV, QUIC, and one PEM certificate-list reader. Worthless doesn't call any of it. The proxy's TLS to your provider uses Python's `ssl` without DANE or QUIC.
+
+  **Limits.**
+  - The "doesn't call it" check was measured on the 3.5.7 image, not re-run on 3.5.9.
+  - The scan exemptions for these flaws in `.grype.yaml` expire on 2026-12-15. After that the scan fails until each one is fixed or argued again.
+  - Every install, with or without Docker, also has the OpenSSL 4.0.3 that the `cryptography` 50.0.2 package bundles. Five of these flaws (CVE-2026-84786, CVE-2026-88823, CVE-2026-95692, CVE-2026-107493, CVE-2026-124709) are treated as present in it. The fix is OpenSSL 4.0.4. Worthless uses only Fernet, hashes and HKDF from `cryptography`, and none of these reach the flaws. The scan doesn't report this copy. WOR-1155 tracks the `cryptography` upgrade.
 
 ## [0.3.17] — 2026-11-18
 
@@ -971,6 +983,7 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.18]: https://github.com/oblangatas/worthless/releases/tag/v0.3.18
 [0.3.17]: https://github.com/oblangatas/worthless/releases/tag/v0.3.17
 [0.3.16]: https://github.com/oblangatas/worthless/releases/tag/v0.3.16
 [0.3.15]: https://github.com/oblangatas/worthless/releases/tag/v0.3.15

@@ -52,7 +52,7 @@ TOOL_PYTHON=">=3.14.10,<3.15"
 # HONEST SCOPE: the pin picks WHICH release; it does not verify package bytes
 # (`uv tool install` has no --require-hashes), and does not help if the Worker
 # itself is compromised. Override with `WORTHLESS_VERSION=x.y.z curl … | sh`.
-WORTHLESS_VERSION_PIN="0.3.17"
+WORTHLESS_VERSION_PIN="0.3.18"
 
 # SHA256 of https://astral.sh/uv/${UV_VERSION}/install.sh — bump with UV_VERSION.
 ASTRAL_INSTALLER_SHA256="d263ee68314cf5bea36b08e6bd9e2c4563240d7adb73756cf33af5c199b92db4"
