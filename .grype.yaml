@@ -976,3 +976,139 @@ ignore:
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
     reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 on arm64 (main b49a2007) and amd64 (ghcr 0.3.17 @ 3dc5d05d): only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. Source: grype DB (Debian/Red Hat/Ubuntu records); Debian fix=not-fixed in 12/13/14/sid. Tracking worthless-3g4u."
     expiry: "2026-12-15"
+
+  # ── OpenSSL 3.5.9 (trixie), CVE-2026-121482 CRL check CPU (worthless-3g4u) ──
+  # Turned main's required `scan` red on 2026-11-23 (scheduled run
+  # 45227633735 on 93b602c4). The same commit passed on 2026-11-21, so this is
+  # a new advisory, not a code change. The flaw: when a verifier has CRL
+  # checking switched on, crl_crldp_check() rebuilds every CRL distribution
+  # point name once per CRL it checks. A certificate with many CRL DPs burns
+  # CPU (quadratic in message size for CMS / PKCS#7 SignedData). DoS only.
+  # OpenSSL rates it Low; grype's High is NVD's mechanical 7.5 (A:H).
+  #
+  # SOURCE. OpenSSL advisory https://openssl-library.org/news/secadv/20261124.txt
+  # (read 2026-11-26): Severity Low; "Applications that leave CRL checking
+  # disabled are not affected"; CRL checking "is off by default". In TLS the
+  # CRLs come from the local store, so a peer controls only the DP count.
+  # Fixed in 3.5.10, releases scheduled for 2026-12-01. Upstream fix
+  # https://github.com/openssl/openssl/pull/33546, merged into branches 3.5,
+  # 4.0 and 4.1 on 2026-11-18; on openssl-3.5 it is commit 468c287cf451.
+  # Grype's database (schema v6.1.10, built 2026-11-26 06:22 UTC,
+  # `grype db search --vuln CVE-2026-121482`) has these providers:
+  #   Debian  https://security-tracker.debian.org/tracker/CVE-2026-121482
+  #           openssl fix=not-fixed in debian 13, 14 and unstable. No
+  #           debian 12 record: bookworm's OpenSSL 3.0 is not affected.
+  #   Red Hat https://access.redhat.com/security/cve/CVE-2026-121482 (NVD:
+  #           https://nvd.nist.gov/vuln/detail/CVE-2026-121482)
+  #   Ubuntu  https://ubuntu.com/security/CVE-2026-121482
+  #   cve.org https://www.cve.org/CVERecord?id=CVE-2026-121482
+  # Because sid is unfixed too, no base-image bump fixes this.
+  #
+  # The slow code runs only when CRL checking is on. In 3.5.9's
+  # crypto/x509/x509_vfy.c, check_revocation() returns at once unless the
+  # verify params carry X509_V_FLAG_CRL_CHECK, and every path to
+  # crl_crldp_check() goes through it: check_revocation -> check_cert ->
+  # get_crl_score, either after ctx->get_crl or via get_crl_delta ->
+  # get_crl_sk.
+  #
+  # Measured 2026-11-24 on local buildx images of main 93b602c4, both arches,
+  # openssl / libssl3t64 / openssl-provider-legacy 3.5.9-1~deb13u1:
+  #   ELFs (pyelftools, undefined .dynsym imports; 757 arm64, 758 amd64):
+  #     CMS_verify, PKCS7_verify, X509_STORE_add_crl -> /usr/bin/openssl only.
+  #     X509_VERIFY_PARAM_set_flags -> Python's _ssl (driven by
+  #       SSLContext.verify_flags) and /usr/bin/openssl.
+  #     X509_STORE_set_flags -> /usr/bin/openssl and apt's http method. apt
+  #       loads a CRL only with the Acquire::https::CrlFile option; /etc/apt
+  #       sets none, and apt does not run in the container after build.
+  #     libssl.so.3 imports X509_STORE_CTX_set_flags to copy the caller's
+  #       flags; it sets no CRL flag itself.
+  #   Python (all 2440 .py files in the image): nothing sets
+  #     ssl.VERIFY_CRL_CHECK_LEAF / VERIFY_CRL_CHECK_CHAIN or loads a CRL. The
+  #     only matches are pip's vendored truststore, macOS/Windows branches.
+  #     Outbound provider TLS uses ssl.create_default_context() /
+  #     SSLContext(PROTOCOL_TLS_CLIENT) in src/worthless/proxy, which leave
+  #     CRL checking off. Worthless does no CMS / PKCS#7 verification.
+  #   No openssl.cnf in /etc/ssl turns on CRL checking (only the stock `ca`
+  #     section's crl paths).
+  #
+  # NOT COVERED: cryptography 50.0.2 bundles a statically linked OpenSSL 4.0.3,
+  # inside the affected range (fixed in 4.0.4), and its _rust.abi3.so contains
+  # PKCS7_verify and X509_STORE_add_crl. Grype does not flag it. Two Python
+  # paths could reach it: the private _rust.test_support.pkcs7_verify, and the
+  # raw cffi binding, which exposes X509_STORE_set_flags, X509_STORE_add_crl
+  # and X509_V_FLAG_CRL_CHECK. Nothing in the image outside cryptography
+  # itself imports either, pyOpenSSL is not installed, and Worthless imports
+  # only Fernet, hashes and HKDF, so it is unreachable today. The cryptography
+  # bump in WOR-1155 closes this too. ALSO NOT COVERED: a `docker exec` user who
+  # runs `openssl cms -verify -crl_check ...` by hand burns only their own CPU.
+  #
+  # Pinned to the exact Debian version, like the batches above. At expiry,
+  # delete these if Debian has shipped 3.5.10 or a backport of 468c287cf451;
+  # otherwise re-measure with the same sweep on both arches. Delete them at once
+  # if anything in the image starts setting VERIFY_CRL_CHECK_* or verifying
+  # CMS / PKCS#7 messages.
+  - vulnerability: CVE-2026-121482
+    package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
+    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-24 on main 93b602c4 (arm64 + amd64): nothing in the image sets VERIFY_CRL_CHECK_* or loads a CRL; CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-08"
+  - vulnerability: CVE-2026-121482
+    package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
+    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-24 on main 93b602c4 (arm64 + amd64): nothing in the image sets VERIFY_CRL_CHECK_* or loads a CRL; CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-08"
+  - vulnerability: CVE-2026-121482
+    package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
+    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-24 on main 93b602c4 (arm64 + amd64): nothing in the image sets VERIFY_CRL_CHECK_* or loads a CRL; CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-08"
+
+  # ── OpenSSL 3.5.9 (trixie), CVE-2026-107494 QUIC RETIRE_CONNECTION_ID (worthless-3g4u) ─
+  # First in grype's database built 2026-11-26, as High. The flaw: the QUIC
+  # stack queues a RETIRE_CONNECTION_ID
+  # frame for every RETRANSMITTED NEW_CONNECTION_ID frame, with no cap, so a
+  # malicious QUIC peer can grow memory until OOM. It completes the fix for
+  # CVE-2026-84784. DoS only. OpenSSL rates it Low; grype's High is NVD's 7.5.
+  #
+  # SOURCE. OpenSSL advisory https://openssl-library.org/news/secadv/20261124.txt
+  # (read 2026-11-26): Severity Low; 4.1, 4.0 and 3.5 affected, 3.0 not; fixed
+  # in 3.5.10, releases scheduled for 2026-12-01. Grype's database (schema
+  # v6.1.10, built 2026-11-26 06:22 UTC, `grype db search --vuln
+  # CVE-2026-107494`) has these providers:
+  #   Debian  https://security-tracker.debian.org/tracker/CVE-2026-107494
+  #           openssl fix=not-fixed in debian 13, 14 and unstable.
+  #   Red Hat https://access.redhat.com/security/cve/CVE-2026-107494 (NVD:
+  #           https://nvd.nist.gov/vuln/detail/CVE-2026-107494)
+  #   Ubuntu  https://ubuntu.com/security/CVE-2026-107494
+  #   cve.org https://www.cve.org/CVERecord?id=CVE-2026-107494
+  # Because sid is unfixed too, no base-image bump fixes this.
+  #
+  # QUIC is opt-in: a program must create its connection with a QUIC method
+  # (OSSL_QUIC_client_method / OSSL_QUIC_server_method / SSL_new_listener).
+  # Same argument as CVE-2026-95691 above. Measured 2026-11-26 on local buildx
+  # images of main 93b602c4, both arches, 3.5.9-1~deb13u1, pyelftools over
+  # undefined .dynsym imports (757 arm64, 758 amd64 ELFs):
+  #   OSSL_QUIC_client_method, SSL_is_quic, SSL_handle_events -> /usr/bin/openssl
+  #     only (its `s_client -quic`). No ELF imports a QUIC server method or
+  #     SSL_new_listener.
+  #   Python side as CVE-2026-95691, re-swept 2026-11-26: no QUIC package is
+  #     installed in the image.
+  #
+  # NOT COVERED: cryptography 50.0.2's static OpenSSL 4.0.3 is in the affected
+  # range (fixed in 4.0.4). cryptography has no QUIC API, so it is unreachable;
+  # the cryptography bump in WOR-1155 closes this too. ALSO NOT COVERED: a
+  # `docker exec` user who runs `openssl s_client -quic` against a hostile
+  # server exhausts only their own process.
+  #
+  # Pinned to the exact Debian version. At expiry, delete these if Debian has
+  # shipped 3.5.10; otherwise re-measure with the same sweep on both arches.
+  # Delete them at once if anything in the image starts speaking QUIC.
+  - vulnerability: CVE-2026-107494
+    package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
+    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64): only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-08"
+  - vulnerability: CVE-2026-107494
+    package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
+    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64): only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-08"
+  - vulnerability: CVE-2026-107494
+    package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
+    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64): only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-08"
