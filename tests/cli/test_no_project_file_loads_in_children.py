@@ -69,6 +69,25 @@ def test_a_project_pythonpath_cannot_bring_the_folder_back(
     assert out.returncode == 0, out.stderr
 
 
+def test_the_real_sidecar_command_ignores_the_project(cloned_repo: Path) -> None:
+    """The sidecar holds the shares: run its exact argv in the hostile folder.
+    It exits early without its env; the import happens first, so a plant would run.
+    Mutation: helper -> plain `-m` -> the planted worthless/ package runs."""
+    seen: dict = {}
+
+    def stop(argv, **kwargs):
+        seen["argv"] = argv
+        raise RuntimeError("captured")
+
+    with (
+        patch.object(sidecar_lifecycle.subprocess, "Popen", side_effect=stop),
+        pytest.raises(RuntimeError, match="captured"),
+    ):
+        sidecar_lifecycle.spawn_sidecar(cloned_repo / "s.sock", MagicMock(), allowed_uid=0)
+    subprocess.run(seen["argv"], capture_output=True, timeout=30, check=False)
+    assert not (cloned_repo / "HIJACKED").exists(), (cloned_repo / "HIJACKED").read_text()
+
+
 def test_the_real_proxy_command_ignores_the_project(cloned_repo: Path) -> None:
     """uvicorn re-inserts its --app-dir itself; run the real proxy argv and see.
     Mutation: drop --app-dir from proxy_cmd -> the planted secrets.py runs."""

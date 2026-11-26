@@ -25,7 +25,8 @@ IS_WINDOWS: bool = sys.platform == "win32"
 # shadowed) runs first. The cwd itself is kept: WORTHLESS_HOME may be relative.
 # `-E` drops PYTHON* env, so a project's `.envrc` PYTHONPATH=. can't put the
 # folder back before the boot runs (PR #813 security review). Not `-I`: that
-# also drops user site-packages and breaks `pip install --user`.
+# also drops user site-packages and breaks `pip install --user`. Known limit:
+# `-E` drops PYTHONUSERBASE too, so a custom user base is not seen by children.
 # runpy restores the `-c` __main__ after the module returns, so atexit code
 # sees `__main__.__spec__ is None` where `-m` would show the module; nothing
 # in worthless reads it.
