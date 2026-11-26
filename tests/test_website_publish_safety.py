@@ -17,6 +17,15 @@ WEBSITE = REPO_ROOT / "website"
 ALLOWED_RELATIVE_PATHS = frozenset(
     {
         ".well-known/security.txt",
+        "fonts/Inter-italic-latin-ext.woff2",
+        "fonts/Inter-italic-latin.woff2",
+        "fonts/Inter-normal-latin-ext.woff2",
+        "fonts/Inter-normal-latin.woff2",
+        "fonts/JetBrainsMono-normal-latin-ext.woff2",
+        "fonts/JetBrainsMono-normal-latin.woff2",
+        "fonts/OFL-Inter.txt",
+        "fonts/OFL-JetBrainsMono.txt",
+        "fonts/fonts.css",
         "CNAME",
         "android-chrome-192x192.png",
         "android-chrome-512x512.png",
@@ -254,7 +263,7 @@ def test_website_homepage_launch_affordances_survive_promotion() -> None:
     assert 'href="blog/index.html"' in primary_nav_html
     assert 'href="red/index.html"' in primary_nav_html
     assert 'href="memes.html"' in primary_nav_html
-    assert 'href="#early-access"' in primary_nav_html
+    assert "#early-access" not in primary_nav_html  # waitlist dropped 2026-11-26
     assert 'href="https://ko-fi.com/shacharme"' in primary_nav_html
     assert '<span class="scroll-hint__text">Follow the leak</span>' in index
     assert "Hosted Worthless" in index
@@ -333,8 +342,11 @@ def test_website_legal_pages_match_the_owner_decisions() -> None:
     assert not hits, f"retired legal wording on the site: {hits}"
 
     privacy = (WEBSITE / "privacy.html").read_text(encoding="utf-8")
-    for service in ("Cloudflare", "Google Fonts", "gist.githubusercontent.com", "Tally"):
+    for service in ("GitHub Pages", "Cloudflare", "gist.githubusercontent.com"):
         assert service in privacy, f"privacy.html must name {service}"
+    # 2026-11-26: fonts are self-hosted, so no visitor IP goes to Google.
+    hits = _site_text_hits(r"fonts\.(googleapis|gstatic)\.com")
+    assert not hits, f"site still loads Google Fonts: {hits[:3]}"
 
 
 def test_privacy_analytics_claim_matches_the_site() -> None:
@@ -388,21 +400,16 @@ def _site_text_hits(pattern: str) -> list[str]:
     ]
 
 
-def test_website_waitlist_processing_is_disclosed_and_scoped() -> None:
-    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
+def test_website_collects_no_waitlist_emails() -> None:
+    """Owner decision 2026-11-26: no waitlist, so the site holds nobody's email
+    and can name the operator by handle. Interest goes to GitHub Watch."""
+    hits = _site_text_hits(r"tally\.so|Join (the waitlist|early access)")
+    assert not hits, f"waitlist still on the site: {hits}"
     coming_soon = (WEBSITE / "coming-soon.html").read_text(encoding="utf-8")
-    privacy = (WEBSITE / "privacy.html").read_text(encoding="utf-8")
-
-    assert "https://tally.so/r/WOpNVL" in index
-    assert "https://tally.so/r/WOpNVL" in coming_soon
     assert "Hosted Worthless is a separate managed product being explored for later" in coming_soon
-    assert (
-        "does not imply current hosted service, team support, or protection for every secret type"
-        in coming_soon
-    )
-    assert "Tally" in privacy
-    assert "https://tally.so/help/privacy-policy" in privacy
-    assert "separate future Hosted Worthless managed product" in privacy
+    for page in ("index.html", "coming-soon.html"):
+        html = (WEBSITE / page).read_text(encoding="utf-8")
+        assert "Watch releases on GitHub" in html, page
 
 
 def test_every_public_html_page_links_legal_footer_cluster() -> None:
