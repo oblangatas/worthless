@@ -51,12 +51,19 @@ jobs:
         id: summary
         env:
           TAG: ${{ inputs.tag }}
+          REF: ${{ github.ref }}
+          ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: bash .github/scripts/approve-release-preflight.sh
 
   approve:
     needs: preflight
+    # Skipped (never asks for the release-approver approval) unless main and the
+    # owner. preflight fails loudly in that case, so the run is red, not quiet.
+    # The approve step re-checks both as defence in depth.
+    if: github.ref == 'refs/heads/main' && github.triggering_actor == github.repository_owner
     runs-on: ubuntu-latest
     # Above the step's 85, which is above the script's 80 (see the step).
     timeout-minutes: 90

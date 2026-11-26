@@ -24,6 +24,17 @@ readonly RELEASE_RUN_TITLE_PREFIX="Create GitHub Release"
 summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 output="${GITHUB_OUTPUT:-/dev/null}"
 
+# The approve job is skipped by its `if:` in these cases. Fail here so the run
+# is red with a reason, instead of a quiet grey skip.
+if [ "${REF:-}" != "refs/heads/main" ]; then
+  echo "::error::run Approve release from main, not ${REF:-<unset>}. The approve job will be skipped."
+  exit 1
+fi
+if [ -z "${OWNER:-}" ] || [ "${ACTOR:-}" != "$OWNER" ]; then
+  echo "::error::only the repository owner may run Approve release. The approve job will be skipped."
+  exit 1
+fi
+
 if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "::error::tag must look like v1.2.3"
   exit 1

@@ -2871,6 +2871,28 @@ GUARD_MUTATIONS = [
         "test_approver_outlasts_the_slowest_release_path",
     ),
     (
+        "ask the owner to approve a non-owner or branch run",
+        ".github/workflows/approve-release.yml",
+        "    if: github.ref == 'refs/heads/main' && github.triggering_actor =="
+        " github.repository_owner\n",
+        "",
+        "test_approve_job_is_skipped_off_main_or_for_non_owners",
+    ),
+    (
+        "preflight goes green on a branch run",
+        ".github/scripts/approve-release-preflight.sh",
+        'if [ "${REF:-}" != "refs/heads/main" ]; then',
+        "if false; then",
+        "test_preflight_fails_loudly_off_main_or_for_non_owners",
+    ),
+    (
+        "preflight goes green for a non-owner",
+        ".github/scripts/approve-release-preflight.sh",
+        'if [ -z "${OWNER:-}" ] || [ "${ACTOR:-}" != "$OWNER" ]; then',
+        "if false; then",
+        "test_preflight_fails_loudly_off_main_or_for_non_owners",
+    ),
+    (
         "stop telling the script which commit the owner saw",
         ".github/workflows/approve-release.yml",
         ' --expect-sha "$EXPECTED_SHA"',
@@ -4227,7 +4249,11 @@ def _read_or_empty(path: Path) -> str:
 
 
 def _run_preflight(
-    tmp_path: Path, api: dict[str, object], script_present: bool = True
+    tmp_path: Path,
+    api: dict[str, object],
+    script_present: bool = True,
+    ref: str = "refs/heads/main",
+    actor: str = "owner",
 ) -> tuple[subprocess.CompletedProcess[str], str, str]:
     """Run the REAL preflight script against a fake gh. Returns (proc, summary, output)."""
     fake_dir = tmp_path / "api"
@@ -4251,6 +4277,9 @@ def _run_preflight(
         "GH_TOKEN": "t",
         "GITHUB_STEP_SUMMARY": str(summary),
         "GITHUB_OUTPUT": str(output),
+        "REF": ref,
+        "ACTOR": actor,
+        "OWNER": "owner",
     }
     proc = subprocess.run(
         ["bash", str(APPROVE_PREFLIGHT_SCRIPT)],
@@ -4492,6 +4521,40 @@ class TestApproveReleaseWiring:
             "run waiting on a non-release environment (6) — approve-release.sh's rules"
         )
         assert "| pypi |" in rows[1] and "| release |" in rows[4]
+
+    def test_approve_job_is_skipped_off_main_or_for_non_owners(self):
+        """A non-owner or non-main run must never even ask for the release-approver
+        approval: the job-level `if:` skips the job before its environment gate."""
+        cond = " ".join(str(_approver_job().get("if", "")).split())
+        assert cond == (
+            "github.ref == 'refs/heads/main' && github.triggering_actor == github.repository_owner"
+        ), f"approve job `if:` is {cond!r}; it must require main AND the repository owner"
+        (step,) = [
+            s
+            for s in _preflight_job()["steps"]
+            if "approve-release-preflight.sh" in s.get("run", "")
+        ]
+        assert step["env"].get("REF") == "${{ github.ref }}"
+        assert step["env"].get("ACTOR") == "${{ github.triggering_actor }}"
+        assert step["env"].get("OWNER") == "${{ github.repository_owner }}"
+
+    # Separate tmp dirs: _run_preflight builds a fresh tree each call.
+    def test_preflight_fails_loudly_off_main_or_for_non_owners(self, tmp_path):
+        cases = [
+            ("refs/heads/evil", "owner"),
+            ("refs/tags/v1.2.3", "owner"),
+            ("refs/heads/main", "someone-else"),
+            ("refs/heads/main", ""),
+        ]
+        for n, (ref, actor) in enumerate(cases):
+            case_dir = tmp_path / str(n)
+            case_dir.mkdir()
+            proc, _, output = _run_preflight(case_dir, _preflight_api([]), ref=ref, actor=actor)
+            assert proc.returncode != 0 and "::error::" in proc.stdout, (
+                f"preflight passed for ref={ref!r} actor={actor!r}. The approve job is "
+                "skipped then, so without a red preflight the run looks like nothing happened."
+            )
+            assert "commit=" not in output
 
     def test_preflight_stops_when_the_approve_script_is_missing(self, tmp_path):
         proc, _, _ = _run_preflight(tmp_path, _preflight_api([]), script_present=False)
