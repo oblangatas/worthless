@@ -4,6 +4,15 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Known issues
+- **The Docker image ships 2 more OpenSSL flaws that have no fix in Debian yet** ([#809](https://github.com/oblangatas/worthless/pull/809)).
+  The image uses Debian trixie's OpenSSL 3.5.9-1~deb13u1. CVE-2026-121482 and CVE-2026-107494 are not fixed in it. OpenSSL rates both Low. The upstream fix is OpenSSL 3.5.10.
+  The affected code is X.509 CRL checking and QUIC. Worthless doesn't call either. The proxy's TLS to your provider uses Python's `ssl` with CRL checking off and no QUIC.
+
+  **Limits.**
+  - The scan exemptions for these 2 flaws in `.grype.yaml` expire on 2026-12-08. After that the scan fails until each one is fixed or argued again.
+  - The `cryptography` 50.0.2 package bundles OpenSSL 4.0.3, which has both flaws. The fix is OpenSSL 4.0.4. Worthless uses only Fernet, hashes and HKDF from `cryptography`, and none of these reach the flaws.
+
 ## [0.3.18] — 2026-11-21
 
 ### Fixed
