@@ -42,9 +42,19 @@ def _patch_delete_fernet_key(request):
 
 
 def _invoke_revoke(alias: str, home: WorthlessHome) -> Result:
-    """Invoke ``worthless revoke --alias=<alias>`` with home overridden."""
+    """Invoke ``worthless revoke --alias=<alias> --yes`` with home overridden."""
     with patch("worthless.cli.commands.revoke.get_home", return_value=home):
-        return runner.invoke(app, ["revoke", "--alias", alias])
+        return runner.invoke(app, ["revoke", "--alias", alias, "--yes"])
+
+
+def _invoke_revoke_as(alias: str, home: WorthlessHome, *, tty: bool, answer: str = "") -> Result:
+    """``worthless revoke --alias <alias>`` with no --yes, as a person at a
+    terminal (``tty=True``, typing *answer*) or as a script/agent (no terminal)."""
+    with (
+        patch("worthless.cli.commands.revoke.get_home", return_value=home),
+        patch("worthless.cli.commands.revoke._stdin_is_tty", return_value=tty),
+    ):
+        return runner.invoke(app, ["revoke", "--alias", alias], input=answer)
 
 
 def _enrollments_for(home: WorthlessHome, alias: str) -> list:
@@ -221,7 +231,7 @@ class TestRevokeDebugMode:
             "worthless.cli.commands.revoke._revoke_key",
             side_effect=RuntimeError("internal boom"),
         ):
-            result = runner.invoke(app, ["--debug", "revoke", "--alias", "test-key"])
+            result = runner.invoke(app, ["--debug", "revoke", "--alias", "test-key", "--yes"])
         assert result.exit_code != 0
         # In debug mode the full traceback should be visible.
         # CliRunner mixes stderr into stdout by default.
@@ -264,3 +274,39 @@ class TestRevokeKeychainCleanup:
             result = _invoke_revoke("openai-a1b2c3d4", home_with_key)
         assert result.exit_code == 0, result.output
         mock_delete.assert_not_called()
+
+
+class TestRevokeAsksFirst:
+    """WOR-1135, plan "revoke --alias (TTY only)": revoke destroys a key for good,
+    so a person confirms at a terminal and a script or agent is refused."""
+
+    ALIAS = "openai-a1b2c3d4"
+
+    def test_no_terminal_refuses_and_keeps_the_key(self, home_with_key: WorthlessHome) -> None:
+        result = _invoke_revoke_as(self.ALIAS, home_with_key, tty=False)
+        assert result.exit_code == 1, result.output
+        assert _shard_exists(home_with_key, self.ALIAS)
+        assert "terminal" in result.output.lower(), result.output
+        # An agent copies what the error says; it must not learn the bypass here.
+        assert "--yes" not in result.output, result.output
+
+    def test_answering_no_keeps_the_key(self, home_with_key: WorthlessHome) -> None:
+        result = _invoke_revoke_as(self.ALIAS, home_with_key, tty=True, answer="n\n")
+        assert result.exit_code == 0, result.output
+        assert _shard_exists(home_with_key, self.ALIAS)
+        assert "nothing was changed" in result.output.lower(), result.output
+
+    def test_pressing_enter_keeps_the_key(self, home_with_key: WorthlessHome) -> None:
+        result = _invoke_revoke_as(self.ALIAS, home_with_key, tty=True, answer="\n")
+        assert result.exit_code == 0, result.output
+        assert _shard_exists(home_with_key, self.ALIAS)
+
+    def test_answering_yes_destroys_the_key(self, home_with_key: WorthlessHome) -> None:
+        result = _invoke_revoke_as(self.ALIAS, home_with_key, tty=True, answer="y\n")
+        assert result.exit_code == 0, result.output
+        assert not _shard_exists(home_with_key, self.ALIAS)
+
+    def test_yes_flag_works_without_a_terminal(self, home_with_key: WorthlessHome) -> None:
+        result = _invoke_revoke(self.ALIAS, home_with_key)
+        assert result.exit_code == 0, result.output
+        assert not _shard_exists(home_with_key, self.ALIAS)

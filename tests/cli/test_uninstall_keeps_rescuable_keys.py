@@ -124,8 +124,9 @@ def test_refusal_never_suggests_force(home_dir, tmp_path) -> None:
     assert "--force" not in result.output, result.output
 
 
-def test_the_suggested_revoke_command_works(home_dir, tmp_path) -> None:
-    """Every command a refusal suggests must run as printed."""
+def test_the_suggested_revoke_command_works(home_dir, tmp_path, monkeypatch) -> None:
+    """Every command a refusal suggests must run as printed, by a person at a
+    terminal who confirms it (revoke is TTY-only; scripts need --yes)."""
     env = _project(tmp_path, "app", "revoke")
     _lock(env, home_dir)
     alias = _unlink_like_the_bug(home_dir, env)
@@ -135,7 +136,8 @@ def test_the_suggested_revoke_command_works(home_dir, tmp_path) -> None:
     assert match, f"refusal must name a per-key way past:\n{refused.output}"
     assert match.group(1) == f"revoke --alias {alias}"
 
-    revoked = cli_invoke(match.group(1).split(), home_dir)
+    monkeypatch.setattr("worthless.cli.commands.revoke._stdin_is_tty", lambda: True)
+    revoked = cli_invoke(match.group(1).split(), home_dir, input="y\n")
     assert revoked.exit_code == 0, revoked.output
     assert cli_invoke(["uninstall", "--yes"], home_dir).exit_code == 0
 

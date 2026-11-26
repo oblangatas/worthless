@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sys
 from pathlib import Path
 
 import typer
@@ -95,6 +96,38 @@ def _revoke_key(alias: str) -> None:
         console.print_warning(f"Alias '{alias}' not found. Nothing to revoke.")
 
 
+def _stdin_is_tty() -> bool:
+    """Whether stdin is an interactive terminal (extracted for testability)."""
+    return sys.stdin.isatty()
+
+
+def _confirmed(alias: str, *, assume_yes: bool) -> bool:
+    """WOR-1135: revoke is permanent, so a person confirms it at a terminal.
+
+    A script or agent without a terminal is refused. The refusal deliberately
+    doesn't name the bypass flag: an agent copies what an error tells it.
+    """
+    if assume_yes:
+        return True
+    console = get_console()
+    if not _stdin_is_tty():
+        console.print_failure(
+            f"Not revoking {alias}: revoke destroys a key for good, so a person has "
+            "to confirm it. Ask the user to run this command in a terminal."
+        )
+        raise typer.Exit(code=1)
+    try:
+        proceed = typer.confirm(
+            f"Permanently destroy key {alias}? It can't be recovered.", default=False
+        )
+    except (typer.Abort, KeyboardInterrupt):
+        console.print_hint("Revoke cancelled — nothing was changed.")
+        raise typer.Exit(code=130) from None
+    if not proceed:
+        console.print_hint("Revoke cancelled — nothing was changed.")
+    return proceed
+
+
 def register_revoke_commands(app: typer.Typer) -> None:
     """Register the revoke command on the Typer app."""
 
@@ -102,6 +135,12 @@ def register_revoke_commands(app: typer.Typer) -> None:
     @error_boundary
     def revoke(
         alias: str = typer.Option(..., "--alias", "-a", help="Alias of the key to revoke"),
+        yes: bool = typer.Option(
+            False, "--yes", "-y", help="Skip the confirmation (scripts). The key is destroyed."
+        ),
     ) -> None:
         """Permanently revoke an enrolled API key."""
-        _revoke_key(alias)
+        if not _ALIAS_RE.match(alias):
+            raise WorthlessError(ErrorCode.SCAN_ERROR, f"Invalid alias: {alias!r}")
+        if _confirmed(alias, assume_yes=yes):
+            _revoke_key(alias)

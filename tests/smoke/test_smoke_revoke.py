@@ -67,7 +67,7 @@ def _lock(env_file: Path, home: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _revoke(alias: str, home: Path) -> subprocess.CompletedProcess[str]:
-    return _run(["revoke", "--alias", alias], home)
+    return _run(["revoke", "--alias", alias, "--yes"], home)
 
 
 # ---------------------------------------------------------------------------

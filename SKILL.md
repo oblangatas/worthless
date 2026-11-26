@@ -368,12 +368,13 @@ worthless service logs -f
 #### `worthless revoke --alias ALIAS`
 **Wipe an enrolled key (delete shards and all DB records).**
 
-Permanent: a revoked key can't be recovered. Agents run `revoke` only when the user names the key to destroy.
+Permanent: a revoked key can't be recovered. At a terminal, revoke asks first (default: no). Without a terminal it refuses unless `--yes` is given. Agents run `revoke` only when the user names the key to destroy, and pass `--yes` only when the user explicitly asks to destroy that key without a prompt; otherwise ask the user to run it themselves.
 
 Deletes Shard B and all associated records (enrollments, spend logs, time windows) from the database in a single atomic transaction. Removes shard-A from `.env` if still present.
 
 **Options:**
 - `--alias` / `-a` (required): alias of the key to revoke
+- `--yes` / `-y`: skip the confirmation (scripts). The key is destroyed.
 
 **Alias format:**
 - Deterministic: `{provider}-{first8hexofsha256(key)}`
