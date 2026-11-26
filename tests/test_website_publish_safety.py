@@ -263,7 +263,7 @@ def test_website_homepage_launch_affordances_survive_promotion() -> None:
     assert 'href="blog/index.html"' in primary_nav_html
     assert 'href="red/index.html"' in primary_nav_html
     assert 'href="memes.html"' in primary_nav_html
-    assert "#early-access" not in primary_nav_html  # waitlist dropped 2026-11-26
+    assert 'href="#early-access"' in primary_nav_html
     assert 'href="https://ko-fi.com/shacharme"' in primary_nav_html
     assert '<span class="scroll-hint__text">Follow the leak</span>' in index
     assert "Hosted Worthless" in index
@@ -400,16 +400,23 @@ def _site_text_hits(pattern: str) -> list[str]:
     ]
 
 
-def test_website_collects_no_waitlist_emails() -> None:
-    """Owner decision 2026-11-26: no waitlist, so the site holds nobody's email
-    and can name the operator by handle. Interest goes to GitHub Watch."""
-    hits = _site_text_hits(r"tally\.so|Join (the waitlist|early access)")
-    assert not hits, f"waitlist still on the site: {hits}"
+def test_website_waitlist_processing_is_disclosed_and_scoped() -> None:
+    """Owner decision 2026-11-26: keep the Tally waitlist under the handle, and
+    disclose it fully (EU storage, voluntary, consent, 24-month deletion)."""
+    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
     coming_soon = (WEBSITE / "coming-soon.html").read_text(encoding="utf-8")
+    privacy = (WEBSITE / "privacy.html").read_text(encoding="utf-8")
+    assert "https://tally.so/r/WOpNVL" in index
+    assert "https://tally.so/r/WOpNVL" in coming_soon
     assert "Hosted Worthless is a separate managed product being explored for later" in coming_soon
-    for page in ("index.html", "coming-soon.html"):
-        html = (WEBSITE / page).read_text(encoding="utf-8")
-        assert "Watch releases on GitHub" in html, page
+    for phrase in (
+        "Tally BV, Ghent, Belgium",
+        "https://tally.so/help/privacy-policy",
+        "only the email address you enter",
+        "joining is voluntary",
+        "24 months after you joined",
+    ):
+        assert phrase in privacy, phrase
 
 
 def test_every_public_html_page_links_legal_footer_cluster() -> None:
