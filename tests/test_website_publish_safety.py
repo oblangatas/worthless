@@ -429,3 +429,17 @@ def test_website_discovery_surfaces_exclude_internal_urls() -> None:
                 break
 
     assert offenders == []
+
+
+_INTERNAL_TICKET_ID = re.compile(r"\bWOR-\d+\b")
+
+
+def test_website_text_files_do_not_show_internal_ticket_ids() -> None:
+    offenders = [
+        f"{path.relative_to(REPO_ROOT).as_posix()}:{lineno}: {match.group()}"
+        for path in _public_text_files()
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if (match := _INTERNAL_TICKET_ID.search(line))
+    ]
+
+    assert offenders == [], f"Public pages show internal ticket IDs: {offenders}"
