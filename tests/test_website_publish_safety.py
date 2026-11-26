@@ -17,6 +17,15 @@ WEBSITE = REPO_ROOT / "website"
 ALLOWED_RELATIVE_PATHS = frozenset(
     {
         ".well-known/security.txt",
+        "fonts/Inter-italic-latin-ext.woff2",
+        "fonts/Inter-italic-latin.woff2",
+        "fonts/Inter-normal-latin-ext.woff2",
+        "fonts/Inter-normal-latin.woff2",
+        "fonts/JetBrainsMono-normal-latin-ext.woff2",
+        "fonts/JetBrainsMono-normal-latin.woff2",
+        "fonts/OFL-Inter.txt",
+        "fonts/OFL-JetBrainsMono.txt",
+        "fonts/fonts.css",
         "CNAME",
         "android-chrome-192x192.png",
         "android-chrome-512x512.png",
@@ -280,7 +289,7 @@ def test_ai_audit_reads_the_installer_that_actually_runs() -> None:
     """`curl worthless.sh` runs the released installer; browsers and AI fetchers
     get an HTML page from that host, and `main` can differ from the release.
     So the "Audit the installer with AI" prompt must point at a release tag,
-    never at main (checked 2026-11-13: the v0.3.16 tag file is byte-identical
+    never at main (checked 2026-11-24: the v0.3.18 tag file is byte-identical
     to what curl receives)."""
     js = (WEBSITE / "homepage.js").read_text(encoding="utf-8")
     assert "/main/install.sh" not in js, "the audit prompt must not read main"
@@ -333,8 +342,29 @@ def test_website_legal_pages_match_the_owner_decisions() -> None:
     assert not hits, f"retired legal wording on the site: {hits}"
 
     privacy = (WEBSITE / "privacy.html").read_text(encoding="utf-8")
-    for service in ("Cloudflare", "Google Fonts", "gist.githubusercontent.com", "Tally"):
+    for service in ("GitHub Pages", "Cloudflare", "gist.githubusercontent.com"):
         assert service in privacy, f"privacy.html must name {service}"
+    # 2026-11-26: fonts are self-hosted, so no visitor IP goes to Google.
+    hits = _site_text_hits(r"fonts\.(googleapis|gstatic)\.com")
+    assert not hits, f"site still loads Google Fonts: {hits[:3]}"
+
+
+def test_privacy_analytics_claim_matches_the_site() -> None:
+    """The privacy page may claim analytics only if the site loads a beacon.
+    2026-11-26: Cloudflare proxy turned off for wless.io, so no auto-injected
+    beacon; the page says no analytics run."""
+    privacy = (WEBSITE / "privacy.html").read_text(encoding="utf-8")
+    beacon = any(
+        "cloudflareinsights" in p.read_text(encoding="utf-8") for p in WEBSITE.rglob("*.html")
+    )
+    assert ("Web Analytics" in privacy) == beacon, "privacy analytics claim disagrees with the site"
+
+
+def test_site_names_the_operator_by_handle_only() -> None:
+    """Owner decision 2026-11-26: the site names the operator by the GitHub
+    handle, never the legal name or town, and never as a registered business."""
+    hits = _site_text_hits(r"Mendelowitz|Herzliya|sole proprietor")
+    assert not hits, f"operator identity leaked on the site: {hits}"
 
 
 def test_homepage_connects_the_maintainer_handles() -> None:
@@ -371,20 +401,22 @@ def _site_text_hits(pattern: str) -> list[str]:
 
 
 def test_website_waitlist_processing_is_disclosed_and_scoped() -> None:
+    """Owner decision 2026-11-26: keep the Tally waitlist under the handle, and
+    disclose it fully (EU storage, voluntary, consent, 24-month deletion)."""
     index = (WEBSITE / "index.html").read_text(encoding="utf-8")
     coming_soon = (WEBSITE / "coming-soon.html").read_text(encoding="utf-8")
     privacy = (WEBSITE / "privacy.html").read_text(encoding="utf-8")
-
     assert "https://tally.so/r/WOpNVL" in index
     assert "https://tally.so/r/WOpNVL" in coming_soon
     assert "Hosted Worthless is a separate managed product being explored for later" in coming_soon
-    assert (
-        "does not imply current hosted service, team support, or protection for every secret type"
-        in coming_soon
-    )
-    assert "Tally" in privacy
-    assert "https://tally.so/help/privacy-policy" in privacy
-    assert "separate future Hosted Worthless managed product" in privacy
+    for phrase in (
+        "Tally BV, Ghent, Belgium",
+        "https://tally.so/help/privacy-policy",
+        "only the email address you enter",
+        "joining is voluntary",
+        "24 months after you joined",
+    ):
+        assert phrase in privacy, phrase
 
 
 def test_every_public_html_page_links_legal_footer_cluster() -> None:
