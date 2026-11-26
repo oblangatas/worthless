@@ -991,8 +991,10 @@ def register_uninstall_commands(app: typer.Typer) -> None:
         """Restore every locked .env to its real key, then remove Worthless.
 
         Permissions are restored owner-only by default (never re-exposing a key
-        to other local users). A deleted project's .env is skipped; an
-        unrestorable real key blocks the wipe unless you pass --force. Editor MCP
+        to other local users). It stops before changing anything while a key
+        could still be rescued (it lost its link, or its project was moved or
+        deleted), and names each one; --force destroys them. An unrestorable
+        real key also blocks the wipe unless you pass --force. Editor MCP
         configs are only ever named, not edited, unless you pass --remove-mcp.
         """
         _run_uninstall(assume_yes=yes, force=force, remove_mcp=remove_mcp)
