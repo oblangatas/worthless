@@ -41,7 +41,7 @@ from worthless.cli.dotenv_rewriter import (
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.key_patterns import detect_provider
 from worthless.cli.log_redaction import _redact
-from worthless.cli.orphans import format_orphan_error
+from worthless.cli.orphans import RELINK_PENDING, format_orphan_error
 from worthless.cli.providers import is_bundled_url, lookup_by_name, lookup_by_url
 from worthless.cli.process import disable_core_dumps
 from worthless.crypto.reconstruction import reconstruct_key, reconstruct_key_fp
@@ -1075,8 +1075,7 @@ def register_unlock_commands(app: typer.Typer) -> None:
                     f"{', '.join(unrecognised)}. Keep these lines: don't delete "
                     f"them, re-lock, or uninstall Worthless. If Worthless's doctor "
                     f"repair ran on this machine (v0.3.7–v0.3.14), the key is "
-                    f"probably still recoverable and an upcoming release re-links "
-                    f'it; search "WRTLS-102" in the Worthless GitHub issues. If '
+                    f"probably still recoverable. {RELINK_PENDING} If "
                     f"this .env was copied from another machine, re-lock from the "
                     f"original machine.",
                 )
@@ -1135,6 +1134,20 @@ def register_unlock_commands(app: typer.Typer) -> None:
                     if not aliases:
                         await _raise_unrecognised_shards(repo)
                         console.print_warning("No enrolled keys found.")
+                        # WOR-1135: a doctor-bug victim's first try is plain
+                        # `unlock`; silence there reads as "the key is gone".
+                        linked = {e.key_alias for e in all_enrollments}
+                        unlinked = sorted(set(await repo.list_keys()) - linked)
+                        if unlinked:
+                            console.print_key_note(
+                                f"{len(unlinked)} key(s) on this machine lost the link "
+                                f"to their project (the Worthless doctor bug, "
+                                f"v0.3.7–v0.3.14): "
+                                f"{', '.join(map(_oc_audit.sanitise_for_message, unlinked))}. "
+                                f"They can "
+                                f"probably still be recovered: keep ~/.worthless and "
+                                f"don't uninstall Worthless. {RELINK_PENDING}"
+                            )
                         return False
 
                     planned = await _unlock_batch(

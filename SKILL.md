@@ -34,7 +34,7 @@ Worthless protects API keys in three scenarios:
 
 ### Scope (important for agents)
 
-Worthless scans for **LLM provider API key prefixes only** — currently `openai` (`sk-`, `sk-proj-`), `anthropic` (`sk-ant-`), `google` (`AIza`), and `xai` (`xai-`). It will NOT detect general secrets: cloud-provider tokens (AWS, GCP, Azure), GitHub Personal Access Tokens, npm tokens, Cloudflare API tokens, database passwords, JWT signing keys, etc. If the user asks for a broad "find all secrets" or full `.env` audit, clarify the boundary and recommend [gitleaks](https://github.com/gitleaks/gitleaks) or [trufflehog](https://github.com/trufflesecurity/trufflehog) as a companion tool. `worthless scan --json` returns `{"schema_version": 2, "findings": [...], "orphans": [...]}` — `findings` are `.env` keys (each with `is_protected` and `is_unshardable`; `is_unshardable: true` marks a Claude Code login token in a local `.env` file, in neither git's index nor its latest commit, that `lock` deliberately won't protect; such a token alone does not fail the scan, except in the `--pre-commit` hook. The same token anywhere else — a `.env` in git's index or latest commit, a symlink, another file, the environment — is exposed and fails. Either way, any finding that carries a `remediation` is a login token: do NOT run `lock` for it, follow the `remediation`; its `exposure` field says why — `local`, `committed`, `staged`, `git_unknown`, `symlink`, `other_file` or `environment`; a `local` one may also carry `committed_before`, the newest commit on any branch or tag that added or changed that `.env` — tell the user to revoke any login token that was ever in any committed version of it (the `remediation` says so), but it does not fail the scan), `orphans` are DB enrollments whose `.env` line or file is missing. Doctor treats a missing line as a dead key, and `worthless doctor --fix` purges it. That is a guess: a renamed variable or a commented-out line looks the same, and its key may still be recoverable (WOR-938) — check before running `--fix`. A missing file means the project moved or was deleted. If it moved, the key may still be recoverable — put the project back at the recorded path, then run `worthless unlock`. If it was deleted (`git worktree remove` deletes the `.env` too), that copy is gone — `worthless revoke --alias <alias>` removes it — but only if no other project has the same key locked: revoke removes a key everywhere it is locked, and `doctor --json` names the other copy when there is one. Never use `worthless uninstall` to clean one up: it deletes every key it can't restore. `worthless doctor --json` tells them apart: every orphan finding carries `reason`, either `env_line_missing` or `env_file_missing`. Both arrays are empty when nothing matches; an empty `findings` on a `.env` full of cloud tokens is correct behaviour, not a miss. Agents iterating findings: `for f in result["findings"]`. Guard against future shape breaks: `assert result["schema_version"] >= 2`. (HF5 changed shape from a bare findings array — schema 1.) `worthless scan --code` is a separate, opt-in scan that detects hardcoded provider base URLs (routing bypasses) in source files — it does NOT scan for key-prefix patterns and does NOT overlap with the default `.env` scan. Both scans have distinct limits: `--code` cannot detect runtime-composed URLs, IP literals, regional endpoints, or env-var interpolation.
+Worthless scans for **LLM provider API key prefixes only** — currently `openai` (`sk-`, `sk-proj-`), `anthropic` (`sk-ant-`), `google` (`AIza`), and `xai` (`xai-`). It will NOT detect general secrets: cloud-provider tokens (AWS, GCP, Azure), GitHub Personal Access Tokens, npm tokens, Cloudflare API tokens, database passwords, JWT signing keys, etc. If the user asks for a broad "find all secrets" or full `.env` audit, clarify the boundary and recommend [gitleaks](https://github.com/gitleaks/gitleaks) or [trufflehog](https://github.com/trufflesecurity/trufflehog) as a companion tool. `worthless scan --json` returns `{"schema_version": 2, "findings": [...], "orphans": [...]}` — `findings` are `.env` keys (each with `is_protected` and `is_unshardable`; `is_unshardable: true` marks a Claude Code login token in a local `.env` file, in neither git's index nor its latest commit, that `lock` deliberately won't protect; such a token alone does not fail the scan, except in the `--pre-commit` hook. The same token anywhere else — a `.env` in git's index or latest commit, a symlink, another file, the environment — is exposed and fails. Either way, any finding that carries a `remediation` is a login token: do NOT run `lock` for it, follow the `remediation`; its `exposure` field says why — `local`, `committed`, `staged`, `git_unknown`, `symlink`, `other_file` or `environment`; a `local` one may also carry `committed_before`, the newest commit on any branch or tag that added or changed that `.env` — tell the user to revoke any login token that was ever in any committed version of it (the `remediation` says so), but it does not fail the scan), `orphans` are DB enrollments whose `.env` line or file is missing. Doctor treats a missing line as a dead key, and `worthless doctor --fix` purges it. That is a guess: a renamed variable or a commented-out line looks the same, and its key may still be recoverable (WOR-938) — check before running `--fix`. A missing file means the project moved or was deleted. If it moved, the key may still be recoverable — put the project back at the recorded path, then run `worthless unlock`. If it was deleted (`git worktree remove` deletes the `.env` too), that copy is gone — `worthless revoke --alias <alias>` removes it — but only if no other project has the same key locked: revoke removes a key everywhere it is locked, and `doctor --json` names the other copy when there is one. Never use `worthless uninstall --force` to clean one up: it deletes every key it can't restore (plain `uninstall` refuses while such a key exists). `worthless doctor --json` tells them apart: every orphan finding carries `reason`, either `env_line_missing` or `env_file_missing`. Both arrays are empty when nothing matches; an empty `findings` on a `.env` full of cloud tokens is correct behaviour, not a miss. Agents iterating findings: `for f in result["findings"]`. Guard against future shape breaks: `assert result["schema_version"] >= 2`. (HF5 changed shape from a bare findings array — schema 1.) `worthless scan --code` is a separate, opt-in scan that detects hardcoded provider base URLs (routing bypasses) in source files — it does NOT scan for key-prefix patterns and does NOT overlap with the default `.env` scan. Both scans have distinct limits: `--code` cannot detect runtime-composed URLs, IP literals, regional endpoints, or env-var interpolation.
 
 ---
 
@@ -161,6 +161,8 @@ Scans the current `.env` and `.env.local` files for high-entropy values that mat
   openai-69ccc444  sk-proj-*  PROTECTED
 ```
 
+**Refusal (exit 117, WRTLS-117):** a value in the `.env` is already half of a stored key, usually one the doctor bug unlinked or a project that moved. Locking it again would destroy that key, so nothing is changed. Agents: don't treat this as "already protected" and don't retry; tell the user.
+
 #### `worthless unlock [OPTIONS]`
 **Reconstruct original API keys from shards and restore `.env`.**
 
@@ -183,10 +185,11 @@ Walks every `.env` Worthless locked on this machine, reconstructs each real key 
 
 **Options:**
 - `--yes` / `-y`: Skip the permission prompt (for agents / scripts); clamps loose modes to `0o600` by default.
+- `--force`: Last resort. Removes Worthless even when keys can't be restored, destroying them (it names each one). Agents never add `--force` unless the user explicitly asks to destroy those keys.
 
 **Behavior:**
 - Restore-all-then-wipe: if ANY `.env` can't be restored, nothing is wiped (Shard B is kept for a retry)
-- Exception: a key with no link (unlock reports WRTLS-102) is not checked and IS wiped. Never run `uninstall` while unlock reports WRTLS-102
+- Refuses (exit 103, nothing changed) while a key could still be rescued: a key with no link (unlock reports WRTLS-102, the v0.3.7–v0.3.14 doctor bug) or a locked project whose `.env` is missing (moved or deleted). It names each key and the options. Agents: stop and report this to the user; never retry with `--force` or run `revoke` on your own
 - Enroll-only keys (no `.env`) warn and are removed, but never block the uninstall
 - OpenClaw symmetric undo is best-effort and never blocks the wipe
 
@@ -362,13 +365,16 @@ worthless service logs -f
 
 **Interaction with default command:** Bare `worthless` starts a supervised proxy for the session; `worthless service install` is opt-in persistence (post-lock banner in a future release points here).
 
-#### `worthless revoke [OPTIONS] ALIAS`
+#### `worthless revoke --alias ALIAS`
 **Wipe an enrolled key (delete shards and all DB records).**
+
+Permanent: a revoked key can't be recovered. At a terminal, revoke asks first (default: no). Without a terminal it refuses unless `--yes` is given. Agents run `revoke` only when the user names the key to destroy, and pass `--yes` only when the user explicitly asks to destroy that key without a prompt; otherwise ask the user to run it themselves.
 
 Deletes Shard B and all associated records (enrollments, spend logs, time windows) from the database in a single atomic transaction. Removes shard-A from `.env` if still present.
 
 **Options:**
-- (None — takes alias as argument)
+- `--alias` / `-a` (required): alias of the key to revoke
+- `--yes` / `-y`: skip the confirmation (scripts). The key is destroyed.
 
 **Alias format:**
 - Deterministic: `{provider}-{first8hexofsha256(key)}`
@@ -466,7 +472,7 @@ Run: worthless doctor --fix
 
 **Use cases:**
 - `.env` line manually deleted → `worthless doctor --fix` purges the orphan row.
-- `.env` file moved or missing → doctor keeps the key. Moved: put the project back at the old path, then `worthless unlock`. Deleted (including `git worktree remove`): that copy is gone — `worthless revoke --alias <alias>` removes it — but only if no other project has the same key locked: revoke removes a key everywhere it is locked, and `doctor --json` names the other copy when there is one. Don't run `worthless uninstall` — it deletes every key it can't restore.
+- `.env` file moved or missing → doctor keeps the key. Moved: put the project back at the old path, then `worthless unlock`. Deleted (including `git worktree remove`): that copy is gone — `worthless revoke --alias <alias>` removes it — but only if no other project has the same key locked: revoke removes a key everywhere it is locked, and `doctor --json` names the other copy when there is one. Don't run `worthless uninstall --force` — it deletes every key it can't restore (plain `uninstall` refuses while such a key exists).
 - Keys appearing in iCloud Keychain → `worthless doctor --fix` migrates to device-local storage (multi-device warning shown first).
 - Moved to a new Mac → `worthless doctor` auto-imports recovery files left by the originating Mac.
 
@@ -629,7 +635,7 @@ worthless scan --code             # source files — hardcoded provider URLs (ro
 
 ### Permanently delete a key
 ```bash
-worthless revoke openai-69ccc444
+worthless revoke --alias openai-69ccc444
 ```
 
 ### Restore original key from shards (temporary)

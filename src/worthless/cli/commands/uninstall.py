@@ -39,11 +39,14 @@ from worthless.cli.commands.unlock import (
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import delete_fernet_key
+from worthless.cli.orphans import RESCUE_ISSUE_URL
 from worthless.cli.platform import IS_WINDOWS
 from worthless.crypto.types import zero_buf
 from worthless.openclaw import audit as _oc_audit
 
 logger = logging.getLogger(__name__)
+
+# Pinned issue that tells people hit by the doctor bug what to do (WOR-959).
 
 
 def _scrub_exc(exc: BaseException) -> str:
@@ -165,6 +168,143 @@ async def _read_enrollments(repo) -> list:  # noqa: ANN001
     return await repo.list_enrollments()
 
 
+def _file_gone(env_path: str) -> bool:
+    """True only when the file is really not there. ``stat()`` follows symlinks,
+    so a dangling symlink counts as gone too. Not ``exists()``: from Python 3.14
+    it returns False for any OSError, and before that it read ELOOP as gone
+    (WOR-1043)."""
+    try:
+        Path(env_path).stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _rescuable_keys(
+    aliases: list[str], enrollments: list[tuple[str, str | None]]
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Keys a wipe would destroy although they can still be rescued (WOR-1135).
+
+    ``unlinked``: a shard with no enrollment, as the v0.3.7–v0.3.14 doctor bug
+    left them. ``moved``: an enrollment whose .env is gone because the project
+    was moved, renamed or deleted. Either way Shard A may still sit in a .env
+    Worthless can't see, so the wipe would make the key unrecoverable.
+    """
+    unlinked = sorted(set(aliases) - {alias for alias, _ in enrollments})
+    gone = {(alias, path) for alias, path in enrollments if path is not None and _file_gone(path)}
+    # A key still locked in a project that exists comes back through it, so a
+    # moved copy doesn't put it at risk — and `revoke --alias` would break that
+    # live project, so it must never be suggested for such a key.
+    live = {alias for alias, path in enrollments if path is not None and (alias, path) not in gone}
+    moved = sorted((alias, path) for alias, path in gone if alias not in live)
+    return unlinked, moved
+
+
+def _read_only_uri(home) -> str:  # noqa: ANN001
+    """``as_uri`` percent-encodes the path: a raw '#', '?' or '%' in it would
+    end the filename early and blind the guard."""
+    return f"{Path(home.db_path).resolve().as_uri()}?mode=ro"
+
+
+def _read_keys(home) -> tuple[list[str], list[tuple[str, str | None]]]:  # noqa: ANN001
+    """Stored aliases and (alias, env_path) enrollments. Read-only, without the
+    Fernet key, so a locked keychain can't hide them. Raises ``sqlite3.Error``."""
+    con = sqlite3.connect(_read_only_uri(home), uri=True)
+    try:
+        aliases = [row[0] for row in con.execute("SELECT key_alias FROM shards")]
+        return aliases, con.execute("SELECT key_alias, env_path FROM enrollments").fetchall()
+    finally:
+        con.close()
+
+
+def _holds_no_keys(home) -> bool:  # noqa: ANN001
+    """True when the DB reads fine and has no shard rows; any failure is False."""
+    try:
+        return not _read_keys(home)[0]
+    except sqlite3.Error:
+        return False
+
+
+def _find_rescuable(home) -> tuple[list[str], list[tuple[str, str]]]:  # noqa: ANN001
+    """Read the rescuable keys before uninstall changes anything.
+
+    Plain read-only SQL, no Fernet key: a locked keychain must not hide which
+    keys a wipe would destroy. A busy DB refuses here with nothing changed. Any
+    other read failure returns nothing, so the broken-install path below
+    decides exactly as before.
+    """
+    try:
+        aliases, enrollments = _read_keys(home)
+    except sqlite3.Error as exc:
+        if _is_recoverable_repo_error(exc):
+            raise WorthlessError(
+                ErrorCode.LOCK_IN_PROGRESS,
+                "Worthless couldn't read its database because another process is using "
+                "it (most likely the running proxy). Nothing was changed — your keys "
+                "are safe. Stop it with `worthless down` and re-run.",
+            ) from exc
+        return [], []
+    return _rescuable_keys(aliases, enrollments)
+
+
+def _guard_rescuable(
+    console, unlinked: list[str], moved: list[tuple[str, str]], *, force: bool
+) -> None:  # noqa: ANN001
+    """Refuse to destroy a rescuable key (WOR-1135). Runs before any restore,
+    so a refusal really means nothing changed. ``--force`` goes on, but names
+    every such key first; ``print_key_note`` shows even under ``--quiet``."""
+    if not unlinked and not moved:
+        return
+    # Names come from the DB: no control characters for the terminal.
+    unlinked = [_shown(alias) for alias in unlinked]
+    moved = [(_shown(alias), path) for alias, path in moved]
+    rows = [f"  {alias}   lost its link to its project" for alias in unlinked]
+    rows += [
+        f"  {alias}   its project moved or was deleted: {_shown(path)}" for alias, path in moved
+    ]
+    aliases = dict.fromkeys([*unlinked, *(alias for alias, _ in moved)])
+    if force:
+        console.print_key_note(
+            f"--force: destroying {len(aliases)} key(s) that could have been rescued: "
+            f"{', '.join(aliases)}. "
+            "Rotate them at your provider."
+        )
+        return
+    lines = [
+        "uninstall stopped. Nothing was changed.",
+        "",
+        "These keys can still be rescued, and uninstalling now would destroy them:",
+        *rows,
+        "",
+    ]
+    if moved:
+        lines.append(
+            "If a project moved, put it back at that path, then run uninstall again "
+            "(you can move it afterwards)."
+        )
+    if unlinked:
+        tip = unlinked[0]
+        lines.append(
+            "A lost link is usually the Worthless doctor bug (v0.3.7–v0.3.14). Keep "
+            "~/.worthless: re-linking them is being built. A project "
+            f"locked with a proxy URL has a .env line containing /{tip}/. If an earlier "
+            "uninstall stopped partway, that key may already be back in its .env."
+        )
+    lines += [
+        f"See {RESCUE_ISSUE_URL}",
+        "",
+        "Sure you'll never need one of these keys? Remove just that key:",
+        *(f"  worthless revoke --alias {alias}" for alias in aliases),
+    ]
+    raise WorthlessError(
+        ErrorCode.SHARD_STORAGE_FAILED,
+        "\n".join(lines),
+        exit_code=ErrorCode.SHARD_STORAGE_FAILED.value,
+    )
+
+
 async def _restore_all(
     home, repo, enrollments: list, *, assume_yes: bool, console
 ) -> tuple[
@@ -249,16 +389,7 @@ async def _restore_all(
                 #     → `failed`, trips the guard.
                 #   - a folder it can't open (EACCES, EIO) or a symlink loop (ELOOP)
                 #     → `failed`, so the guard names it and --force can still finish.
-                #     Not exists(): from Python 3.14 it returns False for any OSError,
-                #     and before that it read ELOOP as gone (WOR-1043).
-                try:
-                    Path(env_path).stat()
-                    gone = False
-                except (FileNotFoundError, NotADirectoryError):
-                    gone = True
-                except OSError:
-                    gone = False
-                if gone:
+                if _file_gone(env_path):
                     missing.append(env_path)
                 else:
                     failed.append((env_path, _scrub_exc(exc)))
@@ -690,7 +821,8 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
     ``force`` is the escape hatch for broken states: it wipes even when keys
     can't be restored — a broken repo (no fernet key / corrupt DB) or a
     present-but-unrestorable ``.env``. Without it, an unrestorable REAL key
-    blocks the wipe (key-shredder guard); a MISSING ``.env`` never blocks.
+    blocks the wipe (key-shredder guard). A key whose every ``.env`` is missing,
+    or that lost its link, blocks too (WOR-1135): it may still be rescued.
     """
     console = get_console()
     # Don't bootstrap a home we're about to delete: resolve it directly so a
@@ -706,6 +838,10 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
 
     oc_partial = False
     with acquire_lock(home):
+        # WOR-1135: before anything is restored, so a refusal changes nothing.
+        unlinked, moved = _find_rescuable(home)
+        _guard_rescuable(console, unlinked, moved, force=force)
+
         read = False  # set once the install has been read: only before that is it "broken"
 
         async def _run():
@@ -752,9 +888,22 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
                     "openclaw.json may still point at the proxy for them. Re-run "
                     "`worthless uninstall` to restore the rest.",
                 ) from exc
-            restored, failed, missing, unlocked, enroll_only, oc_build_failed = _handle_broken_repo(
-                console, exc, force=force
-            )
+            if _holds_no_keys(home):
+                # Revoking the last key also removes the Fernet key, so the repo
+                # can't open, but there is nothing left to restore or lose: not a
+                # broken install that needs --force (WOR-1135).
+                restored, failed, missing, unlocked, enroll_only, oc_build_failed = (
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                    False,
+                )
+            else:
+                restored, failed, missing, unlocked, enroll_only, oc_build_failed = (
+                    _handle_broken_repo(console, exc, force=force)
+                )
 
         try:
             _report_outcomes(console, restored, missing, enroll_only)
@@ -842,8 +991,10 @@ def register_uninstall_commands(app: typer.Typer) -> None:
         """Restore every locked .env to its real key, then remove Worthless.
 
         Permissions are restored owner-only by default (never re-exposing a key
-        to other local users). A deleted project's .env is skipped; an
-        unrestorable real key blocks the wipe unless you pass --force. Editor MCP
+        to other local users). It stops before changing anything while a key
+        could still be rescued (it lost its link, or its project was moved or
+        deleted), and names each one; --force destroys them. An unrestorable
+        real key also blocks the wipe unless you pass --force. Editor MCP
         configs are only ever named, not edited, unless you pass --remove-mcp.
         """
         _run_uninstall(assume_yes=yes, force=force, remove_mcp=remove_mcp)

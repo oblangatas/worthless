@@ -71,8 +71,8 @@ def _build_summary(n: int, moved: int) -> str:
     parts = [f"{n} broken record{'s' if n != 1 else ''} (.env line or file missing)."]
     if dead:
         parts.append(
-            f"{dead} with the .env line deleted: run 'worthless doctor --fix' to purge, "
-            "or 'worthless uninstall --force' for a clean removal."
+            f"{dead} with the .env line deleted: run 'worthless doctor --fix' to purge; "
+            "after that, 'worthless uninstall' removes Worthless cleanly."
         )
     if moved:
         parts.append(
@@ -80,8 +80,8 @@ def _build_summary(n: int, moved: int) -> str:
             "never purged: if the project moved, put it back and run "
             "'worthless unlock'; if it was deleted, follow each finding's remediation "
             "(revoke is only safe for a key no other project has locked). To remove "
-            "Worthless entirely, 'worthless uninstall "
-            "--force' — it also deletes every key it can't restore."
+            "Worthless entirely, run 'worthless uninstall': it stops first and lists "
+            "every key it can't restore, with your options."
         )
     return " ".join(parts)
 
