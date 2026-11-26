@@ -56,6 +56,8 @@ ccpm/
 !.claude/skills/
 .claude/skills/*
 !.claude/skills/release/
+.claude/skills/release/*
+!.claude/skills/release/SKILL.md
 COMMANDS.md
 CONTEXT_ACCURACY.md
 LOCAL_MODE.md

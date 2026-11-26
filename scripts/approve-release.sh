@@ -95,6 +95,18 @@ done
 [ -n "$tag" ] || usage
 case "$timeout_min" in '' | *[!0-9]*) usage ;; esac
 timeout_s=${APPROVE_TIMEOUT_SECONDS:-$((timeout_min * 60))}
+poll=${APPROVE_POLL_SECONDS:-10}
+# Digits only, before either reaches $(( )): bash arithmetic evaluates `x[$(cmd)]`.
+case "$timeout_s" in '' | *[!0-9]*)
+  echo "APPROVE_TIMEOUT_SECONDS must be a whole number of seconds." >&2
+  exit "$EXIT_USAGE"
+  ;;
+esac
+case "$poll" in '' | *[!0-9]*)
+  echo "APPROVE_POLL_SECONDS must be a whole number of seconds." >&2
+  exit "$EXIT_USAGE"
+  ;;
+esac
 
 if [ "$assume_yes" = true ] && [ -z "$expect_sha" ]; then
   echo "--yes needs --expect-sha <commit>: an unattended approval must name the commit it approves." >&2
@@ -109,7 +121,27 @@ if [ -z "${GH_REPO:-}" ]; then
   GH_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 fi
 export GH_REPO
-poll=${APPROVE_POLL_SECONDS:-10}
+readonly RESUME_CMD="scripts/approve-release.sh ${tag}"
+consent=""  # "run_id env_id env" per line: exactly what the prompt showed
+approved="" # env names approved so far, for the exit-4 report
+noted=""    # "run_id env_id" pairs already reported as not approved
+
+run_url() { echo "https://github.com/${GH_REPO}/actions/runs/$1"; }
+
+# Any GitHub call that fails — a read or an approval — ends here: what was approved,
+# what was not, and that running again is safe (approvals already given drop out).
+gh_failed() {
+  local left="" e
+  while read -r _ _ e; do
+    [ -n "$e" ] || continue
+    case ", ${approved}, " in *", ${e}, "*) ;; *) left+="${e}, " ;; esac
+  done <<<"$consent"
+  echo "$1"
+  echo "Approved so far: ${approved:-nothing}"
+  echo "Not approved: ${left}${RELEASE_ENV}"
+  echo "It is safe to run again: ${RESUME_CMD}"
+  exit "$EXIT_GH"
+}
 
 # The commit comes from the tag on THIS machine, not from GitHub: GitHub's copy of a
 # tag can be moved by anyone with push access.
@@ -130,7 +162,8 @@ if [ -z "$expect_sha" ] && ! git verify-tag "$tag" >/dev/null 2>&1; then
   exit "$EXIT_FAILED"
 fi
 # -X GET everywhere: `gh api` silently turns -f into a POST (see release-fanin.sh).
-remote_sha=$(gh api "/repos/${GH_REPO}/commits/${tag}" -X GET --jq .sha)
+remote_sha=$(gh api "/repos/${GH_REPO}/commits/${tag}" -X GET --jq .sha) ||
+  gh_failed "GitHub call failed reading where ${tag} points."
 if [ "$remote_sha" != "$sha" ]; then
   echo "Refusing: ${tag} is ${sha:0:12} here but ${remote_sha:0:12} on GitHub. Nothing approved."
   exit "$EXIT_FAILED"
@@ -167,7 +200,26 @@ gate_env() {
 # Pending deployments of one run: {eid, env, can} per line.
 pending() {
   gh api "/repos/${GH_REPO}/actions/runs/$1/pending_deployments" -X GET \
-    --jq '.[] | {eid: .environment.id, env: .environment.name, can: .current_user_can_approve}'
+    --jq '.[] | {eid: .environment.id, env: .environment.name, can: .current_user_can_approve}' </dev/null
+}
+
+# The same into $PEND, but a failed read stops with exit 4 naming the run. Call it
+# directly, never inside $( ) or < <( ): there a failure reads as "nothing pending"
+# (or the exit-4 report vanishes into the subshell).
+read_pending() {
+  PEND=$(pending "$1") || gh_failed "GitHub call failed reading what is waiting on $(run_url "$1")."
+}
+
+# A non-draft GitHub Release for the tag means we are done, however it got there: the
+# UI, the Action, or an approve POST that landed but answered with an error. This reads
+# a Release object only to STOP: it never approves anything because of one.
+release_live() {
+  local url
+  if url=$(gh release view "$tag" --json url,isDraft --jq 'select(.isDraft == false) | .url' 2>/dev/null) &&
+    [ -n "$url" ]; then
+    echo "Release ${tag} is live: ${url}"
+    exit 0
+  fi
 }
 
 # Release-notes runs carrying this exact tag+commit title, as a JSON array.
@@ -179,11 +231,6 @@ release_runs() {
       'map(select(.event == "workflow_run" and .title == $t))'
 }
 
-readonly RESUME_CMD="scripts/approve-release.sh ${tag}"
-consent=""  # "run_id env_id env" per line: exactly what the prompt showed
-approved="" # env names approved so far, for the exit-4 report
-noted=""    # "run_id env_id" pairs already reported as not approved
-
 # The 422 body GitHub sends when a POST finds nothing to review. GitHub's REST
 # reference documents only 200 for this endpoint
 # (https://docs.github.com/en/rest/actions/workflow-runs#review-pending-deployments-for-a-workflow-run),
@@ -194,32 +241,23 @@ noted=""    # "run_id env_id" pairs already reported as not approved
 # is no longer pending before calling it "already approved".
 readonly GH_NO_PENDING_MSG="No pending deployment requests to approve or reject"
 
-still_pending() {
-  pending "$1" | jq -e --argjson e "$2" 'select(.eid == $e)' >/dev/null
-}
-
 approve_env() {
-  local run_id=$1 eid=$2 env=$3 err left="" e
+  local run_id=$1 eid=$2 env=$3 err recheck
   if err=$(gh api -X POST "repos/${GH_REPO}/actions/runs/${run_id}/pending_deployments" \
     -F "environment_ids[]=${eid}" -f state=approved \
     -f comment="Approved with scripts/approve-release.sh for ${tag} at ${sha:0:12}" 2>&1 </dev/null >/dev/null); then
     echo "Approved ${env}."
-  elif grep -qF "(HTTP 422)" <<<"$err" && grep -qF "$GH_NO_PENDING_MSG" <<<"$err" && ! still_pending "$run_id" "$eid"; then
+  elif grep -qF "(HTTP 422)" <<<"$err" && grep -qF "$GH_NO_PENDING_MSG" <<<"$err"; then
+    # Re-read before believing it: a failed re-read is "unknown", never "approved".
+    recheck=$(pending "$run_id") ||
+      gh_failed "GitHub said nothing is pending for ${env}, and re-checking $(run_url "$run_id") failed: ${err}"
+    if jq -e --argjson e "$eid" 'select(.eid == $e)' <<<"$recheck" >/dev/null; then
+      gh_failed "GitHub says nothing is pending, but ${env} is still waiting: you may not be allowed to approve it. ${err}"
+    fi
     # Approved already (by you in the UI, or by an earlier run of this script).
     echo "${env} was already approved."
   else
-    if grep -qF "$GH_NO_PENDING_MSG" <<<"$err"; then
-      echo "GitHub says nothing is pending, but ${env} is still waiting: you may not be allowed to approve it."
-    fi
-    while read -r _ _ e; do
-      [ -n "$e" ] || continue
-      case ", ${approved}, " in *", ${e}, "*) ;; *) left+="${e}, " ;; esac
-    done <<<"$consent"
-    echo "GitHub call failed while approving ${env}: ${err}"
-    echo "Approved so far: ${approved:-nothing}"
-    echo "Not approved: ${left}${RELEASE_ENV}"
-    echo "It is safe to run again: ${RESUME_CMD}"
-    exit "$EXIT_GH"
+    gh_failed "GitHub call failed while approving ${env}: ${err}"
   fi
   approved="${approved:+${approved}, }${env}"
 }
@@ -230,6 +268,7 @@ record_consent() {
   local runs=$1 all=$2 id url name wf want line eid env can bad=0
   while IFS=$'\t' read -r id url name wf; do
     want=$(gate_env "$wf" "$name") || continue
+    read_pending "$id" # before the prompt
     while read -r line; do
       [ -n "$line" ] || continue
       eid=$(jq -r .eid <<<"$line")
@@ -244,7 +283,7 @@ record_consent() {
         echo "  waiting: ${env}  ${name}  ${url}"
         consent+="${id} ${eid} ${env}"$'\n'
       fi
-    done < <(pending "$id")
+    done <<<"$PEND"
   done < <(jq -r --arg g "$GATED" \
     '.[] | select(.status == "waiting" and (.wf as $w | $g | split(" ") | index($w)))
       | [.id, .html_url, .name, .wf] | @tsv' <<<"$runs")
@@ -259,11 +298,13 @@ approve_consented() {
   local runs=$1 id eid env line url name
   while read -r id eid env; do
     [ -n "$id" ] || continue
-    if pending "$id" | jq -e --argjson e "$eid" 'select(.eid == $e)' >/dev/null; then
+    read_pending "$id" # consented run, after the y
+    if jq -e --argjson e "$eid" 'select(.eid == $e)' <<<"$PEND" >/dev/null; then
       approve_env "$id" "$eid" "$env"
     fi
   done <<<"$consent"
   while IFS=$'\t' read -r id url name; do
+    read_pending "$id" # newly waiting run, after the y
     while read -r line; do
       [ -n "$line" ] || continue
       eid=$(jq -r .eid <<<"$line")
@@ -273,7 +314,7 @@ approve_consented() {
       fi
       echo "Not approved: ${env}  ${name}  ${url} (appeared after you answered; run ${RESUME_CMD} to review it)"
       noted+="${id} ${eid}"$'\n'
-    done < <(pending "$id")
+    done <<<"$PEND"
   done < <(jq -r --arg g "$GATED" \
     '.[] | select(.status == "waiting" and (.wf as $w | $g | split(" ") | index($w)))
       | [.id, .html_url, .name] | @tsv' <<<"$runs")
@@ -302,19 +343,17 @@ timed_out() {
 
 # Release-notes runs that already finished before this started belong to an earlier
 # attempt (a re-run after a fix); only newer ones say anything about this one.
-baseline=$(release_runs | jq -r 'map(select(.status == "completed") | .id) | max // 0' || echo 0)
+rn_all=$(release_runs) || gh_failed "GitHub call failed reading the ${RUN_TITLE_PREFIX} runs for ${tag}."
+baseline=$(jq -r 'map(select(.status == "completed") | .id) | max // 0' <<<"$rn_all")
 
 asked=false
 release_done=false
 rn_cur="[]"
 deadline=$(($(date +%s) + timeout_s))
 while :; do
-  runs=""
-  if all=$(all_runs); then
-    runs=$(publisher_runs "$all")
-  else
-    echo "Could not read the runs for ${tag}; trying again." >&2
-  fi
+  release_live # every pass, from the very first: it may already be out
+  all=$(all_runs) || gh_failed "GitHub call failed reading the runs for ${tag}."
+  runs=$(publisher_runs "$all")
 
   if [ -n "$runs" ]; then
     # Every pass — including the first one after your y, before anything is approved.
@@ -354,28 +393,32 @@ while :; do
   fi
 
   if [ "$asked" = true ]; then
-    rn_cur=$(release_runs | jq -c --argjson b "$baseline" '[map(select(.id > $b)) | max_by(.id) // empty]' || echo "[]")
-    if jq -e '.[0] | .status == "completed" and .conclusion != "success"' <<<"$rn_cur" >/dev/null; then
-      echo "${RUN_TITLE_PREFIX} for ${tag} failed: $(jq -r '.[0].html_url' <<<"$rn_cur")"
-      echo "Nothing more was approved. Read that run's log, fix it, then run ${RESUME_CMD}."
+    rn_all=$(release_runs) || gh_failed "GitHub call failed reading the ${RUN_TITLE_PREFIX} runs for ${tag}."
+    # Every exact-title run newer than the baseline. release-notes.yml runs once per
+    # publisher completion in one concurrency group (cancel-in-progress: false): one
+    # run can wait on `release` while a newer, equally ready one sits pending behind
+    # it, and a pending run replaced by a newer one ends "cancelled" — superseded,
+    # not failed. So: approve whichever run is waiting, and judge failure on the
+    # newest run that was not cancelled or skipped.
+    rn_cur=$(jq -c --argjson b "$baseline" 'map(select(.id > $b))' <<<"$rn_all")
+    rn_judge=$(jq -c 'map(select(.conclusion != "cancelled" and .conclusion != "skipped")) | max_by(.id) // empty' <<<"$rn_cur")
+    if [ -n "$rn_judge" ] && jq -e '.status == "completed" and .conclusion != "success"' <<<"$rn_judge" >/dev/null; then
+      rn_url=$(jq -r .html_url <<<"$rn_judge")
+      echo "${RUN_TITLE_PREFIX} for ${tag} failed: ${rn_url}"
+      echo "Nothing more was approved. Read its log, re-run the failed jobs of ${rn_url}, then resume with ${RESUME_CMD}."
       exit "$EXIT_FAILED" # the release run failed
     fi
-    rn_wait=$(jq -r '.[0] | select(.status == "waiting") | .id' <<<"$rn_cur")
+    rn_wait=$(jq -r 'map(select(.status == "waiting")) | first | .id // empty' <<<"$rn_cur")
     if [ "$release_done" = false ] && [ -n "$rn_wait" ]; then
-      rel=$(pending "$rn_wait" | jq -r --arg e "$RELEASE_ENV" 'select(.env == $e) | if .can == true then .eid else "cannot" end' | head -n 1)
+      read_pending "$rn_wait" # the release run
+      rel=$(jq -r --arg e "$RELEASE_ENV" 'select(.env == $e) | if .can == true then .eid else "cannot" end' <<<"$PEND" | head -n 1)
       if [ "$rel" = cannot ]; then
-        echo "cannot approve release (you are not a reviewer): $(jq -r '.[0].html_url' <<<"$rn_cur")"
+        echo "cannot approve release (you are not a reviewer): $(run_url "$rn_wait")"
         exit "$EXIT_FAILED"
       elif [ -n "$rel" ]; then
         approve_env "$rn_wait" "$rel" release
         release_done=true
-      fi
-    fi
-    if [ "$release_done" = true ]; then
-      if url=$(gh release view "$tag" --json url,isDraft --jq 'select(.isDraft == false) | .url' 2>/dev/null) &&
-        [ -n "$url" ]; then
-        echo "Release ${tag} is live: ${url}"
-        exit 0
+        release_live
       fi
     fi
   fi

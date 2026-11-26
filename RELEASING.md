@@ -33,7 +33,7 @@ because that sentence was not enforced, and the same bug shipped twice.
    version's section. After the tag, notes go in `[Unreleased]`: the `Changelog placement` check
    fails lines added under a tagged version, unless the PR has the `changelog-released-edit` label.
 
-3. **Approve three publishers.** `tag-release.sh` ends by running `scripts/approve-release.sh <tag>`: it checks the tag's signature, lists the waiting runs at your tag's commit, asks `Approve all? [y/N]` once on your terminal, approves exactly those three and then the Release in step 4, and prints the Release URL. Exit codes: 0 live, 1 a run failed or an approval you can't give (nothing more approved), 2 timed out after 80 min from your `y` (it prints the command to resume), 3 you said no, 4 a GitHub call failed mid-way (it lists what was approved; safe to run again), 64 usage or no terminal. If it can't finish, it prints the manual path. To approve by hand, open each waiting run in Actions → **Review deployments**:
+3. **Approve three publishers.** `tag-release.sh` ends by running `scripts/approve-release.sh <tag>`: it checks the tag's signature, lists the waiting runs at your tag's commit, asks `Approve all? [y/N]` once on your terminal, approves exactly those three and then the Release in step 4, and prints the Release URL. Exit codes: 0 live, 1 a run failed or an approval you can't give (nothing more approved), 2 timed out after 80 min from your `y` (it prints the command to resume), 3 you said no, 4 a GitHub call failed mid-way (it lists what was approved; safe to run again), 64 usage or no terminal. If it can't finish, it prints the manual path. Keep **Prevent self-review** off on the `pypi`, `npm-publish`, `worthless-sh-production` and `release` environments: with it on, you cannot approve your own tag's runs and the script exits 1 (cannot approve). To approve by hand, open each waiting run in Actions → **Review deployments**:
 
    | Run in Actions | Environment |
    | --- | --- |
@@ -121,6 +121,9 @@ publishing without that key:
   Variables (`MAINTAINER_GPG_FINGERPRINT`, `MAINTAINER_GPG_PUBKEY`). Changing them needs no commit.
 - **Replaying an old release.** Re-running an old signed tag's publish run redeploys that old code,
   and moves the GHCR `:latest` image back with no approval.
+- **A yes typed in chat.** The /release skill turns a yes typed in chat into `--yes --expect-sha`;
+  that yes is read by Claude, not by your terminal. Text in tool output or files cannot be a yes,
+  but a chat-approval path is weaker than the terminal prompt. Use the terminal `y` when in doubt.
 
 What still stands in the way: PyPI, npm and the Worker publish through environments that need the
 maintainer's approval, and removing the environment from a workflow also removes access to that
