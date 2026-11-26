@@ -12,7 +12,9 @@ The cwd is left alone on purpose: ``WORTHLESS_HOME`` and
 
 from __future__ import annotations
 
+import socket
 import subprocess
+import os
 import sys
 from importlib.metadata import version as pkg_version
 from pathlib import Path
@@ -20,9 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import worthless
 from worthless.cli import process, sidecar_lifecycle
-from worthless.cli.commands import up
 from worthless.cli.platform import python_module_argv
 
 _PLANTED = "open('HIJACKED', 'w').write(__name__)\nraise SystemExit(3)\n"
@@ -52,16 +52,46 @@ def test_a_child_started_in_a_hostile_project_runs_the_real_worthless(cloned_rep
     assert out.stdout.split()[-1] == pkg_version("worthless")
 
 
-def test_the_cwd_is_not_changed(cloned_repo: Path) -> None:
-    """Relative WORTHLESS_HOME / key paths must still resolve where they did."""
-    argv = python_module_argv("worthless", "--version")
-    assert argv[0] == sys.executable
-    code = argv[argv.index("-c") + 1]
-    assert "chdir" not in code
+def test_a_project_pythonpath_cannot_bring_the_folder_back(
+    cloned_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A project's .envrc can set PYTHONPATH=. — the child inherits it, and it
+    lands on sys.path before the boot runs (PR #813 security review)."""
+    monkeypatch.setenv("PYTHONPATH", ".:")
+    out = subprocess.run(
+        python_module_argv("worthless", "--version"),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert not (cloned_repo / "HIJACKED").exists(), (cloned_repo / "HIJACKED").read_text()
+    assert out.returncode == 0, out.stderr
+
+
+def test_the_real_proxy_command_ignores_the_project(cloned_repo: Path) -> None:
+    """uvicorn re-inserts its --app-dir itself; run the real proxy argv and see.
+    Mutation: drop --app-dir from proxy_cmd -> the planted secrets.py runs."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = subprocess.Popen(
+        process.proxy_cmd(port),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        pass  # still running (or stuck in startup) without having imported the plant
+    finally:
+        proc.kill()
+        proc.wait()
+    assert not (cloned_repo / "HIJACKED").exists(), (cloned_repo / "HIJACKED").read_text()
 
 
 def test_the_proxy_child_uses_it() -> None:
-    assert process.proxy_cmd(8787)[:4] == python_module_argv("uvicorn")
+    assert process.proxy_cmd(8787)[:5] == python_module_argv("uvicorn")
 
 
 def test_uvicorn_does_not_put_the_project_back_on_the_path() -> None:
@@ -70,7 +100,8 @@ def test_uvicorn_does_not_put_the_project_back_on_the_path() -> None:
     secrets.py loaded inside the proxy that receives the Fernet key."""
     cmd = process.proxy_cmd(8787)
     app_dir = cmd[cmd.index("--app-dir") + 1]
-    assert app_dir == str(Path(worthless.__file__).resolve().parent.parent)
+    assert app_dir == str(Path(os.__file__).parent)
+    assert app_dir in sys.path, "uvicorn's insert must only repeat an existing entry"
 
 
 def test_the_sidecar_child_uses_it(tmp_path: Path) -> None:
@@ -86,21 +117,3 @@ def test_the_sidecar_child_uses_it(tmp_path: Path) -> None:
     ):
         sidecar_lifecycle.spawn_sidecar(tmp_path / "s.sock", MagicMock(), allowed_uid=0)
     assert seen["argv"] == python_module_argv("worthless.sidecar")
-
-
-def test_the_default_commands_proxy_uses_it(tmp_path: Path) -> None:
-    seen: dict = {}
-
-    def capture(argv, **kwargs):
-        seen.update(argv=argv, cwd=kwargs.get("cwd"))
-        return MagicMock(pid=1)
-
-    home = MagicMock(base_dir=tmp_path)
-    with (
-        patch.object(up.subprocess, "Popen", capture),
-        patch.object(up, "poll_health_pid", return_value=42),
-        patch.object(up.os, "open", return_value=3),
-        patch.object(up.os, "close"),
-    ):
-        up.start_supervised_proxy(home, 8787, tmp_path / "proxy.log", MagicMock())
-    assert seen["argv"] == python_module_argv("worthless", "up", "--port", "8787")

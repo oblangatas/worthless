@@ -23,6 +23,12 @@ IS_WINDOWS: bool = sys.platform == "win32"
 # proxy (gets the Fernet key) or the sidecar (holds the shares) — worthless-x31h2.
 # Drop that entry before anything is imported. Only `sys` (built in, cannot be
 # shadowed) runs first. The cwd itself is kept: WORTHLESS_HOME may be relative.
+# `-E` drops PYTHON* env, so a project's `.envrc` PYTHONPATH=. can't put the
+# folder back before the boot runs (PR #813 security review). Not `-I`: that
+# also drops user site-packages and breaks `pip install --user`.
+# runpy restores the `-c` __main__ after the module returns, so atexit code
+# sees `__main__.__spec__ is None` where `-m` would show the module; nothing
+# in worthless reads it.
 # ponytail: `-P` does this natively; switch when the floor is 3.11 (worthless-56do).
 _NO_CWD_BOOT = (
     "import sys\n"
@@ -35,7 +41,7 @@ _NO_CWD_BOOT = (
 
 def python_module_argv(module: str, *args: str) -> list[str]:
     """argv for ``python -m module args`` that never imports from the cwd."""
-    return [sys.executable, "-c", _NO_CWD_BOOT, module, *args]
+    return [sys.executable, "-E", "-c", _NO_CWD_BOOT, module, *args]
 
 
 # Single source of truth for the "Platforms" section of the README. Referenced

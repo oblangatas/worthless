@@ -452,14 +452,15 @@ def proxy_cmd(port: int, host: str = "127.0.0.1") -> list[str]:
         # uvicorn's --app-dir defaults to "" (the cwd) and it puts that at
         # sys.path[0] itself, undoing python_module_argv: a project's
         # secrets.py loaded inside the proxy that gets the Fernet key
-        # (worthless-x31h2, found live). The installed package's own root is
-        # already on sys.path, so naming it adds nothing an attacker controls.
+        # (worthless-x31h2, found live). Name the stdlib dir instead: it is
+        # already on sys.path, so uvicorn's insert changes nothing (site-packages
+        # here would jump ahead of the stdlib — PR #813 review).
         "--app-dir",
-        _PACKAGE_ROOT,
+        _STDLIB_DIR,
     )
 
 
-_PACKAGE_ROOT = str(Path(__file__).resolve().parents[2])
+_STDLIB_DIR = str(Path(os.__file__).parent)  # the stdlib entry already on sys.path
 
 
 # ---------------------------------------------------------------------------
