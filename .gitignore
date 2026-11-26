@@ -50,7 +50,12 @@ TESTING.md
 
 # Project management (local-only)
 ccpm/
-.claude/
+# .claude/ stays local, except the /release skill (WOR-1165). Git cannot re-include
+# a file inside an ignored directory, so ignore the contents level by level instead.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/release/
 COMMANDS.md
 CONTEXT_ACCURACY.md
 LOCAL_MODE.md

@@ -3239,9 +3239,37 @@ GUARD_MUTATIONS = [
     (
         "approve-release treats an already-approved environment as a failure",
         "scripts/approve-release.sh",
-        "grep -qiE '422|no pending deployment'",
-        "false",
+        '  elif grep -qF "(HTTP 422)" <<<"$err" &&',
+        "  elif false &&",
         "test_an_already_approved_environment_is_not_an_error",
+    ),
+    (
+        "approve-release treats any 422 as already approved",
+        "scripts/approve-release.sh",
+        'grep -qF "(HTTP 422)" <<<"$err" && grep -qF "$GH_NO_PENDING_MSG" <<<"$err" && ',
+        'grep -qF "(HTTP 422)" <<<"$err" && ',
+        "test_a_different_422_exits_4",
+    ),
+    (
+        "approve-release trusts GitHub's no-pending message without re-checking",
+        "scripts/approve-release.sh",
+        '<<<"$err" && ! still_pending "$run_id" "$eid"; then',
+        '<<<"$err"; then',
+        "test_a_no_pending_422_that_is_still_pending_exits_4",
+    ),
+    (
+        "the /release skill runs approve-release with --yes but no --expect-sha",
+        ".claude/skills/release/SKILL.md",
+        " --yes --expect-sha <sha>",
+        " --yes",
+        "test_release_skill_approves_with_expect_sha",
+    ),
+    (
+        "the /release skill forgets what exit 4 means",
+        ".claude/skills/release/SKILL.md",
+        "- `4` → a GitHub call failed mid-way.",
+        "- a GitHub call failed mid-way.",
+        "test_release_skill_lists_every_exit_code",
     ),
     (
         "approve-release carries on after a failed approve call",
@@ -3363,6 +3391,11 @@ class TestGuardsCanActuallyFail:
         shutil.copy(REPO_ROOT / "RELEASING.md", tmp_path / "RELEASING.md")
         # Dockerfile: the WOR-1077 guards read it.
         shutil.copy(REPO_ROOT / "Dockerfile", tmp_path / "Dockerfile")
+        # The /release skill: WOR-1165's skill guards read it.
+        shutil.copytree(
+            REPO_ROOT / ".claude" / "skills" / "release",
+            tmp_path / ".claude" / "skills" / "release",
+        )
         (tmp_path / "tests").mkdir()
         for name in _GUARD_TEST_FILES:
             shutil.copy(Path(__file__).parent / name, tmp_path / "tests" / name)

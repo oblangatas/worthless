@@ -47,6 +47,9 @@ _COMMIT = (
 ).encode()
 SHA = hashlib.sha1(b"commit %d\0" % len(_COMMIT) + _COMMIT).hexdigest()  # noqa: S324
 YES = ("--yes", "--expect-sha", SHA)
+# What `gh api` prints to stderr for this 422 (body message + status).
+_NO_PENDING_422 = "gh: No pending deployment requests to approve or reject (HTTP 422)"
+RELEASE_SKILL = REPO_ROOT / ".claude" / "skills" / "release" / "SKILL.md"
 
 
 def _tag_repo(path: Path) -> Path:
@@ -116,8 +119,11 @@ case "$method $path" in
     emit "$(snap | jq -c '{workflow_runs: .rn}')"; exit 0 ;;
   "GET "*/actions/runs/*/pending_deployments)
     rid=$(printf '%s' "$path" | sed -E 's#.*/actions/runs/([^/]+)/pending_deployments#\1#')
+    # POST_FAIL_STICKY: the failed POST did NOT approve (e.g. you may not), so the
+    # environment stays pending.
+    sticky=none; [ -n "${POST_FAIL_STICKY:-}" ] && sticky=${POST_FAIL_EID:-none}
     done_ids=$(grep -F "POST" "$GH_CALLS" | grep -F "actions/runs/${rid}/pending_deployments" \
-      | grep -oE 'environment_ids\[\]=[0-9]+' | cut -d= -f2 \
+      | grep -oE 'environment_ids\[\]=[0-9]+' | cut -d= -f2 | grep -vx -- "$sticky" \
       | jq -Rsc 'split("\n") | map(select(. != "") | tonumber)')
     emit "$(snap | jq -c --arg r "$rid" --argjson d "$done_ids" \
       '(.pending[$r] // []) | map(select(.environment.id as $e | ($d | index($e)) | not))')"
@@ -136,6 +142,16 @@ if [ "${1:-}" = "verify-tag" ]; then
   echo "error: no signature found" >&2; exit 1
 fi
 exec "$REAL_GIT" "$@"
+"""
+
+# Fake clock, only with FAKE_CLOCK_STEP set: `date +%s` is (runs polls so far) x step,
+# so deadline tests depend on how many polls happened, never on machine load.
+_DATE_SHIM = r"""#!/usr/bin/env bash
+if [ -n "${FAKE_CLOCK_STEP:-}" ] && [ "${1:-}" = "+%s" ]; then
+  echo $(( $(cat "$GH_STATE" 2>/dev/null || echo 0) * FAKE_CLOCK_STEP ))
+  exit 0
+fi
+exec /bin/date "$@"
 """
 
 
@@ -216,15 +232,17 @@ def _approve(
     api_sha: str = SHA,
     verify_ok: bool = True,
     post_fail: tuple[int, str] | None = None,
+    post_fail_sticky: bool = False,
     poll_s: int = 0,
     timeout_s: int = TIMEOUT_S,
+    clock_step: int | None = None,
 ):
     """Run the script. With `answer`, it is typed into a real terminal; without one
     there is no controlling terminal at all."""
     repo = _tag_repo(tmp_path / "checkout")
     shim_dir = tmp_path / "bin"
     shim_dir.mkdir(exist_ok=True)
-    for name, body in (("gh", _GH_SHIM), ("git", _GIT_SHIM)):
+    for name, body in (("gh", _GH_SHIM), ("git", _GIT_SHIM), ("date", _DATE_SHIM)):
         (shim_dir / name).write_text(body)
         (shim_dir / name).chmod(0o755)
     calls = tmp_path / "gh_calls.log"
@@ -242,8 +260,12 @@ def _approve(
         APPROVE_POLL_SECONDS=str(poll_s),
         APPROVE_TIMEOUT_SECONDS=str(timeout_s),
     )
+    if clock_step is not None:
+        env["FAKE_CLOCK_STEP"] = str(clock_step)
     if post_fail:
         env["POST_FAIL_EID"], env["POST_FAIL_MSG"] = str(post_fail[0]), post_fail[1]
+        if post_fail_sticky:
+            env["POST_FAIL_STICKY"] = "1"
     if gh_repo is not None:
         env["GH_REPO"] = gh_repo
     cmd = ["bash", str(APPROVE_SCRIPT), TAG, *args]  # noqa: S607
@@ -430,12 +452,13 @@ class TestFailures:
         assert "runs/103" in _out(proc)
 
     def test_a_failed_release_gate_exits_1_fast(self, tmp_path):
+        # Fake clock: the gate fails on poll 4 (t=400); the timeout is t=1000. A script
+        # that waited instead would end with exit 2 at the timeout — "fast" is exit 1.
         snaps = _flow()[:3] + [_snap(_pubs("in_progress"), rn=[_rn("completed", "failure")])]
-        started = time.monotonic()
-        proc, _ = _approve(tmp_path, *YES, snaps=snaps)
+        proc, _ = _approve(tmp_path, *YES, snaps=snaps, clock_step=100, timeout_s=1000)
         assert proc.returncode == 1, _out(proc)
         assert f"https://github.com/{REPO}/actions/runs/201" in _out(proc)
-        assert time.monotonic() - started < TIMEOUT_S, "a failed gate must not wait for the timeout"
+        assert "Timed out" not in _out(proc)
 
     def test_release_you_cannot_approve_exits_1(self, tmp_path):
         proc, log = _approve(
@@ -467,19 +490,33 @@ class TestFailures:
         assert "runs/201" in _out(proc)
 
     def test_the_deadline_starts_at_your_y(self, tmp_path):
-        # Polls 2s apart: no runs (t0, t2), publishers waiting (t4: the y), the re-read
-        # and approvals (t4), release run started (t6), release waiting (t8: approved,
-        # live). With a 6s timeout counted from the start this dies at t6; counted
-        # from the y it lasts to t10. Wide margins, so load cannot flip the verdict.
+        # Fake clock, 100 per poll, timeout 250. Polls: t=100 no runs, t=200 waiting
+        # (the y), t=300 re-read + approvals, t=400 release running, t=500 release
+        # waiting -> approved -> live (exits before its deadline check). Counted from
+        # the start, the deadline is 250 and the t=300 poll times out. Counted from
+        # the y, it is 450, so t=300 and t=400 pass and t=500 finishes.
         snaps = [_snap(), *_flow()]
-        proc, log = _approve(tmp_path, *YES, snaps=snaps, poll_s=2, timeout_s=6)
+        proc, log = _approve(tmp_path, *YES, snaps=snaps, clock_step=100, timeout_s=250)
         assert proc.returncode == 0, _out(proc)
         assert ("201", "21") in _approvals(log)
 
     def test_an_already_approved_environment_is_not_an_error(self, tmp_path):
-        msg = "gh: No pending deployment requests to approve or reject (HTTP 422)"
-        proc, _ = _approve(tmp_path, *YES, post_fail=(12, msg))
+        # The environment really is no longer pending (approved in the UI meanwhile).
+        proc, _ = _approve(tmp_path, *YES, post_fail=(12, _NO_PENDING_422))
         assert proc.returncode == 0, _out(proc)
+        assert "npm-publish was already approved" in proc.stdout, proc.stdout
+
+    def test_a_different_422_exits_4(self, tmp_path):
+        proc, _ = _approve(tmp_path, *YES, post_fail=(12, "gh: Validation Failed (HTTP 422)"))
+        assert proc.returncode == 4, _out(proc)
+        assert "safe to run again" in _out(proc)
+
+    def test_a_no_pending_422_that_is_still_pending_exits_4(self, tmp_path):
+        # GitHub sends the same message to a caller who may not approve; then the
+        # environment is still waiting, and calling it "already approved" would lie.
+        proc, _ = _approve(tmp_path, *YES, post_fail=(12, _NO_PENDING_422), post_fail_sticky=True)
+        assert proc.returncode == 4, _out(proc)
+        assert "still waiting" in _out(proc), _out(proc)
 
     def test_a_failed_approve_call_exits_4_and_says_what_was_approved(self, tmp_path):
         proc, log = _approve(tmp_path, *YES, post_fail=(12, "gh: Server Error (HTTP 502)"))
@@ -658,6 +695,28 @@ def _tag_release_hook_line() -> tuple[int, int, str]:
     calls = [i for i, ln in enumerate(lines) if 'scripts/approve-release.sh "$tag"' in ln]
     assert calls, 'tag-release.sh must run scripts/approve-release.sh "$tag"'
     return push, calls[0], lines[calls[0]]
+
+
+class TestReleaseSkillMatchesTheScript:
+    """The /release skill is the third entry point (after tag-release.sh and the
+    Action). It tells Claude which command to run and what each exit code means."""
+
+    def test_release_skill_approves_with_expect_sha(self):
+        lines = [ln for ln in RELEASE_SKILL.read_text().splitlines() if "approve-release.sh" in ln]
+        unattended = [ln for ln in lines if "--yes" in ln]
+        assert unattended, (
+            "the skill must give the --yes approve command it runs after the chat yes"
+        )
+        for ln in unattended:
+            assert "--expect-sha" in ln, f"--yes without --expect-sha exits 64: {ln.strip()!r}"
+
+    def test_release_skill_lists_every_exit_code(self):
+        script = APPROVE_SCRIPT.read_text()
+        codes = {0} | {int(c) for c in re.findall(r"\bEXIT_[A-Z]+=(\d+)", script)}
+        assert codes == {0, 1, 2, 3, 4, 64}, codes
+        skill = RELEASE_SKILL.read_text()
+        missing = sorted(c for c in codes if not re.search(rf"^- `{c}` →", skill, re.M))
+        assert not missing, f"the /release skill does not say what exit code(s) {missing} mean"
 
 
 class TestTagReleaseCallsApprove:

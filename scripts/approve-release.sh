@@ -184,16 +184,33 @@ consent=""  # "run_id env_id env" per line: exactly what the prompt showed
 approved="" # env names approved so far, for the exit-4 report
 noted=""    # "run_id env_id" pairs already reported as not approved
 
+# The 422 body GitHub sends when a POST finds nothing to review. GitHub's REST
+# reference documents only 200 for this endpoint
+# (https://docs.github.com/en/rest/actions/workflow-runs#review-pending-deployments-for-a-workflow-run),
+# so the text is from observed responses: open-security-tools/ost-environment-gate
+# (src/github/deployments.rs, an idempotent-422 test fixture) and Kludex/release-gate
+# (docs/rollout.md). The latter got the same message when the caller MAY NOT approve,
+# so the message alone proves nothing: approve_env also re-reads that the environment
+# is no longer pending before calling it "already approved".
+readonly GH_NO_PENDING_MSG="No pending deployment requests to approve or reject"
+
+still_pending() {
+  pending "$1" | jq -e --argjson e "$2" 'select(.eid == $e)' >/dev/null
+}
+
 approve_env() {
   local run_id=$1 eid=$2 env=$3 err left="" e
   if err=$(gh api -X POST "repos/${GH_REPO}/actions/runs/${run_id}/pending_deployments" \
     -F "environment_ids[]=${eid}" -f state=approved \
     -f comment="Approved with scripts/approve-release.sh for ${tag} at ${sha:0:12}" 2>&1 </dev/null >/dev/null); then
     echo "Approved ${env}."
-  elif grep -qiE '422|no pending deployment' <<<"$err"; then
+  elif grep -qF "(HTTP 422)" <<<"$err" && grep -qF "$GH_NO_PENDING_MSG" <<<"$err" && ! still_pending "$run_id" "$eid"; then
     # Approved already (by you in the UI, or by an earlier run of this script).
     echo "${env} was already approved."
   else
+    if grep -qF "$GH_NO_PENDING_MSG" <<<"$err"; then
+      echo "GitHub says nothing is pending, but ${env} is still waiting: you may not be allowed to approve it."
+    fi
     while read -r _ _ e; do
       [ -n "$e" ] || continue
       case ", ${approved}, " in *", ${e}, "*) ;; *) left+="${e}, " ;; esac
