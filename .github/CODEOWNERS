@@ -1,0 +1,6 @@
+# Code that receives the owner's release-approver PAT (WOR-1167).
+# Only enforced when branch protection on main requires code-owner review;
+# see RELEASING.md, "Approve from GitHub (one click)".
+/.github/workflows/approve-release.yml @oblangatas
+/.github/scripts/approve-release-preflight.sh @oblangatas
+/scripts/approve-release.sh @oblangatas

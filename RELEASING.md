@@ -114,14 +114,25 @@ notice one deleted afterwards.
 ## Approve from GitHub (one click)
 
 The **Approve release** workflow (`.github/workflows/approve-release.yml`, WOR-1167) does steps 3
-and 4 for you. It runs `scripts/approve-release.sh <tag> --yes`. That script approves the three
-publishers, waits for **Create GitHub Release**, approves it, and prints the Release URL.
+and 4 for you. It runs `scripts/approve-release.sh <tag> --yes` (WOR-1165; until that merges, the
+workflow stops with "needs WOR-1165 merged first"). That script approves the three publishers, waits
+for **Create GitHub Release**, approves it, and prints the Release URL.
 
-**Use it:** Actions → **Approve release** → **Run workflow** on `main` → enter the tag, for example
-`v0.3.15`. The job then waits on the `release-approver` environment. Before you approve it, do the
-commit check from step 3: `git rev-parse --short v<version>^{commit}` must match the commit the
-publisher runs show. Approve. The run fails if a publisher fails (exit 1), if nothing finishes in
-35 minutes (exit 2), or if the token is missing.
+**Use it:**
+
+1. Actions → **Approve release** → **Run workflow** on `main` → enter the tag, for example
+   `v0.3.15`. A run started by anyone but the repository owner, or from another branch, stops
+   before the token is used.
+2. The **preflight** job runs first, with the job's own token. Its summary on the run page shows
+   the tag's commit and every run waiting for approval. Each run is marked OK or **WILL NOT BE
+   APPROVED** (a different commit, a manual dispatch, or a release run for another tag).
+3. Compare the commit with `git rev-parse --short v<version>^{commit}` on your machine. Only if it
+   matches, approve the `release-approver` environment.
+
+The run fails if a publisher fails (exit 1), if the release does not finish in 80 minutes (exit 2),
+or if the token is missing. 80 minutes covers the slowest publisher (the Docker image's job chain,
+45 minutes) plus the Release job chain (20 minutes) plus margin; a test re-reads both workflows.
+The summary is a snapshot: the Create GitHub Release run usually appears only after you approve.
 
 ### Owner setup (once, by hand)
 
@@ -129,13 +140,15 @@ GitHub accepts a deployment approval only from a required reviewer, so the job's
 cannot approve. The job uses the owner's personal access token instead.
 
 1. **Create the environment.** Settings → Environments → **New environment** → `release-approver`.
-   - **Required reviewers:** the owner only.
+   - **Required reviewers:** the owner only. Leave **Prevent self-review** off on this environment
+     and on `pypi`, `npm-publish`, `worthless-sh-production` and `release`. With it on, the owner
+     cannot approve a run the owner started, and the token approves as the owner, so this flow fails.
    - **Deployment branches and tags:** **Selected branches and tags** → add `main` only.
 2. **Create a fine-grained personal access token.** Settings (your account) → Developer settings →
    Personal access tokens → Fine-grained tokens → **Generate new token**.
    - **Resource owner:** the owner of this repository. **Repository access:** **Only select
      repositories** → this repository only.
-   - **Expiration:** 90 days.
+   - **Expiration:** 30 days.
    - **Repository permissions:**
      - **Deployments: Read and write**. "Review pending deployments for a workflow run" requires
        it.
@@ -147,7 +160,10 @@ cannot approve. The job uses the owner's personal access token instead.
 3. **Store it as an environment secret, not a repository secret.** Settings → Environments →
    `release-approver` → **Environment secrets** → **Add secret** → name `RELEASE_APPROVER_TOKEN`.
    An environment secret reaches a job only after that environment's reviewer approves the job.
-4. **Rotate every 90 days.** Generate a new token with the same settings, replace the secret, then
+4. **Require code-owner review on `main`.** `.github/CODEOWNERS` names the owner for the workflow,
+   its preflight script and `scripts/approve-release.sh`. It only takes effect when the `main`
+   branch protection or ruleset has **Require review from Code Owners** turned on.
+5. **Rotate every 30 days.** Generate a new token with the same settings, replace the secret, then
    delete the old token. If the secret is missing or expired, the run fails and no gate is
    approved. Approve by hand as in steps 3 and 4.
 
@@ -156,12 +172,21 @@ cannot approve. The job uses the owner's personal access token instead.
 - **Anyone who can approve `release-approver` holds the token's power.** Approving that environment
   releases a token that can approve every protected deployment in this repository, including
   `pypi` and `npm-publish`. Keep the owner as the only required reviewer.
+- **A stolen token skips every gate, including this one.** Whoever holds it can approve
+  `release-approver` itself, and every other environment, from anywhere, until it expires or is
+  deleted. That is why the expiry is 30 days. If you suspect theft, delete the token at once.
 - **Token theft from a compromised runner.** The token is in the job's memory while it runs. Code
   that runs in that job (a compromised action, `gh`, the runner image or the script itself) can read
-  it and use it until it expires or is deleted. If you suspect this, delete the token at once.
-- **A wrong commit.** The script approves the runs it finds for the tag you enter. It does not
-  replace the commit check in step 3, so a tag pointing at the wrong commit is approved like any
-  other.
+  it.
+- **Anyone who can merge to `main` can change the code that receives the token.** The workflow and
+  scripts run from `main`. Code-owner review (setup step 4) makes such a change need the owner's
+  review; without it, any merge can redirect the token on the next run.
+- **Deployments: write does more than approve.** The token can also create and delete deployment
+  records and statuses in this repository. No workflow here triggers on those events, so this is
+  record tampering, not code execution.
+- **A wrong commit.** The preflight summary and the script check each run's commit against the tag.
+  They cannot tell whether the tag itself points at the commit you meant. That is the check you do
+  on your machine before approving.
 - **This workflow does not hold the signing key.** Tagging stays on the maintainer's machine, so
   this workflow cannot create a release by itself. Someone still has to push a signed tag.
 

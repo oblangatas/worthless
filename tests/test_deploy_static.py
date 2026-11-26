@@ -2793,6 +2793,118 @@ GUARD_MUTATIONS = [
         "if false; then",
         "test_approver_runs_the_script_unattended",
     ),
+    (
+        "let the PAT step run from any branch",
+        ".github/workflows/approve-release.yml",
+        'if [ "$REF" != "refs/heads/main" ]; then',
+        "if false; then",
+        "test_approver_refuses_a_branch_other_than_main",
+    ),
+    (
+        "let anyone with write access start it",
+        ".github/workflows/approve-release.yml",
+        'if [ "$ACTOR" != "$OWNER" ]; then',
+        "if false; then",
+        "test_approver_refuses_anyone_but_the_owner",
+    ),
+    (
+        "drop the approve step's missing-script message",
+        ".github/workflows/approve-release.yml",
+        "          if [ ! -f scripts/approve-release.sh ]; then",
+        "          if false; then",
+        "test_approver_stops_when_the_script_is_missing",
+    ),
+    (
+        "ask for approval before the summary exists",
+        ".github/workflows/approve-release.yml",
+        "    needs: preflight\n",
+        "",
+        "test_approve_waits_for_the_preflight_summary",
+    ),
+    (
+        "preflight ignores the run's commit",
+        ".github/scripts/approve-release-preflight.sh",
+        '[ "$event" = push ] && [ "$head" = "$sha" ]',
+        '[ "$event" = push ]',
+        "test_preflight_flags_runs_that_are_not_this_tag",
+    ),
+    (
+        "preflight ignores the run's event",
+        ".github/scripts/approve-release-preflight.sh",
+        '[ "$event" = push ] && [ "$head" = "$sha" ]',
+        '[ "$head" = "$sha" ]',
+        "test_preflight_flags_runs_that_are_not_this_tag",
+    ),
+    (
+        "preflight passes any release run",
+        ".github/scripts/approve-release-preflight.sh",
+        '[ "$title" = "$RELEASE_RUN_TITLE_PREFIX $TAG $sha" ]',
+        "true",
+        "test_preflight_flags_runs_that_are_not_this_tag",
+    ),
+    (
+        "preflight stops peeling annotated tags",
+        ".github/scripts/approve-release-preflight.sh",
+        '[ "$type" = tag ] || break',
+        "break",
+        "test_preflight_flags_runs_that_are_not_this_tag",
+    ),
+    (
+        "preflight skips the missing-script check",
+        ".github/scripts/approve-release-preflight.sh",
+        "if [ ! -f scripts/approve-release.sh ]; then",
+        "if false; then",
+        "test_preflight_stops_when_the_approve_script_is_missing",
+    ),
+    (
+        "preflight's release-run title drifts from release-notes.yml",
+        ".github/scripts/approve-release-preflight.sh",
+        'readonly RELEASE_RUN_TITLE_PREFIX="Create GitHub Release"',
+        'readonly RELEASE_RUN_TITLE_PREFIX="Create Release"',
+        "test_preflight_release_title_matches_release_notes",
+    ),
+    (
+        "approver gives up before Docker finishes",
+        ".github/workflows/approve-release.yml",
+        "--yes --timeout-min 80",
+        "--yes --timeout-min 50",
+        "test_approver_outlasts_the_slowest_release_path",
+    ),
+    (
+        "stop telling the script which commit the owner saw",
+        ".github/workflows/approve-release.yml",
+        ' --expect-sha "$EXPECTED_SHA"',
+        "",
+        "test_approver_pins_the_commit_the_owner_saw",
+    ),
+    (
+        "accept an empty preflight commit",
+        ".github/workflows/approve-release.yml",
+        'if ! [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then',
+        "if false; then",
+        "test_approver_pins_the_commit_the_owner_saw",
+    ),
+    (
+        "approve checkout without the tags",
+        ".github/workflows/approve-release.yml",
+        "          fetch-depth: 0\n          fetch-tags: true\n",
+        "",
+        "test_approver_checkout_has_the_tags",
+    ),
+    (
+        "preflight passes runs waiting on any environment",
+        ".github/scripts/approve-release-preflight.sh",
+        "*) env_ok=no ;;",
+        "*) ;;",
+        "test_preflight_flags_runs_that_are_not_this_tag",
+    ),
+    (
+        "Docker build gets slower; approver timeout not raised",
+        ".github/workflows/publish-docker.yml",
+        "    timeout-minutes: 35\n",
+        "    timeout-minutes: 60\n",
+        "test_approver_outlasts_the_slowest_release_path",
+    ),
     # --- release watchdog (WOR-922) -----------------------------------------
     (
         # WOR-922's done-when: removing the watchdog must turn something red.
@@ -4025,6 +4137,8 @@ class TestReleaseWatchdogWiring:
 
 _APPROVER_PAT_EXPR = "secrets.RELEASE_APPROVER_TOKEN"
 _APPROVER_SCRIPT_CALL = 'bash scripts/approve-release.sh "$TAG" --yes'
+APPROVE_PREFLIGHT_SCRIPT = REPO_ROOT / ".github" / "scripts" / "approve-release-preflight.sh"
+PUBLISH_DOCKER_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish-docker.yml"
 
 
 def _approver_doc() -> dict:
@@ -4032,8 +4146,11 @@ def _approver_doc() -> dict:
 
 
 def _approver_job() -> dict:
-    (job,) = _approver_doc()["jobs"].values()
-    return job
+    return _approver_doc()["jobs"]["approve"]
+
+
+def _preflight_job() -> dict:
+    return _approver_doc()["jobs"]["preflight"]
 
 
 def _approver_step() -> dict:
@@ -4044,16 +4161,35 @@ def _approver_step() -> dict:
     return steps[0]
 
 
-def _run_approver_step(tmp_path: Path, tag: str, gh_token: str) -> tuple[int, str | None]:
+def _run_approver_step(
+    tmp_path: Path,
+    tag: str,
+    gh_token: str,
+    ref: str = "refs/heads/main",
+    actor: str = "owner",
+    script_present: bool = True,
+    expected_sha: str = "c" * 40,
+) -> tuple[int, str | None, str]:
     """Run the REAL approve step's shell, the way Actions runs it, against a fake
-    approve-release.sh that records its argv. Returns (exit code, recorded argv)."""
+    approve-release.sh that records its argv. Returns (exit code, recorded argv,
+    stdout+stderr)."""
     (tmp_path / "scripts").mkdir(exist_ok=True)
     record = tmp_path / "argv"
     record.unlink(missing_ok=True)
-    (tmp_path / "scripts" / "approve-release.sh").write_text(
-        f'#!/usr/bin/env bash\nprintf "%s " "$@" > "{record}"\n'
-    )
-    env = {"PATH": os.environ["PATH"], "TAG": tag, "GH_TOKEN": gh_token, "GH_REPO": "o/r"}
+    fake = tmp_path / "scripts" / "approve-release.sh"
+    fake.unlink(missing_ok=True)
+    if script_present:
+        fake.write_text(f'#!/usr/bin/env bash\nprintf "%s " "$@" > "{record}"\n')
+    env = {
+        "PATH": os.environ["PATH"],
+        "TAG": tag,
+        "GH_TOKEN": gh_token,
+        "GH_REPO": "o/r",
+        "REF": ref,
+        "ACTOR": actor,
+        "OWNER": "owner",
+        "EXPECTED_SHA": expected_sha,
+    }
     proc = subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", _approver_step()["run"]],
         cwd=tmp_path,
@@ -4063,7 +4199,115 @@ def _run_approver_step(tmp_path: Path, tag: str, gh_token: str) -> tuple[int, st
         timeout=20,
         check=False,
     )
-    return proc.returncode, (record.read_text() if record.exists() else None)
+    argv = record.read_text() if record.exists() else None
+    return proc.returncode, argv, proc.stdout + proc.stderr
+
+
+# Fake `gh` for the preflight: `gh api <path> [--jq F] [--paginate]` serves
+# $FAKE_DIR/<path with non-alphanumerics as _>.json, filtered through real jq.
+# A missing file answers like a 404.
+_PREFLIGHT_GH_SHIM = r"""#!/usr/bin/env bash
+path=""; jqf=""; prev=""
+for a in "$@"; do
+  case "$prev" in --jq) jqf="$a";; esac
+  case "$a" in repos/*) path="$a";; esac
+  prev="$a"
+done
+f="$FAKE_DIR/$(printf '%s' "$path" | sed 's/[^A-Za-z0-9]/_/g').json"
+[ -f "$f" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+if [ -n "$jqf" ]; then jq -r "$jqf" "$f"; else cat "$f"; fi
+"""
+
+_TAG_COMMIT = "c" * 40
+_TAG_OBJECT = "b" * 40
+
+
+def _read_or_empty(path: Path) -> str:
+    return path.read_text() if path.exists() else ""
+
+
+def _run_preflight(
+    tmp_path: Path, api: dict[str, object], script_present: bool = True
+) -> tuple[subprocess.CompletedProcess[str], str, str]:
+    """Run the REAL preflight script against a fake gh. Returns (proc, summary, output)."""
+    fake_dir = tmp_path / "api"
+    fake_dir.mkdir()
+    for path, body in api.items():
+        (fake_dir / (re.sub(r"[^A-Za-z0-9]", "_", path) + ".json")).write_text(json.dumps(body))
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "gh").write_text(_PREFLIGHT_GH_SHIM)
+    (bindir / "gh").chmod(0o755)
+    work = tmp_path / "work"
+    (work / "scripts").mkdir(parents=True)
+    if script_present:
+        (work / "scripts" / "approve-release.sh").write_text("#!/usr/bin/env bash\n")
+    summary, output = tmp_path / "summary.md", tmp_path / "output"
+    env = {
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "FAKE_DIR": str(fake_dir),
+        "TAG": "v1.2.3",
+        "GH_REPO": "o/r",
+        "GH_TOKEN": "t",
+        "GITHUB_STEP_SUMMARY": str(summary),
+        "GITHUB_OUTPUT": str(output),
+    }
+    proc = subprocess.run(
+        ["bash", str(APPROVE_PREFLIGHT_SCRIPT)],
+        cwd=work,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    return proc, _read_or_empty(summary), _read_or_empty(output)
+
+
+def _preflight_api(runs: list[dict]) -> dict[str, object]:
+    """An annotated tag v1.2.3 -> tag object -> _TAG_COMMIT, plus waiting runs."""
+    api: dict[str, object] = {
+        "repos/o/r/git/ref/tags/v1.2.3": {"object": {"type": "tag", "sha": _TAG_OBJECT}},
+        f"repos/o/r/git/tags/{_TAG_OBJECT}": {"object": {"type": "commit", "sha": _TAG_COMMIT}},
+        "repos/o/r/actions/runs?status=waiting&per_page=100": {"workflow_runs": runs},
+    }
+    for r in runs:
+        api[f"repos/o/r/actions/runs/{r['id']}/pending_deployments"] = [
+            {"environment": {"name": r.pop("_env")}}
+        ]
+    return api
+
+
+def _waiting_run(i: int, name: str, event: str, head: str, env: str, title: str = "x") -> dict:
+    return {
+        "id": i,
+        "name": name,
+        "event": event,
+        "head_sha": head,
+        "display_title": title,
+        "html_url": f"https://gh.test/runs/{i}",
+        "_env": env,
+    }
+
+
+def _longest_job_chain(path: Path) -> int:
+    """Worst-case minutes of a workflow: the longest `needs` chain of job timeouts."""
+    jobs = yaml.safe_load(path.read_text())["jobs"]
+    memo: dict[str, int] = {}
+
+    def chain(name: str) -> int:
+        if name not in memo:
+            job = jobs[name]
+            assert "timeout-minutes" in job, (
+                f"{path.name} job {name!r} has no timeout-minutes (GitHub default: 360), "
+                "so no approver timeout can be shown to cover it"
+            )
+            needs = job.get("needs", [])
+            needs = [needs] if isinstance(needs, str) else needs
+            memo[name] = int(job["timeout-minutes"]) + max((chain(n) for n in needs), default=0)
+        return memo[name]
+
+    return max(chain(n) for n in jobs)
 
 
 class TestApproveReleaseWiring:
@@ -4085,24 +4329,49 @@ class TestApproveReleaseWiring:
     # One test, not parametrized: GUARD_MUTATIONS' control run requires "1 passed".
     def test_approver_rejects_a_malformed_tag(self, tmp_path):
         for tag in ("1.2.3", "v1.2", "v1.2.3-rc1", "v1.2.3;id", "v1.2.3\nv9.9.9", "v1.2.3 ", ""):
-            rc, argv = _run_approver_step(tmp_path, tag, "t")
+            rc, argv, _ = _run_approver_step(tmp_path, tag, "t")
             assert rc != 0 and argv is None, (
                 f"the approve step ran approve-release.sh for tag {tag!r}. Only vX.Y.Z may "
                 "reach it; a line-based check (grep) passes 'v1.2.3<newline>junk'."
             )
-        rc, argv = _run_approver_step(tmp_path, "v1.2.3", "t")
+        rc, argv, _ = _run_approver_step(tmp_path, "v1.2.3", "t")
         assert rc == 0 and argv is not None and argv.startswith("v1.2.3 "), (
             "control: a well-formed tag must reach the script"
         )
 
-    def test_approver_never_templates_inputs_into_shell(self):
-        for step in _approver_job()["steps"]:
-            run = step.get("run", "")
-            assert "${{" not in run, (
-                f"step {step.get('name')!r} expands an expression inside run:. Inputs must "
-                "reach shell through env, or a crafted tag becomes code (zizmor "
-                "template-injection)."
+    def test_approver_refuses_a_branch_other_than_main(self, tmp_path):
+        for ref in ("refs/heads/evil", "refs/tags/v1.2.3", "refs/heads/main-x", ""):
+            rc, argv, _ = _run_approver_step(tmp_path, "v1.2.3", "t", ref=ref)
+            assert rc != 0 and argv is None, (
+                f"the approve step ran from {ref!r}. Only main's copy of this workflow may "
+                "receive the PAT; a branch could rewrite what the step does with it."
             )
+
+    def test_approver_refuses_anyone_but_the_owner(self, tmp_path):
+        for actor in ("someone-else", "dependabot[bot]", ""):
+            rc, argv, _ = _run_approver_step(tmp_path, "v1.2.3", "t", actor=actor)
+            assert rc != 0 and argv is None, (
+                f"the approve step ran for triggering actor {actor!r}. Only the repository "
+                "owner may start a run that spends the owner's PAT."
+            )
+
+    def test_approver_stops_when_the_script_is_missing(self, tmp_path):
+        rc, _, out = _run_approver_step(tmp_path, "v1.2.3", "t", script_present=False)
+        # bash fails on a missing file anyway; the message is what this pins.
+        assert rc != 0 and "WOR-1165" in out, (
+            "with approve-release.sh absent the approve step must fail saying it needs "
+            f"WOR-1165 merged first, not a bare bash error.\n{out}"
+        )
+
+    def test_approver_never_templates_inputs_into_shell(self):
+        for job in _approver_doc()["jobs"].values():
+            for step in job["steps"]:
+                run = step.get("run", "")
+                assert "${{" not in run, (
+                    f"step {step.get('name')!r} expands an expression inside run:. Inputs "
+                    "must reach shell through env, or a crafted tag becomes code (zizmor "
+                    "template-injection)."
+                )
 
     def test_approver_waits_on_its_own_environment(self):
         env = _approver_job().get("environment")
@@ -4129,10 +4398,11 @@ class TestApproveReleaseWiring:
     def test_approver_permissions_are_minimal(self):
         doc = _approver_doc()
         assert doc.get("permissions") == {}, "top-level permissions must be {}"
-        assert _approver_job().get("permissions") == {"contents": "read", "actions": "read"}, (
-            "the job token needs only contents: read and actions: read. The approvals "
-            "are made with the PAT; GITHUB_TOKEN cannot make them anyway."
-        )
+        for name, job in doc["jobs"].items():
+            assert job.get("permissions") == {"contents": "read", "actions": "read"}, (
+                f"job {name!r}: the job token needs only contents: read and actions: read. "
+                "The approvals are made with the PAT; GITHUB_TOKEN cannot make them anyway."
+            )
 
     def test_approver_runs_the_script_unattended(self, tmp_path):
         step = _approver_step()
@@ -4141,10 +4411,134 @@ class TestApproveReleaseWiring:
             "script prompts, and a runner has no one to answer."
         )
         assert step["env"].get("GH_REPO") == "${{ github.repository }}"
-        rc, argv = _run_approver_step(tmp_path, "v1.2.3", "")
+        rc, argv, _ = _run_approver_step(tmp_path, "v1.2.3", "")
         assert rc != 0 and argv is None, (
             "an empty RELEASE_APPROVER_TOKEN must stop the step before the script runs; "
             "gh would otherwise fail later with a vaguer error."
+        )
+
+    def test_approver_pins_the_commit_the_owner_saw(self, tmp_path):
+        """The commit preflight showed is the one the script must enforce."""
+        rc, argv, out = _run_approver_step(tmp_path, "v1.2.3", "t")
+        assert rc == 0 and argv is not None, out
+        assert f"--expect-sha {_TAG_COMMIT} " in argv, (
+            f"approve-release.sh got {argv!r}; it must get --expect-sha <preflight commit>, "
+            "or it approves whatever the tag points at by the time it runs"
+        )
+        for bad in ("", "c" * 39, "C" * 40):
+            rc, argv, _ = _run_approver_step(tmp_path, "v1.2.3", "t", expected_sha=bad)
+            assert rc != 0 and argv is None, (
+                f"EXPECTED_SHA {bad!r} reached the script; preflight's output must be a "
+                "full lowercase commit sha"
+            )
+
+    def test_approver_checkout_has_the_tags(self):
+        """approve-release.sh resolves the tag from the local checkout (WOR-1165)."""
+        (co,) = [s for s in _approver_job()["steps"] if "actions/checkout" in s.get("uses", "")]
+        w = co.get("with", {})
+        assert w.get("fetch-tags") is True and w.get("fetch-depth") == 0, (
+            "the approve checkout must fetch every tag (fetch-depth: 0, fetch-tags: true); "
+            "otherwise the script exits 64 'tag missing locally' on every run"
+        )
+        assert w.get("persist-credentials") is False
+
+    def test_approve_waits_for_the_preflight_summary(self):
+        needs = _approver_job().get("needs")
+        needs = [needs] if isinstance(needs, str) else (needs or [])
+        assert "preflight" in needs, (
+            "approve must need preflight, so the summary of what will be approved is on "
+            "the run page before the owner is asked to approve release-approver"
+        )
+        pre = _preflight_job()
+        assert "environment" not in pre, "preflight must not wait on an environment"
+        assert "secrets." not in json.dumps(pre), "preflight must use GITHUB_TOKEN only"
+        (step,) = [s for s in pre["steps"] if "approve-release-preflight.sh" in s.get("run", "")]
+        assert step["env"]["GH_TOKEN"] == "${{ github.token }}"  # noqa: S105 (an expression)
+        assert step["env"]["TAG"] == "${{ inputs.tag }}"
+        assert _approver_step()["env"].get("EXPECTED_SHA") == (
+            "${{ needs.preflight.outputs.commit }}"
+        )
+
+    def test_preflight_flags_runs_that_are_not_this_tag(self, tmp_path):
+        other = f"Create GitHub Release v1.2.2 {_TAG_COMMIT}"
+        runs = [
+            _waiting_run(1, "Publish to PyPI", "push", _TAG_COMMIT, "pypi"),
+            _waiting_run(2, "Publish worthless-mcp to npm", "push", "a" * 40, "npm-publish"),
+            _waiting_run(
+                3, "Deploy Worker", "workflow_dispatch", _TAG_COMMIT, "worthless-sh-production"
+            ),
+            _waiting_run(
+                4,
+                "Create GitHub Release",
+                "workflow_run",
+                "d" * 40,
+                "release",
+                f"Create GitHub Release v1.2.3 {_TAG_COMMIT}",
+            ),
+            _waiting_run(5, "Create GitHub Release", "workflow_run", "d" * 40, "release", other),
+            # Right event and commit, but not one of the four release environments.
+            _waiting_run(6, "Some deploy", "push", _TAG_COMMIT, "github-pages"),
+        ]
+        proc, summary, output = _run_preflight(tmp_path, _preflight_api(runs))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert f"commit={_TAG_COMMIT}" in output, "the annotated tag was not peeled to its commit"
+        assert _TAG_COMMIT in summary
+        lines = summary.splitlines()
+        rows = {i: next(ln for ln in lines if f"runs/{i})" in ln) for i in range(1, 7)}
+        flagged = {i for i, ln in rows.items() if "WILL NOT BE APPROVED" in ln}
+        assert flagged == {2, 3, 5, 6}, (
+            f"preflight flagged runs {sorted(flagged)}; expected the old-commit push (2), "
+            "the manual dispatch (3), the release run titled for another tag (5) and the "
+            "run waiting on a non-release environment (6) — approve-release.sh's rules"
+        )
+        assert "| pypi |" in rows[1] and "| release |" in rows[4]
+
+    def test_preflight_stops_when_the_approve_script_is_missing(self, tmp_path):
+        proc, _, _ = _run_preflight(tmp_path, _preflight_api([]), script_present=False)
+        assert proc.returncode != 0 and "WOR-1165" in proc.stdout + proc.stderr, (
+            "preflight must fail with 'needs WOR-1165 merged first' when "
+            "scripts/approve-release.sh is absent, before anyone is asked to approve"
+        )
+
+    def test_preflight_fails_on_an_unknown_tag(self, tmp_path):
+        api = _preflight_api([])
+        del api["repos/o/r/git/ref/tags/v1.2.3"]
+        proc, _, output = _run_preflight(tmp_path, api)
+        assert proc.returncode != 0 and "commit=" not in output
+
+    def test_preflight_release_title_matches_release_notes(self, release_notes_data: dict):
+        m = re.search(
+            r'^readonly RELEASE_RUN_TITLE_PREFIX="([^"]*)"',
+            APPROVE_PREFLIGHT_SCRIPT.read_text(),
+            re.M,
+        )
+        assert m, "approve-release-preflight.sh no longer declares RELEASE_RUN_TITLE_PREFIX"
+        assert release_notes_data["run-name"].startswith(m.group(1) + " ${{"), (
+            f"preflight matches release runs by {m.group(1)!r} but release-notes.yml titles "
+            f"them {release_notes_data['run-name']!r}; every release run would be flagged"
+        )
+
+    def test_approver_outlasts_the_slowest_release_path(self):
+        """The script must not give up while a healthy release is still running.
+
+        Worst case: the slowest publisher (publish-docker.yml) runs its full job
+        chain, then release-notes.yml runs its own. Read live, so raising a
+        publisher timeout without raising this one turns red.
+        """
+        docker = _longest_job_chain(PUBLISH_DOCKER_WORKFLOW)
+        release = _longest_job_chain(RELEASE_NOTES_WORKFLOW)
+        m = re.search(r"--timeout-min (\d+)", _approver_step()["run"])
+        assert m, "the approve step must pass --timeout-min to approve-release.sh"
+        script = int(m.group(1))
+        assert script >= docker + release + 10, (
+            f"--timeout-min {script} does not cover publish-docker.yml ({docker} min) + "
+            f"release-notes.yml ({release} min) + 10 min margin"
+        )
+        step_tm = int(_approver_step()["timeout-minutes"])
+        job_tm = int(_approver_job()["timeout-minutes"])
+        assert step_tm >= script + 5 and job_tm >= step_tm, (
+            "the script must time out before the step, and the step before the job, so a "
+            "stuck release ends as exit 2 (timeout), not 'cancelled'"
         )
 
 
