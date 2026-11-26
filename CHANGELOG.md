@@ -4,8 +4,6 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
-## [0.3.18] — 2026-11-21
-
 ### Fixed
 - **`worthless uninstall` and `worthless lock` no longer destroy a key that can still be rescued, and `worthless revoke` asks before it destroys one** (WOR-1135).
   Before: a key that lost its link (the v0.3.7–v0.3.14 doctor bug, WRTLS-102) was deleted by `worthless uninstall --yes` with exit 0. A key whose project folder you moved or deleted was deleted the same way. `worthless lock` on a `--keys-only` value of such a key split it again, and the original key was lost. `worthless doctor` suggested `worthless uninstall --force` for a project whose `.env` was missing. `worthless revoke` destroyed a key with no question, also when an AI agent ran it.
@@ -17,6 +15,10 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - `lock` refuses the whole `.env` when one value is half of a stored key, so a new key added to that file is not locked either.
   - Scripts that run `worthless revoke` without a terminal must now add `--yes`.
   - `uninstall --force` names only the keys it can read. If the database can't be opened at all, the keys in it are destroyed without being named.
+
+## [0.3.18] — 2026-11-21
+
+### Fixed
 - **On Linux, `worthless service uninstall` turns lingering off again if `worthless service install` turned it on** (worthless-fzas).
   Before: `service install` ran `loginctl enable-linger`, so your account's user services kept running after logout and started at boot. `service uninstall` and `worthless uninstall` left lingering on. A failed install also left it on. The banner told you to run `loginctl disable-linger` yourself.
   Now: when `service install` turns lingering on, it records that in `~/.worthless`. `service uninstall`, `worthless uninstall` and a failed first install turn lingering off again. If lingering was already on before the install, it stays on. If the system refuses to turn it off, you see a warning with the command to run.
