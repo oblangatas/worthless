@@ -82,5 +82,24 @@ jobs:
           if npm view "worthless-mcp@${SEMVER}" version >/dev/null 2>&1; then
             echo "worthless-mcp@${SEMVER} already published — skipping (re-run safe)."
           else
-            npm publish --access public --tag "${DIST_TAG}"
+            # verbose: npm logs the OIDC exchange only at this level. Without it
+            # a fallback to NPM_TOKEN is invisible (0.3.17 and 0.3.18). WOR-921.
+            npm publish --access public --tag "${DIST_TAG}" --loglevel verbose
+            echo "PUBLISHED=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Check provenance (OIDC used, not the token)
+        # Annotates, never fails: a failed publish-npm run holds the GitHub
+        # Release (release-fanin.sh), and the package is already out by now.
+        if: env.PUBLISHED == '1'
+        run: |
+          for _ in 1 2 3 4 5 6; do
+            ATT="$(npm view "worthless-mcp@${SEMVER}" dist.attestations --json 2>/dev/null || true)"
+            [ -n "${ATT}" ] && break
+            sleep 15
+          done
+          if [ -n "${ATT}" ]; then
+            echo "worthless-mcp@${SEMVER} has provenance: published via OIDC."
+          else
+            echo "::error::worthless-mcp@${SEMVER} has no provenance: OIDC was not used, NPM_TOKEN published it. Check the trusted publisher on npmjs.com (WOR-921)."
           fi
