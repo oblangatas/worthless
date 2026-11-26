@@ -121,8 +121,10 @@ for **Create GitHub Release**, approves it, and prints the Release URL.
 **Use it:**
 
 1. Actions → **Approve release** → **Run workflow** on `main` → enter the tag, for example
-   `v0.3.15`. A run started by anyone but the repository owner, or from another branch, stops
-   before the token is used.
+   `v0.3.15`. A run started by anyone but the repository owner, or from another branch, is
+   skipped before any approval is requested: the preflight job goes red with the reason, and the
+   approve job never asks for the `release-approver` approval. The step that holds the token checks
+   both again, as defence in depth.
 2. The **preflight** job runs first, with the job's own token. Its summary on the run page shows
    the tag's commit and every run waiting for approval. Each run is marked OK or **WILL NOT BE
    APPROVED** (a different commit, a manual dispatch, or a release run for another tag).
