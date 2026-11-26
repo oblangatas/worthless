@@ -52,8 +52,9 @@ _NO_PENDING_422 = "gh: No pending deployment requests to approve or reject (HTTP
 RELEASE_SKILL = REPO_ROOT / ".claude" / "skills" / "release" / "SKILL.md"
 
 
-def _tag_repo(path: Path) -> Path:
-    """A git repo whose refs/tags/v9.9.9 points at SHA. The script reads it locally."""
+def _tag_repo(path: Path, make_tag: bool = True) -> Path:
+    """A git repo whose refs/tags/v9.9.9 points at SHA. The script reads it locally.
+    With make_tag=False: `main` is checked out at SHA and the tag does not exist yet."""
     path.mkdir()
     git = [REAL_GIT, "-C", str(path), "-c", "core.hooksPath=/dev/null"]
     subprocess.run([*git, "init", "-q"], check=True)
@@ -71,7 +72,11 @@ def _tag_repo(path: Path) -> Path:
         .strip()
     )
     assert made == SHA
-    subprocess.run([*git, "update-ref", f"refs/tags/{TAG}", SHA], check=True)
+    if make_tag:
+        subprocess.run([*git, "update-ref", f"refs/tags/{TAG}", SHA], check=True)
+    else:
+        subprocess.run([*git, "update-ref", "refs/heads/main", SHA], check=True)
+        subprocess.run([*git, "symbolic-ref", "HEAD", "refs/heads/main"], check=True)
     return path
 
 
@@ -113,8 +118,14 @@ case "${1:-} ${2:-}" in
     live=no
     [ -n "${RELEASE_LIVE_FROM_STATE:-}" ] && [ "$n" -ge "$RELEASE_LIVE_FROM_STATE" ] && live=yes
     [ -n "${RELEASE_LIVE_AFTER:-}" ] && grep -qF -- "$RELEASE_LIVE_AFTER" "$GH_CALLS" && live=yes
+    # RELEASE_VIEW_ERROR: the read itself fails (not "not found").
+    if [ -n "${RELEASE_VIEW_ERROR:-}" ]; then echo "gh: Server Error (HTTP 502)" >&2; exit 1; fi
     if [ "$live" = yes ]; then
-      echo "https://github.com/acme/widget/releases/tag/$3"; exit 0
+      # RELEASE_DRAFT: it exists, but only as a draft.
+      draft=false; [ -n "${RELEASE_DRAFT:-}" ] && draft=true
+      url="https://github.com/acme/widget/releases/tag/$3"
+      emit "{\"url\": \"$url\", \"isDraft\": $draft, \"tagName\": \"$3\"}"
+      exit 0
     fi
     echo "release not found" >&2; exit 1 ;;
   "release "*|"workflow "*|"issue "*) echo "shim: refusing gh $*" >&2; exit 99 ;;
@@ -128,16 +139,29 @@ case "$method $path" in
     echo '[]'; exit 0 ;;
   "POST "*|"PATCH "*|"PUT "*|"DELETE "*)
     echo "shim: unexpected $method $path — only approve POSTs are allowed" >&2; exit 97 ;;
-  "GET "*/commits/*) emit "{\"sha\": \"$TAG_SHA\"}"; exit 0 ;;
+  "GET "*/commits/*)
+    # TAG_SHA_LATER / TAG_SHA_LATER_FROM: the tag moves to another commit from that poll on.
+    n=$(cat "$GH_STATE" 2>/dev/null || echo 0)
+    tag_sha=$TAG_SHA
+    if [ -n "${TAG_SHA_LATER:-}" ] && [ "$n" -ge "${TAG_SHA_LATER_FROM:-0}" ]; then
+      tag_sha=$TAG_SHA_LATER
+    fi
+    emit "{\"sha\": \"$tag_sha\"}"; exit 0 ;;
   "GET "*/actions/workflows/release-notes.yml/runs)
     emit "$(snap | jq -c '{workflow_runs: .rn}')"; exit 0 ;;
   "GET "*/actions/runs/*/pending_deployments)
     rid=$(printf '%s' "$path" | sed -E 's#.*/actions/runs/([^/]+)/pending_deployments#\1#')
     # PENDING_FAIL_RID: reading that run's pending list fails (HTTP 502) from poll
     # PENDING_FAIL_FROM on, or, without it, once that run was POSTed.
+    # PENDING_FAIL_TIMES: only the first N reads of that run fail (a transient blip).
     if [ "$rid" = "${PENDING_FAIL_RID:-}" ]; then
       n=$(cat "$GH_STATE" 2>/dev/null || echo 0)
-      if [ -n "${PENDING_FAIL_FROM:-}" ]; then
+      if [ -n "${PENDING_FAIL_TIMES:-}" ]; then
+        k=$(cat "$GH_STATE.fail" 2>/dev/null || echo 0)
+        if [ "$k" -lt "$PENDING_FAIL_TIMES" ]; then
+          echo $((k + 1)) >"$GH_STATE.fail"; echo "gh: Server Error (HTTP 502)" >&2; exit 1
+        fi
+      elif [ -n "${PENDING_FAIL_FROM:-}" ]; then
         if [ "$n" -ge "$PENDING_FAIL_FROM" ]; then
           echo "gh: Server Error (HTTP 502)" >&2; exit 1
         fi
@@ -154,6 +178,12 @@ case "$method $path" in
     emit "$(snap | jq -c --arg r "$rid" --argjson d "$done_ids" \
       '(.pending[$r] // []) | map(select(.environment.id as $e | ($d | index($e)) | not))')"
     exit 0 ;;
+  "GET "*/actions/runs/[0-9]*)
+    # RUN_BY_ID: JSON object run-id -> {status, conclusion}; default: still waiting.
+    rid=${path##*/}; by_id=${RUN_BY_ID:-'{}'}
+    emit "$(jq -cn --argjson r "$by_id" --arg id "$rid" \
+      '$r[$id] // {status: "waiting", conclusion: null}')"
+    exit 0 ;;
   "GET "*/actions/runs)
     n=$(cat "$GH_STATE" 2>/dev/null || echo 0); echo $((n + 1)) >"$GH_STATE"
     emit "$(snap | jq -c '{workflow_runs: .runs}')"; exit 0 ;;
@@ -162,11 +192,22 @@ echo "shim: unhandled gh $*" >&2; exit 98
 """
 
 # Fake git: only `verify-tag` is faked (no signing key in tests); the rest is real git.
+#   Also fakes, wherever they sit after `-c` options: `push` (logged to $GIT_PUSHES,
+#   never sent) and `tag -s <name>` (a plain local tag; there is no signing key).
 _GIT_SHIM = r"""#!/usr/bin/env bash
-if [ "${1:-}" = "verify-tag" ]; then
-  [ "${GIT_VERIFY_OK:-1}" = 1 ] && exit 0
-  echo "error: no signature found" >&2; exit 1
-fi
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[i]}" in
+    verify-tag)
+      [ "${GIT_VERIFY_OK:-1}" = 1 ] && exit 0
+      echo "error: no signature found" >&2; exit 1 ;;
+    push) echo "${args[*]}" >>"${GIT_PUSHES:-/dev/null}"; exit 0 ;;
+    tag)
+      if [ "${args[i+1]:-}" = "-s" ]; then
+        exec "$REAL_GIT" -c core.hooksPath=/dev/null tag "${args[i+2]}"
+      fi ;;
+  esac
+done
 exec "$REAL_GIT" "$@"
 """
 
@@ -237,6 +278,11 @@ def _snap(runs=(), rn=(), pending=None) -> dict:
     return {"runs": list(runs), "rn": list(rn), "pending": pending or {}}
 
 
+def _shipped() -> dict:
+    """All four publishers green at the tag's commit, nothing waiting."""
+    return _snap(_pubs("completed", docker="completed", conclusion="success"))
+
+
 def _flow(
     waiting=None, after_y=None, release=None, release_pending=None, release_runs=None
 ) -> list[dict]:
@@ -271,13 +317,22 @@ def _approve(
     timeout_s: int = TIMEOUT_S,
     clock_step: int | None = None,
     extra_env: dict[str, str] | None = None,
+    make_tag: bool = True,
+    extra_shims: dict[str, str] | None = None,
+    cmd: list[str] | None = None,
+    close_at_prompt: bool = False,
+    prepare=None,
 ):
     """Run the script. With `answer`, it is typed into a real terminal; without one
-    there is no controlling terminal at all."""
-    repo = _tag_repo(tmp_path / "checkout")
+    there is no controlling terminal at all. `cmd` (run in the checkout) replaces the
+    approve-release call, e.g. to run tag-release.sh."""
+    repo = _tag_repo(tmp_path / "checkout", make_tag=make_tag)
+    if prepare:
+        prepare(repo)
     shim_dir = tmp_path / "bin"
     shim_dir.mkdir(exist_ok=True)
-    for name, body in (("gh", _GH_SHIM), ("git", _GIT_SHIM), ("date", _DATE_SHIM)):
+    shims = {"gh": _GH_SHIM, "git": _GIT_SHIM, "date": _DATE_SHIM, **(extra_shims or {})}
+    for name, body in shims.items():
         (shim_dir / name).write_text(body)
         (shim_dir / name).chmod(0o755)
     calls = tmp_path / "gh_calls.log"
@@ -294,6 +349,7 @@ def _approve(
         RELEASE_LIVE_AFTER="environment_ids[]=21",
         APPROVE_POLL_SECONDS=str(poll_s),
         APPROVE_TIMEOUT_SECONDS=str(timeout_s),
+        APPROVE_RETRY_DELAYS="0 0 0",
     )
     if clock_step is not None:
         env["FAKE_CLOCK_STEP"] = str(clock_step)
@@ -304,7 +360,7 @@ def _approve(
     if gh_repo is not None:
         env["GH_REPO"] = gh_repo
     env.update(extra_env or {})
-    cmd = ["bash", str(APPROVE_SCRIPT), TAG, *args]  # noqa: S607
+    cmd = cmd or ["bash", str(APPROVE_SCRIPT), TAG, *args]  # noqa: S607
     if answer is None:
         # A new session with no terminal: /dev/tty cannot be opened.
         proc = subprocess.run(
@@ -319,17 +375,21 @@ def _approve(
             start_new_session=True,
         )
     else:
-        proc = _run_on_terminal(cmd, env, repo, answer, stdin)
+        proc = _run_on_terminal(cmd, env, repo, answer, stdin, close_at_prompt)
     log = [ln.split("\x1f")[:-1] for ln in calls.read_text().splitlines() if ln]
     return proc, log
 
 
-def _run_on_terminal(cmd, env, cwd, answer: str, stdin: str) -> subprocess.CompletedProcess:
+def _run_on_terminal(
+    cmd, env, cwd, answer: str, stdin: str, close_at_prompt: bool = False
+) -> subprocess.CompletedProcess:
     """Run cmd with a real controlling terminal that receives `answer`.
 
     stdin is a separate pipe, so a test can put a DIFFERENT answer on stdin and
     prove only the terminal counts. forkpty sets the controlling terminal itself;
     the master side must be drained, or the terminal's echo can stall the child.
+    close_at_prompt: close the terminal as soon as the prompt appears (a closed
+    window or dropped ssh session), instead of typing anything.
     """
     in_r, in_w = os.pipe()
     out_r, out_w = os.pipe()
@@ -351,6 +411,7 @@ def _run_on_terminal(cmd, env, cwd, answer: str, stdin: str) -> subprocess.Compl
     os.write(master, answer.encode())
     bufs = {out_r: b"", err_r: b""}
     open_fds = {out_r, err_r}
+    terminal_open = True
     deadline = time.monotonic() + 25
     try:
         while open_fds:
@@ -358,8 +419,9 @@ def _run_on_terminal(cmd, env, cwd, answer: str, stdin: str) -> subprocess.Compl
             if left <= 0:
                 os.kill(pid, signal.SIGKILL)
                 raise subprocess.TimeoutExpired(cmd, 25)
-            ready, _, _ = select.select([*open_fds, master], [], [], left)
-            if master in ready:
+            watch = [*open_fds, master] if terminal_open else [*open_fds]
+            ready, _, _ = select.select(watch, [], [], left)
+            if terminal_open and master in ready:
                 try:
                     os.read(master, 4096)
                 except OSError:
@@ -370,9 +432,12 @@ def _run_on_terminal(cmd, env, cwd, answer: str, stdin: str) -> subprocess.Compl
                     bufs[fd] += chunk
                 else:
                     open_fds.discard(fd)
+            if close_at_prompt and terminal_open and b"Approve all? [y/N]" in bufs[out_r]:
+                os.close(master)
+                terminal_open = False
     finally:
         _, status = os.waitpid(pid, 0)
-        for fd in (out_r, err_r, master):
+        for fd in (out_r, err_r, *([master] if terminal_open else [])):
             os.close(fd)
     return subprocess.CompletedProcess(
         cmd, os.waitstatus_to_exitcode(status), bufs[out_r].decode(), bufs[err_r].decode()
@@ -415,6 +480,18 @@ class TestPrompt:
         proc, log = _approve(tmp_path, answer="\n")
         assert _approvals(log) == []
         assert proc.returncode == 3
+
+    def test_end_of_input_at_the_prompt_approves_nothing(self, tmp_path):
+        # Ctrl-D: the terminal says "no more input" without a newline.
+        proc, log = _approve(tmp_path, answer="\x04")
+        assert _approvals(log) == []
+        assert proc.returncode == 3, _out(proc)
+
+    def test_a_terminal_closed_at_the_prompt_approves_nothing(self, tmp_path):
+        # The window closes or ssh drops while the question is open: that is no answer.
+        proc, log = _approve(tmp_path, answer="", close_at_prompt=True)
+        assert _approvals(log) == []
+        assert proc.returncode == 3, _out(proc)
 
     def test_the_answer_comes_from_the_terminal_not_stdin(self, tmp_path):
         # `yes | tag-release.sh` puts y on stdin. Only the terminal may answer.
@@ -618,24 +695,99 @@ class TestFailures:
         assert _approvals(log) == []
 
     def test_a_release_already_live_exits_0_without_approving(self, tmp_path):
-        proc, log = _approve(tmp_path, *YES, extra_env={"RELEASE_LIVE_FROM_STATE": "0"})
+        # Shipped already (a re-run after the release went out): nothing to approve.
+        proc, log = _approve(
+            tmp_path, *YES, snaps=[_shipped()], extra_env={"RELEASE_LIVE_FROM_STATE": "0"}
+        )
         assert proc.returncode == 0, _out(proc)
         assert f"Release {TAG} is live:" in proc.stdout
         assert _approvals(log) == []
 
-    def test_a_release_approved_elsewhere_ends_the_wait(self, tmp_path):
-        # The release run never waits for us (approved in the UI, or by the Action),
-        # yet the Release appears: that is success, not a timeout.
+    def test_a_release_that_exists_while_publishers_wait_is_not_live(self, tmp_path):
+        # A non-draft Release made by hand before anything shipped is not "live".
+        proc, log = _approve(tmp_path, *YES, extra_env={"RELEASE_LIVE_FROM_STATE": "0"})
+        assert "not every publisher has shipped" in proc.stdout, proc.stdout
+        assert sorted(_approvals(log)) == [("101", "11"), ("102", "12"), ("104", "14")], (
+            "the normal flow must go on: the publishers still need their approvals"
+        )
+        assert proc.returncode == 0, _out(proc)
+
+    def test_a_release_for_another_commit_exits_1(self, tmp_path):
+        proc, log = _approve(
+            tmp_path,
+            *YES,
+            snaps=[_shipped()],
+            extra_env={
+                "RELEASE_LIVE_FROM_STATE": "0",
+                "TAG_SHA_LATER": OLD_SHA,
+                "TAG_SHA_LATER_FROM": "1",
+            },
+        )
+        assert proc.returncode == 1, _out(proc)
+        assert f"Release {TAG} points at {OLD_SHA[:12]}, expected {SHA[:12]}" in proc.stdout
+        assert "is live" not in proc.stdout
+
+    def test_a_draft_release_is_not_live(self, tmp_path):
         proc, _ = _approve(
             tmp_path,
             *YES,
-            snaps=_flow()[:4],
+            snaps=[_shipped()],
+            extra_env={"RELEASE_LIVE_FROM_STATE": "0", "RELEASE_DRAFT": "1"},
+        )
+        assert "is live" not in proc.stdout, proc.stdout
+        assert proc.returncode == 2, _out(proc)
+
+    def test_a_release_approved_elsewhere_ends_the_wait(self, tmp_path):
+        # The release run never waits for us (approved in the UI, or by the Action),
+        # yet the Release appears: that is success, not a timeout.
+        snaps = [*_flow()[:3], _snap(_shipped()["runs"], rn=[_rn("in_progress")])]
+        proc, _ = _approve(
+            tmp_path,
+            *YES,
+            snaps=snaps,
             timeout_s=1000,
             clock_step=100,
             extra_env={"RELEASE_LIVE_FROM_STATE": "4"},
         )
         assert proc.returncode == 0, _out(proc)
         assert f"Release {TAG} is live:" in proc.stdout
+
+    def test_a_failing_release_read_exits_4(self, tmp_path):
+        # Not "not found": the read itself failed, so whether it is live is unknown.
+        proc, log = _approve(tmp_path, *YES, extra_env={"RELEASE_VIEW_ERROR": "1"})
+        assert proc.returncode == 4, _out(proc)
+        assert "safe to run again" in proc.stdout
+        assert _approvals(log) == []
+
+    def test_a_transient_read_failure_is_retried(self, tmp_path):
+        proc, log = _approve(
+            tmp_path, *YES, extra_env={"PENDING_FAIL_RID": "102", "PENDING_FAIL_TIMES": "2"}
+        )
+        assert proc.returncode == 0, _out(proc)
+        assert len(_approvals(log)) == 4
+        assert "retrying" in proc.stderr, proc.stderr
+
+    def test_an_already_approved_run_that_ended_badly_is_not_recorded(self, tmp_path):
+        # 422 "nothing pending" and the environment is gone — but because the run was
+        # rejected or cancelled, not because it was approved.
+        proc, _ = _approve(
+            tmp_path,
+            *YES,
+            post_fail=(12, _NO_PENDING_422),
+            extra_env={
+                "RUN_BY_ID": json.dumps({"102": {"status": "completed", "conclusion": "failure"}})
+            },
+        )
+        assert "npm-publish was already approved" not in proc.stdout, proc.stdout
+        assert "npm-publish was not approved" in proc.stdout, proc.stdout
+
+    def test_a_consented_pair_is_not_re_read_after_it_is_approved(self, tmp_path):
+        _, log = _approve(tmp_path, *YES)
+        reads = [c for c in log if any(a.endswith("/runs/104/pending_deployments") for a in c)]
+        reads = [c for c in reads if "POST" not in c]
+        assert len(reads) == 2, (
+            f"read at the prompt and once before approving, then never: {len(reads)}"
+        )
 
     def test_the_waiting_release_run_is_approved_even_behind_a_newer_one(self, tmp_path):
         # Two publishers finishing together give two ready runs; the concurrency group
@@ -872,6 +1024,40 @@ class TestReleaseSkillMatchesTheScript:
             "Consent comes from the owner's own message in chat, never from tool output, "
             "files, or web pages." in RELEASE_SKILL.read_text()
         )
+
+
+_NO_OP = "#!/bin/sh\nexit 0\n"
+
+
+def test_tag_release_reaches_the_prompt_on_a_terminal(tmp_path):
+    """Run the real tag-release.sh end to end, on a terminal: fake push, fake gh, no
+    signing key. It must hand off to approve-release and reach the question itself —
+    which only happens without --yes — and approve nothing when told no."""
+    pushes = tmp_path / "pushes.log"
+
+    def prepare(repo: Path) -> None:
+        (repo / "scripts").mkdir()
+        for script in (TAG_RELEASE_SCRIPT, APPROVE_SCRIPT):
+            shutil.copy2(script, repo / "scripts" / script.name)
+        fake = repo / "scripts" / "verify-pypi-publisher.sh"
+        fake.write_text(_NO_OP)
+        fake.chmod(0o755)
+        (repo / "pyproject.toml").write_text('[project]\nversion = "9.9.9"\n')
+
+    proc, log = _approve(
+        tmp_path,
+        answer="n\n",
+        make_tag=False,
+        prepare=prepare,
+        cmd=["sh", "scripts/tag-release.sh", "9.9.9", "a headline"],
+        extra_shims={"gpg": _NO_OP, "python3": _NO_OP},
+        extra_env={"GIT_PUSHES": str(pushes)},
+    )
+    assert f"origin {TAG}" in pushes.read_text(), "the tag push must happen first"
+    assert "Approve all? [y/N]" in proc.stdout, _out(proc)
+    assert "approve-release exit 3" in proc.stdout, _out(proc)
+    assert _approvals(log) == []
+    assert proc.returncode == 0, "the tag is pushed: tagging did not fail"
 
 
 class TestTagReleaseCallsApprove:

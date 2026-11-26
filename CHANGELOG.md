@@ -10,9 +10,10 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   Now: `tag-release.sh` runs `scripts/approve-release.sh <tag>`. It lists the waiting runs, asks `Approve all? [y/N]` once on your terminal, approves the three publishers and then the Release, and prints `Release <tag> is live: <url>`. If you answer anything except `y`, it approves nothing. If a publisher fails, even while the question is open, it approves nothing more and names the run. If it fails, the tag stays pushed and it prints the manual steps.
 
   **Limits.**
-  - It approves only what it showed you: `push` runs of the tag at the commit of your local signed tag, each with its own environment (`pypi`, `npm-publish`, `worthless-sh-production`), then `release`. It shows all other waiting runs as `skipped:`. A run that appears after you answer is shown, not approved.
+  - It approves only what it showed you: `push` runs of the tag at the commit of your local signed tag (the terminal path checks the tag signature; `--yes --expect-sha` checks the commit only), each with its own environment (`pypi`, `npm-publish`, `worthless-sh-production`), then `release`. It shows all other waiting runs as `skipped:`. A publisher run that appears after you answer is shown, not approved.
   - It reads the answer from the terminal only, so `yes | ./scripts/tag-release.sh` approves nothing.
   - It stops 80 minutes after your `y` (`--timeout-min` changes this) and prints the command to resume.
+  - Not yet run against real GitHub; the first real release is the live test, before the Approve release Action (PR #795) merges.
 
 ### Known issues
 - **The Docker image ships 2 more OpenSSL flaws that have no fix in Debian yet** ([#809](https://github.com/oblangatas/worthless/pull/809)).
