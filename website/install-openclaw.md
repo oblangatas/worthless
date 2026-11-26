@@ -55,7 +55,7 @@ The audit is skipped when OpenClaw is not installed, so non-OpenClaw users never
 
 > **Cloud / VPS deployments.** Both the Worthless proxy and OpenClaw run as containers in the same Docker network — nothing installed on the host. If you installed OpenClaw locally, use the [Quick start](#quick-start-local) above instead.
 >
-> **Requires the fix in [#700](https://github.com/oblangatas/worthless/pull/700)** — the `worthless-proxy` image up to 0.3.14 cannot lock in this setup. Verified end-to-end with that fix (WOR-510).
+> **Requires the fix in [#700](https://github.com/oblangatas/worthless/pull/700)** — the `worthless-proxy` image up to 0.3.14 cannot lock in this setup. Verified end-to-end with that fix.
 >
 > **Upgrading an existing deployment?** Re-download `docker-compose.yml` (OpenClaw now needs `group_add`), pull the new image, `docker compose --profile openclaw up -d`, then re-run step 2.
 
@@ -116,7 +116,7 @@ Both services share the `openclaw-config` volume (proxy at `/data/.openclaw`, op
 
 ## OpenClaw in Docker, proxy on host
 
-> Not yet verified end-to-end on a live deployment (WOR-510).
+> Not yet verified end-to-end on a live deployment.
 
 If OpenClaw runs in a container but the Worthless proxy runs on your host machine, the container needs to reach the host. Set two env vars before locking:
 
