@@ -3116,7 +3116,422 @@ GUARD_MUTATIONS = [
         "      - name: Image holds exactly the locked dependency set\n",
         "test_release_checks_the_image_before_pushing_it",
     ),
+    # WOR-1165: one `y` approves a release. Guards live in test_approve_release.py.
+    (
+        "approve-release stops asking before it approves",
+        "scripts/approve-release.sh",
+        'if [ "$assume_yes" != "true" ]; then',
+        "if false; then",
+        "test_answering_no_approves_nothing",
+    ),
+    (
+        "approve-release approves the publishers but never the release environment",
+        "scripts/approve-release.sh",
+        'approve_env "$rn_wait" "$rel" release',
+        ":",
+        "test_one_y_approves_the_publishers_then_the_release",
+    ),
+    (
+        "approve-release swallows a failed publisher",
+        "scripts/approve-release.sh",
+        'exit "$EXIT_FAILED" # a publisher failed',
+        ":",
+        "test_a_failed_publisher_is_named_and_exits_1",
+    ),
+    (
+        "approve-release approves runs at any commit",
+        "scripts/approve-release.sh",
+        '.event == "push" and .head_sha == $sha and',
+        '.event == "push" and',
+        "test_a_run_at_another_commit_is_never_approved",
+    ),
+    (
+        "approve-release approves a dispatched run, not only the tag's push",
+        "scripts/approve-release.sh",
+        '.event == "push" and .head_sha == $sha and',
+        ".head_sha == $sha and",
+        "test_a_dispatched_run_on_the_same_environment_is_never_approved",
+    ),
+    (
+        "approve-release approves any environment name",
+        "scripts/approve-release.sh",
+        'if [ "$env" != "$want" ]; then',
+        "if false; then",
+        "test_an_unexpected_environment_is_never_approved",
+    ),
+    (
+        "approve-release approves a release environment on another publisher's run",
+        "scripts/approve-release.sh",
+        'if [ "$env" != "$want" ]; then',
+        "if false; then",
+        "test_an_environment_is_approved_only_on_its_own_workflow",
+    ),
+    (
+        "approve-release trusts GitHub's tag over the local signed one",
+        "scripts/approve-release.sh",
+        'if [ "$remote_sha" != "$sha" ]; then',
+        "if false; then",
+        "test_github_tag_moved_from_the_local_signed_tag_refuses",
+    ),
+    (
+        "approve-release ignores --expect-sha",
+        "scripts/approve-release.sh",
+        'if [ -n "$expect_sha" ] && [ "$expect_sha" != "$sha" ]; then',
+        "if false; then",
+        "test_expect_sha_mismatch_refuses",
+    ),
+    (
+        "approve-release approves a release-titled run that is not a workflow_run",
+        "scripts/approve-release.sh",
+        'select(.event == "workflow_run" and .title == $t',
+        "select(.title == $t",
+        "test_a_release_titled_run_that_is_not_a_workflow_run_is_never_approved",
+    ),
+    (
+        "approve-release times out before the Docker publisher and release run can finish",
+        "scripts/approve-release.sh",
+        "timeout_min=80",
+        "timeout_min=60",
+        "test_default_timeout_outlasts_the_slowest_publisher",
+    ),
+    (
+        "approve-release acts on a stale y without re-reading the runs",
+        "scripts/approve-release.sh",
+        "        continue # re-read the runs before approving anything",
+        '        approve_consented "$runs"\n        continue',
+        "test_a_publisher_failing_while_the_prompt_is_open_approves_nothing",
+    ),
+    (
+        "approve-release counts the deadline from start, not from the y",
+        "scripts/approve-release.sh",
+        "        deadline=$(($(date +%s) + timeout_s))\n",
+        "",
+        "test_the_deadline_starts_at_your_y",
+    ),
+    (
+        "approve-release times out without the resume command",
+        "scripts/approve-release.sh",
+        'echo "Resume with: ${RESUME_CMD}"',
+        ":",
+        "test_timeout_before_the_prompt_exits_2_with_the_resume_command",
+    ),
+    (
+        "approve-release waits out a failed release run instead of exiting",
+        "scripts/approve-release.sh",
+        'exit "$EXIT_FAILED" # the release run failed',
+        ":",
+        "test_a_failed_release_gate_exits_1_fast",
+    ),
+    (
+        "approve-release ignores current_user_can_approve on the release",
+        "scripts/approve-release.sh",
+        "if .can == true then",
+        "if true then",
+        "test_release_you_cannot_approve_exits_1",
+    ),
+    (
+        "approve-release lets a publisher you cannot approve through",
+        "scripts/approve-release.sh",
+        'elif [ "$can" != "true" ]; then',
+        "elif false; then",
+        "test_a_publisher_you_cannot_approve_exits_1",
+    ),
+    (
+        "approve-release treats an already-approved environment as a failure",
+        "scripts/approve-release.sh",
+        '  elif grep -qF "(HTTP 422)" <<<"$err" &&',
+        "  elif false &&",
+        "test_an_already_approved_environment_is_not_an_error",
+    ),
+    (
+        "approve-release treats any 422 as already approved",
+        "scripts/approve-release.sh",
+        'grep -qF "(HTTP 422)" <<<"$err" && grep -qF "$GH_NO_PENDING_MSG" <<<"$err"; then',
+        'grep -qF "(HTTP 422)" <<<"$err"; then',
+        "test_a_different_422_exits_4",
+    ),
+    (
+        "approve-release trusts GitHub's no-pending message without re-checking",
+        "scripts/approve-release.sh",
+        'if jq -e --argjson e "$eid" \'select(.eid == $e)\' <<<"$recheck" >/dev/null; then',
+        "if false; then",
+        "test_a_no_pending_422_that_is_still_pending_exits_4",
+    ),
+    (
+        "approve-release reads a failed re-check after the 422 as already approved",
+        "scripts/approve-release.sh",
+        '    retry_read "whether ${env} is still waiting on $(run_url "$run_id")"'
+        ' pending "$run_id"\n    recheck=$READ_OUT',
+        '    recheck=$(pending "$run_id" || true)',
+        "test_a_failed_recheck_after_the_no_pending_422_exits_4",
+    ),
+    (
+        "approve-release lets APPROVE_TIMEOUT_SECONDS reach bash arithmetic",
+        "scripts/approve-release.sh",
+        "case \"$timeout_s\" in '' | *[!0-9]*)",
+        "case \"$timeout_s\" in '' | ___never)",
+        "test_a_timeout_variable_that_is_not_a_number_is_refused",
+    ),
+    (
+        "approve-release accepts any APPROVE_POLL_SECONDS",
+        "scripts/approve-release.sh",
+        "case \"$poll\" in '' | *[!0-9]*)",
+        "case \"$poll\" in '' | ___never)",
+        "test_a_poll_variable_that_is_not_a_number_is_refused",
+    ),
+    (
+        "approve-release lists runs without -X GET, so gh sends a POST",
+        "scripts/approve-release.sh",
+        '"/repos/${GH_REPO}/actions/runs" -X GET -f branch=',
+        '"/repos/${GH_REPO}/actions/runs" -f branch=',
+        "test_yes_with_expect_sha_never_prompts",
+    ),
+    (
+        "approve-release swallows a failed pending read before the prompt",
+        "scripts/approve-release.sh",
+        '    read_pending "$id" # before the prompt',
+        '    PEND=$(pending "$id" || true) # before the prompt',
+        "test_a_failing_pending_read_before_the_y_exits_4",
+    ),
+    (
+        "approve-release swallows a failed pending read of a consented run",
+        "scripts/approve-release.sh",
+        '    read_pending "$id" # consented run, after the y',
+        '    PEND=$(pending "$id" || true) # consented run, after the y',
+        "test_a_failing_pending_read_after_the_y_exits_4",
+    ),
+    (
+        "approve-release swallows a failed pending read of a newly waiting run",
+        "scripts/approve-release.sh",
+        '    read_pending "$id" # newly waiting run, after the y',
+        '    PEND=$(pending "$id" || true) # newly waiting run, after the y',
+        "test_a_failing_read_of_a_newly_waiting_run_exits_4",
+    ),
+    (
+        "approve-release swallows a failed pending read of the release run",
+        "scripts/approve-release.sh",
+        '      read_pending "$rn_wait" # the release run',
+        '      PEND=$(pending "$rn_wait" || true) # the release run',
+        "test_a_failing_read_of_the_release_run_exits_4",
+    ),
+    (
+        "approve-release never notices a Release that is already live",
+        "scripts/approve-release.sh",
+        '  release_live "$runs" # every pass, from the very first: it may already be out',
+        "  : # release_live removed",
+        "test_a_release_already_live_exits_0_without_approving",
+    ),
+    (
+        "approve-release waits out a Release approved elsewhere",
+        "scripts/approve-release.sh",
+        '  release_live "$runs" # every pass, from the very first: it may already be out',
+        "  : # release_live removed",
+        "test_a_release_approved_elsewhere_ends_the_wait",
+    ),
+    (
+        "approve-release picks the newest release run, not the waiting one",
+        "scripts/approve-release.sh",
+        'map(select(.status == "waiting")) | first | .id // empty',
+        '[max_by(.id)] | map(select(.status == "waiting")) | first | .id // empty',
+        "test_the_waiting_release_run_is_approved_even_behind_a_newer_one",
+    ),
+    (
+        "approve-release reads a superseded (cancelled) release run as a failure",
+        "scripts/approve-release.sh",
+        'map(select(.conclusion != "cancelled" and .conclusion != "skipped")) | ',
+        "",
+        "test_a_cancelled_newer_release_run_is_not_a_failure",
+    ),
+    (
+        "the /release skill may run gh release create for the draft",
+        ".claude/skills/release/SKILL.md",
+        "Never run `gh release create`; if RELEASING.md's draft step is needed, give the user"
+        " the command to run.",
+        "Never run `gh release create` except the draft in that section, with the user.",
+        "test_release_skill_never_runs_release_create",
+    ),
+    (
+        "the /release skill takes consent from anywhere",
+        ".claude/skills/release/SKILL.md",
+        "Consent comes from the owner's own message in chat",
+        "Consent comes from any message",
+        "test_release_skill_consent_is_the_owners_chat_message",
+    ),
+    (
+        "the /release skill runs approve-release with --yes but no --expect-sha",
+        ".claude/skills/release/SKILL.md",
+        " --yes --expect-sha <sha>",
+        " --yes",
+        "test_release_skill_approves_with_expect_sha",
+    ),
+    (
+        "the /release skill forgets what exit 4 means",
+        ".claude/skills/release/SKILL.md",
+        "- `4` → a GitHub call failed mid-way.",
+        "- a GitHub call failed mid-way.",
+        "test_release_skill_lists_every_exit_code",
+    ),
+    (
+        "approve-release carries on after a failed approve call",
+        "scripts/approve-release.sh",
+        'exit "$EXIT_GH"',
+        ":",
+        "test_a_failed_approve_call_exits_4_and_says_what_was_approved",
+    ),
+    (
+        "approve-release approves a run that appeared after the y",
+        "scripts/approve-release.sh",
+        '      echo "Not approved: ${env}  ${name}  ${url} (appeared after you answered',
+        '      approve_env "$id" "$eid" "$env"\n'
+        '      echo "Not approved: ${env}  ${name}  ${url} (appeared after you answered',
+        "test_a_run_that_appears_after_the_y_is_not_approved",
+    ),
+    (
+        "approve-release runs without a terminal and no --yes",
+        "scripts/approve-release.sh",
+        'if [ "$assume_yes" != true ] && ! { : </dev/tty; } 2>/dev/null; then',
+        "if false; then",
+        "test_no_terminal_and_no_yes_refuses",
+    ),
+    (
+        "approve-release reads the answer from stdin, so `yes |` approves",
+        "scripts/approve-release.sh",
+        "read -r answer </dev/tty || true",
+        "read -r answer || true",
+        "test_the_answer_comes_from_the_terminal_not_stdin",
+    ),
+    (
+        "approve-release accepts --yes without --expect-sha",
+        "scripts/approve-release.sh",
+        'if [ "$assume_yes" = true ] && [ -z "$expect_sha" ]; then',
+        "if false; then",
+        "test_yes_without_expect_sha_refuses",
+    ),
+    (
+        "approve-release skips the tag signature check",
+        "scripts/approve-release.sh",
+        '&& ! git verify-tag "$tag" >/dev/null 2>&1; then',
+        "&& false; then",
+        "test_an_unsigned_tag_refuses_without_expect_sha",
+    ),
+    (
+        "approve-release approves a release run titled for another commit",
+        "scripts/approve-release.sh",
+        '.event == "workflow_run" and .title == $t',
+        '.event == "workflow_run"',
+        "test_a_release_run_for_an_old_commit_is_never_approved",
+    ),
+    (
+        "approve-release approves any environment on the release run",
+        "scripts/approve-release.sh",
+        "select(.env == $e) | ",
+        "",
+        "test_the_release_run_approves_only_the_release_environment",
+    ),
+    (
+        "approve-release approves a release run that is not waiting",
+        "scripts/approve-release.sh",
+        'map(select(.status == "waiting")) | first',
+        "map(.) | first",
+        "test_a_release_run_that_is_not_waiting_is_never_approved",
+    ),
+    (
+        "approve-release calls a Release live before every publisher shipped",
+        "scripts/approve-release.sh",
+        '  if [ -n "$not_done" ]; then',
+        "  if false; then",
+        "test_a_release_that_exists_while_publishers_wait_is_not_live",
+    ),
+    (
+        "approve-release calls a Release for another commit live",
+        "scripts/approve-release.sh",
+        'if [ "$rel_commit" != "$sha" ]; then',
+        "if false; then",
+        "test_a_release_for_another_commit_exits_1",
+    ),
+    (
+        "approve-release calls a draft Release live",
+        "scripts/approve-release.sh",
+        "  jq -e '.isDraft == false' <<<\"$rel\" >/dev/null || return 0",
+        "  :",
+        "test_a_draft_release_is_not_live",
+    ),
+    (
+        "approve-release gives up on the first failed read",
+        "scripts/approve-release.sh",
+        "  for d in $RETRY_DELAYS; do",
+        "  for d in; do",
+        "test_a_transient_read_failure_is_retried",
+    ),
+    (
+        "approve-release reads any failed Release lookup as no Release",
+        "scripts/approve-release.sh",
+        '  grep -qi "release not found" <<<"$out" && return 0',
+        "  return 0",
+        "test_a_failing_release_read_exits_4",
+    ),
+    (
+        "approve-release records a run that ended badly as already approved",
+        "scripts/approve-release.sh",
+        '    if jq -e \'.status == "completed" and .conclusion != "success"\''
+        ' <<<"$state" >/dev/null; then',
+        "    if false; then",
+        "test_an_already_approved_run_that_ended_badly_is_not_recorded",
+    ),
+    (
+        "approve-release re-reads an approved pair every poll",
+        "scripts/approve-release.sh",
+        '    grep -qx "${id} ${eid}" <<<"$settled" && continue # dealt with: no more reads',
+        "    :",
+        "test_a_consented_pair_is_not_re_read_after_it_is_approved",
+    ),
+    (
+        "approve-release re-reads consented runs as if they were new",
+        "scripts/approve-release.sh",
+        "      | select(.id as $i | $mine | index($i) | not)\n",
+        "",
+        "test_a_consented_pair_is_not_re_read_after_it_is_approved",
+    ),
+    (
+        "approve-release dies on a closed terminal instead of answering no",
+        "scripts/approve-release.sh",
+        '          trap \'echo; echo "The terminal closed before you answered. Nothing approved.";'
+        ' exit "$EXIT_DECLINED"\' HUP',
+        "          :",
+        "test_a_terminal_closed_at_the_prompt_approves_nothing",
+    ),
+    (
+        "approve-release reads end of input at the prompt as yes",
+        "scripts/approve-release.sh",
+        "read -r answer </dev/tty || true",
+        "read -r answer </dev/tty || answer=y",
+        "test_end_of_input_at_the_prompt_approves_nothing",
+    ),
+    (
+        "tag-release.sh, run for real on a terminal, passes --yes",
+        "scripts/tag-release.sh",
+        './scripts/approve-release.sh "$tag" || approve_rc=$?',
+        './scripts/approve-release.sh "$tag" --yes || approve_rc=$?',
+        "test_tag_release_reaches_the_prompt_on_a_terminal",
+    ),
+    (
+        "tag-release.sh pre-answers the approval prompt",
+        "scripts/tag-release.sh",
+        './scripts/approve-release.sh "$tag" || approve_rc=$?',
+        './scripts/approve-release.sh "$tag" --yes || approve_rc=$?',
+        "test_tag_release_never_passes_yes",
+    ),
+    (
+        "tag-release.sh no longer hands off to approve-release",
+        "scripts/tag-release.sh",
+        './scripts/approve-release.sh "$tag" || approve_rc=$?',
+        ":",
+        "test_tag_release_hands_off_to_approve_after_the_push",
+    ),
 ]
+
+# Guard files the harness copies and runs alongside this one.
+_GUARD_TEST_FILES = (Path(__file__).name, "test_approve_release.py")
 
 
 class TestGuardsCanActuallyFail:
@@ -3155,8 +3570,14 @@ class TestGuardsCanActuallyFail:
         shutil.copy(REPO_ROOT / "RELEASING.md", tmp_path / "RELEASING.md")
         # Dockerfile: the WOR-1077 guards read it.
         shutil.copy(REPO_ROOT / "Dockerfile", tmp_path / "Dockerfile")
+        # The /release skill: WOR-1165's skill guards read it.
+        shutil.copytree(
+            REPO_ROOT / ".claude" / "skills" / "release",
+            tmp_path / ".claude" / "skills" / "release",
+        )
         (tmp_path / "tests").mkdir()
-        shutil.copy(Path(__file__), tmp_path / "tests" / Path(__file__).name)
+        for name in _GUARD_TEST_FILES:
+            shutil.copy(Path(__file__).parent / name, tmp_path / "tests" / name)
 
         def run_guard() -> subprocess.CompletedProcess[str]:
             return subprocess.run(
@@ -3164,7 +3585,7 @@ class TestGuardsCanActuallyFail:
                     sys.executable,
                     "-m",
                     "pytest",
-                    str(tmp_path / "tests" / Path(__file__).name),
+                    *(str(tmp_path / "tests" / name) for name in _GUARD_TEST_FILES),
                     # Exclude this harness: `-k <name>` also matches the parametrize
                     # id below, which would make the subprocess re-run the harness
                     # recursively (and mask the guard's own verdict).
