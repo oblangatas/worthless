@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Incident Notes: Worthless</title>
+  <meta name="description" content="Sourced API key leak and billing incidents, scoped to what Worthless would and would not change." />
+  <meta name="robots" content="noindex, follow" />
+  <link rel="canonical" href="https://wless.io/red/incidents.html" />
+  <meta name="theme-color" content="#121723" />
+  <meta property="og:title" content="Incident Notes: Worthless" />
+  <meta property="og:description" content="Sourced API key leak and billing incidents, scoped to what Worthless would and would not change." />
+  <meta property="og:image" content="https://wless.io/og-image.png" />
+  <meta property="og:url" content="https://wless.io/red/incidents.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Worthless" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Incident Notes: Worthless" />
+  <meta name="twitter:description" content="Sourced API key leak and billing incidents, scoped to what Worthless would and would not change." />
+  <meta name="twitter:image" content="https://wless.io/og-image.png" />
+  <link rel="icon" type="image/x-icon" href="../favicon.ico" />
+  <style>
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: #121723; color: #e8edf4; line-height: 1.65; }
+    header, main, footer { max-width: 980px; margin: 0 auto; padding: 2rem 1.3rem; }
+    nav { display: flex; gap: .9rem; flex-wrap: wrap; font-size: .9rem; }
+    footer nav { justify-content: center; margin-top: .7rem; }
+    a { color: #ff8a80; font-weight: 700; text-decoration: none; }
+    h1 { font-size: clamp(2.2rem, 6vw, 4.6rem); line-height: .96; letter-spacing: -.055em; margin: 2rem 0 1rem; }
+    .lead, p { color: #a8b4c7; }
+    .incident { display: grid; grid-template-columns: .85fr 1fr 1fr; gap: 1rem; padding: 1rem 0; border-top: 1px solid #2a3548; }
+    .incident h2 { margin: 0 0 .35rem; font-size: 1.05rem; }
+    .label { color: #ff6259; font-size: .72rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+    .note { border: 1px solid #344054; border-radius: 8px; padding: 1rem; background: #181f2d; margin: 2rem 0; }
+    @media (max-width: 800px) { .incident { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="index.html">Red Blog</a>
+      <a href="claims.html">Proof & limits</a>
+      <a href="security-model.html">Security model</a>
+    </nav>
+    <h1>Incident notes.</h1>
+    <p class="lead">Real leak stories, read through one question: would a copied locked AI key have changed the path?</p>
+  </header>
+
+  <main>
+    <div class="note">
+      <strong>Scope rule:</strong> Worthless changes copied-key reuse when a supported AI provider key is locked first. It does not fix full host compromise, broad cloud account exposure, provider billing disputes, or unsupported non-LLM credentials.
+    </div>
+
+    <article class="incident">
+      <div>
+        <div class="label">Source</div>
+        <h2>Cloud bill charged in 13 hours</h2>
+        <p><a href="https://news.ycombinator.com/item?id=47791871" target="_blank" rel="noopener">Hacker News discussion</a></p>
+      </div>
+      <div>
+        <div class="label">What Worthless would change</div>
+        <p>If the exposed value were a Worthless-locked supported AI key, the copied key-looking value alone would not authenticate to the provider.</p>
+      </div>
+      <div>
+        <div class="label">What Worthless would not change</div>
+        <p>This source is about billing blast radius. Worthless is not a broad cloud-account control, billing dispute process, or replacement for provider-side restrictions.</p>
+      </div>
+    </article>
+
+    <article class="incident">
+      <div>
+        <div class="label">Source</div>
+        <h2>Gemini bill reported after 48 hours</h2>
+        <p><a href="https://news.ycombinator.com/item?id=47231469" target="_blank" rel="noopener">Hacker News discussion</a></p>
+      </div>
+      <div>
+        <div class="label">What Worthless would change</div>
+        <p>If the exposed value were a Worthless-locked supported AI key, the copied key-looking value alone would not authenticate to the provider.</p>
+      </div>
+      <div>
+        <div class="label">What Worthless would not change</div>
+        <p>Current public copy must stay tied to the actual provider registry and scanner scope. Not every LLM provider path is a supported proxy path today.</p>
+      </div>
+    </article>
+
+    <article class="incident">
+      <div>
+        <div class="label">Source</div>
+        <h2>AI-built app pushed .env to a public repository</h2>
+        <p><a href="https://dev.to/ayame0328/60k-billed-in-13-hours-why-leaked-firebase-keys-keep-killing-ai-built-apps-6l6" target="_blank" rel="noopener">DEV Community report</a></p>
+      </div>
+      <div>
+        <div class="label">What Worthless would change</div>
+        <p>This is the leak shape Worthless is built around: AI tooling, generated code, and repository workflows exposing values from local environment files.</p>
+      </div>
+      <div>
+        <div class="label">What Worthless would not change</div>
+        <p>Worthless does not protect every credential type today. It also does not protect the working route if the same local user boundary is fully compromised.</p>
+      </div>
+    </article>
+  </main>
+
+  <footer>
+    Stable URL for references: <a href="https://wless.io/red/incidents.html">https://wless.io/red/incidents.html</a>
+    <nav aria-label="Legal">
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../security.html">Security</a>
+      <a href="../license.html">License</a>
+    </nav>
+  </footer>
+</body>
+</html>

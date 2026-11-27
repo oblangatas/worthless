@@ -1,4 +1,6 @@
+Contact: https://github.com/oblangatas/worthless/security/advisories/new
 Contact: mailto:security@wless.io
 Expires: 2027-04-15T00:00:00.000Z
 Preferred-Languages: en
 Canonical: https://wless.io/.well-known/security.txt
+Policy: https://wless.io/security.html
