@@ -2824,16 +2824,37 @@ GUARD_MUTATIONS = [
     (
         "preflight ignores the run's commit",
         ".github/scripts/approve-release-preflight.sh",
-        '[ "$event" = push ] && [ "$head" = "$sha" ]',
-        '[ "$event" = push ]',
+        '[ -n "$why" ] || [ "$head" = "$sha" ] || why="a different commit"',
+        ":",
         "test_preflight_flags_runs_that_are_not_this_tag",
     ),
     (
-        "preflight ignores the run's event",
+        "preflight ignores the run's branch (a push to main at the same commit)",
         ".github/scripts/approve-release-preflight.sh",
-        '[ "$event" = push ] && [ "$head" = "$sha" ]',
-        '[ "$head" = "$sha" ]',
+        '[ -n "$why" ] || [ "$branch" = "$TAG" ] || why="not this tag\'s push"',
+        ":",
         "test_preflight_flags_runs_that_are_not_this_tag",
+    ),
+    (
+        "preflight treats a manual dispatch like a push",
+        ".github/scripts/approve-release-preflight.sh",
+        'if [ "$event" = push ]; then',
+        'if [ "$event" = push ] || [ "$event" = workflow_dispatch ]; then',
+        "test_preflight_flags_runs_that_are_not_this_tag",
+    ),
+    (
+        "preflight lets a publisher pass for any release environment",
+        ".github/scripts/approve-release-preflight.sh",
+        '[ -z "$e" ] || [ "$e" = "$expected" ] || why=',
+        '[ -z "$e" ] || true || why=',
+        "test_preflight_flags_runs_that_are_not_this_tag",
+    ),
+    (
+        "preflight's workflow-to-environment map drifts from the script's",
+        ".github/scripts/approve-release-preflight.sh",
+        "deploy-worker.yml|Deploy Worker (worthless-sh)|worthless-sh-production",
+        "deploy-worker.yml|Deploy Worker|worthless-sh-production",
+        "test_preflight_gate_map_matches_the_script",
     ),
     (
         "preflight passes any release run",
@@ -2912,13 +2933,6 @@ GUARD_MUTATIONS = [
         "          fetch-depth: 0\n          fetch-tags: true\n",
         "",
         "test_approver_checkout_has_the_tags",
-    ),
-    (
-        "preflight passes runs waiting on any environment",
-        ".github/scripts/approve-release-preflight.sh",
-        "*) env_ok=no ;;",
-        "*) ;;",
-        "test_preflight_flags_runs_that_are_not_this_tag",
     ),
     (
         "Docker build gets slower; approver timeout not raised",
@@ -4307,16 +4321,34 @@ def _preflight_api(runs: list[dict]) -> dict[str, object]:
     return api
 
 
-def _waiting_run(i: int, name: str, event: str, head: str, env: str, title: str = "x") -> dict:
+def _waiting_run(
+    i: int,
+    wf: str,
+    name: str,
+    event: str,
+    head: str,
+    env: str,
+    branch: str = "v1.2.3",
+    title: str = "",
+) -> dict:
     return {
         "id": i,
         "name": name,
+        "path": f".github/workflows/{wf}",
         "event": event,
+        "head_branch": branch,
         "head_sha": head,
         "display_title": title,
         "html_url": f"https://gh.test/runs/{i}",
         "_env": env,
     }
+
+
+def _script_readonly_block(path: Path, name: str) -> str:
+    """The value of a (possibly multi-line) `readonly NAME="..."` in a shell script."""
+    m = re.search(rf'^readonly {name}="([^"]*)"', path.read_text(), re.M)
+    assert m, f'{path.name} no longer declares readonly {name}="..."'
+    return m.group(1)
 
 
 def _longest_job_chain(path: Path) -> int:
@@ -4387,9 +4419,9 @@ class TestApproveReleaseWiring:
     def test_approver_stops_when_the_script_is_missing(self, tmp_path):
         rc, _, out = _run_approver_step(tmp_path, "v1.2.3", "t", script_present=False)
         # bash fails on a missing file anyway; the message is what this pins.
-        assert rc != 0 and "WOR-1165" in out, (
-            "with approve-release.sh absent the approve step must fail saying it needs "
-            f"WOR-1165 merged first, not a bare bash error.\n{out}"
+        assert rc != 0 and "approve-release.sh is missing" in out, (
+            "with approve-release.sh absent the approve step must say so, not fail with "
+            f"a bare bash error.\n{out}"
         )
 
     def test_approver_never_templates_inputs_into_shell(self):
@@ -4489,38 +4521,85 @@ class TestApproveReleaseWiring:
         )
 
     def test_preflight_flags_runs_that_are_not_this_tag(self, tmp_path):
-        other = f"Create GitHub Release v1.2.2 {_TAG_COMMIT}"
+        """Mirrors approve-release.sh's filters (WOR-1165): push on the tag's branch at
+        the tag's commit, each publisher only for the environment its workflow owns,
+        and the release run only by release-notes.yml's exact title."""
+        c, rel = _TAG_COMMIT, "release-notes.yml"
+        title = f"Create GitHub Release v1.2.3 {c}"
+        dw = "Deploy Worker (worthless-sh)"
         runs = [
-            _waiting_run(1, "Publish to PyPI", "push", _TAG_COMMIT, "pypi"),
-            _waiting_run(2, "Publish worthless-mcp to npm", "push", "a" * 40, "npm-publish"),
+            _waiting_run(1, "publish.yml", "Publish to PyPI", "push", c, "pypi"),
+            # a different commit
             _waiting_run(
-                3, "Deploy Worker", "workflow_dispatch", _TAG_COMMIT, "worthless-sh-production"
+                2,
+                "publish-npm.yml",
+                "Publish worthless-mcp to npm",
+                "push",
+                "a" * 40,
+                "npm-publish",
+            ),
+            # a manual dispatch of the tag, at the tag's commit
+            _waiting_run(
+                3, "deploy-worker.yml", dw, "workflow_dispatch", c, "worthless-sh-production"
             ),
             _waiting_run(
                 4,
+                rel,
                 "Create GitHub Release",
                 "workflow_run",
                 "d" * 40,
                 "release",
-                f"Create GitHub Release v1.2.3 {_TAG_COMMIT}",
+                branch="main",
+                title=title,
             ),
-            _waiting_run(5, "Create GitHub Release", "workflow_run", "d" * 40, "release", other),
-            # Right event and commit, but not one of the four release environments.
-            _waiting_run(6, "Some deploy", "push", _TAG_COMMIT, "github-pages"),
+            # the release run of another tag
+            _waiting_run(
+                5,
+                rel,
+                "Create GitHub Release",
+                "workflow_run",
+                "d" * 40,
+                "release",
+                branch="main",
+                title=f"Create GitHub Release v1.2.2 {c}",
+            ),
+            # right event and commit, not a release publisher
+            _waiting_run(6, "pages.yml", "Some deploy", "push", c, "github-pages"),
+            # a publisher at the tag's commit, but pushed to main, not the tag
+            _waiting_run(7, "publish.yml", "Publish to PyPI", "push", c, "pypi", branch="main"),
+            # a publisher waiting on an environment its workflow does not own
+            _waiting_run(8, "publish.yml", "Publish to PyPI", "push", c, "npm-publish"),
+            _waiting_run(9, "deploy-worker.yml", dw, "push", c, "worthless-sh-production"),
         ]
         proc, summary, output = _run_preflight(tmp_path, _preflight_api(runs))
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert f"commit={_TAG_COMMIT}" in output, "the annotated tag was not peeled to its commit"
-        assert _TAG_COMMIT in summary
+        assert f"commit={c}" in output, "the annotated tag was not peeled to its commit"
+        assert c in summary
         lines = summary.splitlines()
-        rows = {i: next(ln for ln in lines if f"runs/{i})" in ln) for i in range(1, 7)}
+        rows = {i: next(ln for ln in lines if f"runs/{i})" in ln) for i in range(1, 10)}
         flagged = {i for i, ln in rows.items() if "WILL NOT BE APPROVED" in ln}
-        assert flagged == {2, 3, 5, 6}, (
-            f"preflight flagged runs {sorted(flagged)}; expected the old-commit push (2), "
-            "the manual dispatch (3), the release run titled for another tag (5) and the "
-            "run waiting on a non-release environment (6) — approve-release.sh's rules"
+        assert flagged == {2, 3, 5, 6, 7, 8}, (
+            f"preflight flagged runs {sorted(flagged)}; expected 2 (other commit), "
+            "3 (dispatch), 5 (another tag's release run), 6 (not a publisher), 7 (pushed "
+            "to main) and 8 (wrong environment for its workflow): approve-release.sh's rules"
         )
         assert "| pypi |" in rows[1] and "| release |" in rows[4]
+
+    def test_preflight_gate_map_matches_the_script(self):
+        """Preflight's verdicts are only honest while its copy of the script's
+        workflow-to-environment map is the script's."""
+        approve = REPO_ROOT / "scripts" / "approve-release.sh"
+        for name, script_name in (
+            ("GATE_MAP", "GATE_MAP"),
+            ("RELEASE_RUN_TITLE_PREFIX", "RUN_TITLE_PREFIX"),
+            ("RELEASE_ENV", "RELEASE_ENV"),
+        ):
+            mine = _script_readonly_block(APPROVE_PREFLIGHT_SCRIPT, name)
+            theirs = _script_readonly_block(approve, script_name)
+            assert mine == theirs, (
+                f"preflight {name}={mine!r} but approve-release.sh {script_name}={theirs!r}. "
+                "The summary would mark runs OK that the script skips, or the reverse."
+            )
 
     def test_approve_job_is_skipped_off_main_or_for_non_owners(self):
         """A non-owner or non-main run must never even ask for the release-approver
@@ -4558,9 +4637,9 @@ class TestApproveReleaseWiring:
 
     def test_preflight_stops_when_the_approve_script_is_missing(self, tmp_path):
         proc, _, _ = _run_preflight(tmp_path, _preflight_api([]), script_present=False)
-        assert proc.returncode != 0 and "WOR-1165" in proc.stdout + proc.stderr, (
-            "preflight must fail with 'needs WOR-1165 merged first' when "
-            "scripts/approve-release.sh is absent, before anyone is asked to approve"
+        assert proc.returncode != 0 and "approve-release.sh is missing" in proc.stdout, (
+            "preflight must say scripts/approve-release.sh is missing, before anyone is "
+            "asked to approve"
         )
 
     def test_preflight_fails_on_an_unknown_tag(self, tmp_path):

@@ -114,9 +114,11 @@ notice one deleted afterwards.
 ## Approve from GitHub (one click)
 
 The **Approve release** workflow (`.github/workflows/approve-release.yml`, WOR-1167) does steps 3
-and 4 for you. It runs `scripts/approve-release.sh <tag> --yes` (WOR-1165; until that merges, the
-workflow stops with "needs WOR-1165 merged first"). That script approves the three publishers, waits
-for **Create GitHub Release**, approves it, and prints the Release URL.
+and 4 for you. It runs the same `scripts/approve-release.sh` as step 3, as
+`scripts/approve-release.sh <tag> --yes --expect-sha <commit>`: no prompt, and it refuses unless
+the tag is at the commit preflight showed you. It approves the three publishers, waits for
+**Create GitHub Release**, approves it, and prints the Release URL. Unlike step 3, it does not run
+`git verify-tag`: the runner has no signing key. Your commit check below replaces it.
 
 **Use it:**
 
@@ -127,13 +129,19 @@ for **Create GitHub Release**, approves it, and prints the Release URL.
    both again, as defence in depth.
 2. The **preflight** job runs first, with the job's own token. Its summary on the run page shows
    the tag's commit and every run waiting for approval. Each run is marked OK or **WILL NOT BE
-   APPROVED** (a different commit, a manual dispatch, or a release run for another tag).
+   APPROVED**, by the script's own rules: a publisher counts only as a push of your tag at its
+   commit, waiting on the one environment its workflow owns (see the table in step 3); the
+   Release run counts only by its exact `Create GitHub Release <tag> <commit>` title. A manual
+   dispatch, another commit, another branch or another tag's Release run is never approved.
 3. Compare the commit with `git rev-parse --short v<version>^{commit}` on your machine. Only if it
    matches, approve the `release-approver` environment.
 
-The run fails if a publisher fails (exit 1), if the release does not finish in 80 minutes (exit 2),
-or if the token is missing. 80 minutes covers the slowest publisher (the Docker image's job chain,
-45 minutes) plus the Release job chain (20 minutes) plus margin; a test re-reads both workflows.
+The run fails with the script's exit codes from step 3: 1 a run failed, the commit is wrong, or an
+approval cannot be given; 2 not finished in 80 minutes; 4 a GitHub call failed after retries (safe
+to run the workflow again); 64 the tag is not in the checkout. It also fails if the token is
+missing. 80 minutes is the script's own default: the slowest publisher (the Docker image's job
+chain, 45 minutes) plus the Release job chain (20 minutes) plus margin. Tests re-read both
+workflows.
 The summary is a snapshot: the Create GitHub Release run usually appears only after you approve.
 
 ### Owner setup (once, by hand)
@@ -186,9 +194,11 @@ cannot approve. The job uses the owner's personal access token instead.
 - **Deployments: write does more than approve.** The token can also create and delete deployment
   records and statuses in this repository. No workflow here triggers on those events, so this is
   record tampering, not code execution.
-- **A wrong commit.** The preflight summary and the script check each run's commit against the tag.
-  They cannot tell whether the tag itself points at the commit you meant. That is the check you do
-  on your machine before approving.
+- **A wrong commit, or an unsigned tag.** The preflight summary and the script check each run's
+  commit against the tag. They cannot tell whether the tag points at the commit you meant, and in
+  this workflow nothing verifies the tag's signature (`--yes --expect-sha` skips `git verify-tag`).
+  Both come from GitHub's copy of the tag, which anyone with push access can move. Comparing the
+  commit with your own signed tag on your machine, before approving, is the only check.
 - **This workflow does not hold the signing key.** Tagging stays on the maintainer's machine, so
   this workflow cannot create a release by itself. Someone still has to push a signed tag.
 

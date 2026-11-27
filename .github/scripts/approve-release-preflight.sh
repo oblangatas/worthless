@@ -7,18 +7,30 @@
 # The owner reads this summary, then taps Approve. It reads only; it approves
 # nothing. Pinned by TestApproveReleaseWiring in tests/test_deploy_static.py.
 #
-# Inputs (env): TAG, GH_REPO, GH_TOKEN. Writes the summary to
-# $GITHUB_STEP_SUMMARY and `commit=<sha>` to $GITHUB_OUTPUT.
+# Inputs (env): TAG, GH_REPO, GH_TOKEN, REF, ACTOR, OWNER. Writes the summary
+# to $GITHUB_STEP_SUMMARY and `commit=<sha>` to $GITHUB_OUTPUT.
+#
+# The verdicts use scripts/approve-release.sh's own rules:
+#   - a publisher run is a `push` on the tag's branch, at the tag's commit,
+#     waiting only on the ONE environment its workflow owns (GATE_MAP below,
+#     a copy of the script's; a test keeps them equal);
+#   - the release run is release-notes.yml's `workflow_run` with the exact
+#     "<prefix> <tag> <commit>" title, waiting only on `release`;
+#   - anything else is never approved.
 #
 # What it does NOT do: it is a snapshot. The Create GitHub Release run only
 # appears after the publishers finish, so it is usually not listed yet. The
-# verdicts mirror approve-release.sh's filtering (WOR-1165: environment name,
-# event, head_sha, release-run title); the script, not this summary, decides
-# what is approved.
+# script, not this summary, decides what is approved.
 set -euo pipefail
 
 # release-notes.yml titles its runs "<prefix> <tag> <sha>" (its run-name).
 readonly RELEASE_RUN_TITLE_PREFIX="Create GitHub Release"
+readonly RELEASE_WORKFLOW="release-notes.yml"
+readonly RELEASE_ENV="release"
+# workflow file | workflow name | the one environment it may be approved for.
+readonly GATE_MAP="publish.yml|Publish to PyPI|pypi
+publish-npm.yml|Publish worthless-mcp to npm|npm-publish
+deploy-worker.yml|Deploy Worker (worthless-sh)|worthless-sh-production"
 
 : "${TAG:?TAG is required}" "${GH_REPO:?GH_REPO is required}"
 summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
@@ -41,9 +53,20 @@ if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 if [ ! -f scripts/approve-release.sh ]; then
-  echo "::error::scripts/approve-release.sh is missing. This workflow needs WOR-1165 merged first."
+  echo "::error::scripts/approve-release.sh is missing from this checkout of main."
   exit 1
 fi
+
+gate_env() {
+  local f n e
+  while IFS='|' read -r f n e; do
+    if [ "$f" = "$1" ] && [ "$n" = "$2" ]; then
+      echo "$e"
+      return 0
+    fi
+  done <<<"$GATE_MAP"
+  return 1
+}
 
 # Resolve the tag to its commit. An annotated tag points at a tag object, which
 # points at the commit; peel until we reach it (bounded, in case of a loop).
@@ -73,31 +96,40 @@ echo "commit=$sha" >>"$output"
   echo "| --- | --- | --- | --- | --- |"
 } >>"$summary"
 
+# \x1f, not tab: read collapses consecutive whitespace separators, so an empty
+# field (a null head_branch) would shift every field after it.
 runs=$(gh api --paginate "repos/$GH_REPO/actions/runs?status=waiting&per_page=100" \
-  --jq '.workflow_runs[] | [.id, .name, .event, .head_sha, .display_title, .html_url] | @tsv')
+  --jq '.workflow_runs[] | [.id, .name, (.path // "" | split("/") | last), .event,
+        .head_branch, .head_sha, .display_title, .html_url]
+        | map(. // "" | tostring) | join("\u001f")')
 
 n=0
-while IFS=$'\t' read -r id name event head title url; do
+while IFS=$'\x1f' read -r id name wf event branch head title url; do
   [ -n "$id" ] || continue
   envs=$(gh api "repos/$GH_REPO/actions/runs/$id/pending_deployments" \
     --jq '[.[].environment.name] | join(", ")')
-  # Same rules as approve-release.sh (WOR-1165): only the four release
-  # environments, push runs at the tag's commit, and the release run by title.
-  env_ok=no
-  [ -n "$envs" ] && env_ok=yes
-  while read -r e; do
-    case "$e" in pypi | npm-publish | worthless-sh-production | release) ;; *) env_ok=no ;; esac
-  done < <(printf '%s\n' "$envs" | tr ',' '\n' | tr -d ' ')
-  if [ "$env_ok" != yes ]; then
-    verdict="**WILL NOT BE APPROVED**"
-  elif [ "$event" = push ] && [ "$head" = "$sha" ]; then
-    verdict="OK"
-  elif [ "$event" = workflow_run ] && [ "$title" = "$RELEASE_RUN_TITLE_PREFIX $TAG $sha" ]; then
-    # The release run runs from main, so its head is main's tip, not the tag.
-    # Its title is the only link to the tag.
-    verdict="OK (release run for this tag)"
+  why=""
+  expected=""
+  if [ "$event" = push ]; then
+    expected=$(gate_env "$wf" "$name") || why="not a release publisher"
+    [ -n "$why" ] || [ "$branch" = "$TAG" ] || why="not this tag's push"
+    [ -n "$why" ] || [ "$head" = "$sha" ] || why="a different commit"
+  elif [ "$event" = workflow_run ] && [ "$wf" = "$RELEASE_WORKFLOW" ]; then
+    expected=$RELEASE_ENV
+    [ "$title" = "$RELEASE_RUN_TITLE_PREFIX $TAG $sha" ] || why="a release run for another tag"
   else
-    verdict="**WILL NOT BE APPROVED**"
+    why="a $event run is never approved"
+  fi
+  if [ -z "$why" ]; then
+    [ -n "$envs" ] || why="nothing pending"
+    while read -r e; do
+      [ -z "$e" ] || [ "$e" = "$expected" ] || why="waits on $e, not $expected"
+    done < <(printf '%s\n' "$envs" | tr ',' '\n' | tr -d ' ')
+  fi
+  if [ -z "$why" ]; then
+    verdict="OK"
+  else
+    verdict="**WILL NOT BE APPROVED** ($why)"
   fi
   echo "| [$name]($url) | $event | \`${head:0:12}\` | $envs | $verdict |" >>"$summary"
   n=$((n + 1))
