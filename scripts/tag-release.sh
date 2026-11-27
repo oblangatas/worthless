@@ -176,7 +176,8 @@ echo "       and re-push it at the new commit (that keeps the trigger on"
 echo "       refs/tags/v*, which the cosign identity depends on). If either already"
 echo "       has it, release a new version instead — never move a tag that shipped."
 echo
-tag_commit=$(git rev-parse --short "${tag}^{commit}")
+# The full commit: compare all 40 characters, never a short prefix.
+tag_commit=$(git rev-parse "${tag}^{commit}")
 echo "FOUR APPROVALS are needed. At the end, scripts/approve-release.sh lists them and"
 echo "asks ONCE (WOR-1165). If it cannot, approve each one by hand — Actions → the"
 echo "waiting run → Review deployments:"
@@ -190,7 +191,7 @@ echo "BEFORE APPROVALS 1-3: the run must show $tag at commit $tag_commit."
 echo "Reject anything else, including re-runs of older tags you did not start. A green"
 echo "signature step does not prove the run is yours — it runs the tagged commit's copy."
 echo "APPROVAL 4 shows 'main', not the tag — expected, it runs from main. Open its"
-echo "'gate' job instead: the log must show TAG: $tag and a HEAD_SHA starting $tag_commit."
+echo "'gate' job instead: the log must show TAG: $tag and a HEAD_SHA of $tag_commit."
 echo
 echo "The Release page should appear right after approval 4; check the Releases page."
 echo "Before approval 4 it will NOT appear — that is the approval step working, not a"

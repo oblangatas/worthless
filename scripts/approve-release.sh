@@ -10,15 +10,24 @@
 #
 # Usage: scripts/approve-release.sh <tag> [--timeout-min N]
 #        scripts/approve-release.sh <tag> --yes --expect-sha SHA [--timeout-min N]
+#        scripts/approve-release.sh <tag> --list --expect-sha SHA [--timeout-min N]
 #   (no --yes)     asks on the terminal (/dev/tty, never stdin: `yes |` cannot answer)
 #                  and first checks the tag's signature with git verify-tag
 #   --yes          no prompt. ONLY with --expect-sha: the WOR-1167 Action passes both
 #                  after a human approved its gate and saw the preflight summary.
+#   --list         approve NOTHING: wait until the publishers reach their approval
+#                  step, print one row per waiting (run, environment) with the verdict
+#                  the approve path would give it, and exit 0. Same selection code as
+#                  the approve path; never POSTs, and skips "may you approve" (the
+#                  Action's preflight asks with a token that may not). Rows are
+#                  "row" + 7 fields separated by \x1f: ok|skip, environment, run name,
+#                  url, event, head commit, reason.
 #   --expect-sha   refuse unless the tag's commit is exactly this one. It replaces
 #                  the local signature check, because CI never holds the signing key.
-#   --timeout-min  default 80, counted from your y: publish-docker.yml's job timeouts
-#                  chain to 45 min (build-push 35, then smoke 10) and release-notes.yml's
-#                  to 20 (gate, then create-release), so 65 before any queueing.
+#   --timeout-min  default 80. On a terminal it counts from your y; with --yes or
+#                  --list, from the start. publish-docker.yml's job timeouts chain to
+#                  45 min (build-push 35, then smoke 10) and release-notes.yml's to 20
+#                  (gate, then create-release), so 65 before any queueing.
 #                  test_default_timeout_outlasts_the_slowest_publisher pins the margin.
 #
 # Exit: 0 Release live
@@ -45,7 +54,13 @@
 # Reads from environment: GH_REPO (default: gh repo view), GH_TOKEN (optional),
 # APPROVE_POLL_SECONDS (default 20), APPROVE_TIMEOUT_SECONDS (overrides --timeout-min),
 # APPROVE_RETRY_DELAYS (default "2 5 10": a failed read is retried after each delay,
-# then exits 4; an approve POST is never retried).
+# then exits 4; an approve POST is never retried), APPROVE_RESUME_HINT (what to do
+# to resume, printed on exits 1, 2 and 4 instead of this command; plain printable
+# text, at most 200 characters. The WOR-1167 Action sets it to its own re-run path).
+#
+# The deadline counts from your y on a terminal. With --yes there is no y to wait
+# for, so it counts from the start: a caller with its own time limit (the Action's
+# step timeout) can rely on this ending first.
 
 set -euo pipefail
 
@@ -66,16 +81,19 @@ readonly NOT_OURS="(not this tag's push)"
 usage() {
   echo "Usage: $0 <tag> [--timeout-min N]" >&2
   echo "       $0 <tag> --yes --expect-sha SHA [--timeout-min N]" >&2
+  echo "       $0 <tag> --list --expect-sha SHA [--timeout-min N]" >&2
   exit "$EXIT_USAGE"
 }
 
 tag=""
 assume_yes=false
+list_only=false
 timeout_min=80
 expect_sha=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --yes) assume_yes=true ;;
+    --list) list_only=true ;;
     --timeout-min)
       [ "$#" -ge 2 ] || usage
       timeout_min=$2
@@ -120,7 +138,12 @@ if [ "$assume_yes" = true ] && [ -z "$expect_sha" ]; then
   echo "--yes needs --expect-sha <commit>: an unattended approval must name the commit it approves." >&2
   exit "$EXIT_USAGE"
 fi
-if [ "$assume_yes" != true ] && ! { : </dev/tty; } 2>/dev/null; then
+if [ "$list_only" = true ]; then
+  if [ "$assume_yes" = true ] || [ -z "$expect_sha" ]; then
+    echo "--list needs --expect-sha <commit> and cannot be combined with --yes." >&2
+    exit "$EXIT_USAGE"
+  fi
+elif [ "$assume_yes" != true ] && ! { : </dev/tty; } 2>/dev/null; then
   echo "No terminal to ask on. Run this in a terminal, or pass --yes with --expect-sha." >&2
   exit "$EXIT_USAGE"
 fi
@@ -129,7 +152,16 @@ if [ -z "${GH_REPO:-}" ]; then
   GH_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 fi
 export GH_REPO
-readonly RESUME_CMD="scripts/approve-release.sh ${tag}"
+# Printable text only (no control characters): it is echoed verbatim into logs.
+resume_hint=${APPROVE_RESUME_HINT:-}
+if [ -n "$resume_hint" ]; then
+  # A pattern, not grep: grep splits on newlines, so it would never see one.
+  if [ "${#resume_hint}" -gt 200 ] || [[ "$resume_hint" == *[[:cntrl:]]* ]]; then
+    echo "APPROVE_RESUME_HINT must be plain printable text, at most 200 characters." >&2
+    exit "$EXIT_USAGE"
+  fi
+fi
+readonly RESUME_CMD="${resume_hint:-scripts/approve-release.sh ${tag}}"
 consent=""  # "run_id env_id env" per line: exactly what the prompt showed
 approved="" # env names approved so far, for the exit-4 report
 noted=""    # "run_id env_id" pairs already reported as not approved
@@ -180,7 +212,7 @@ if ! sha=$(git rev-parse --verify --quiet "refs/tags/${tag}^{commit}"); then
   exit "$EXIT_USAGE"
 fi
 if [ -n "$expect_sha" ] && [ "$expect_sha" != "$sha" ]; then
-  echo "Refusing: ${tag} points at ${sha:0:12}, but ${expect_sha:0:12} was expected. Nothing approved."
+  echo "Refusing: ${tag} points at ${sha}, but ${expect_sha} was expected. Nothing approved."
   exit "$EXIT_FAILED"
 fi
 if [ -z "$expect_sha" ] && ! git verify-tag "$tag" >/dev/null 2>&1; then
@@ -192,16 +224,18 @@ tag_commit() { gh api "/repos/${GH_REPO}/commits/${tag}" -X GET --jq .sha </dev/
 retry_read "where ${tag} points" tag_commit
 remote_sha=$READ_OUT
 if [ "$remote_sha" != "$sha" ]; then
-  echo "Refusing: ${tag} is ${sha:0:12} here but ${remote_sha:0:12} on GitHub. Nothing approved."
+  echo "Refusing: ${tag} is ${sha} here but ${remote_sha} on GitHub. Nothing approved."
   exit "$EXIT_FAILED"
 fi
-echo "Release ${tag} at commit ${sha:0:12} (${GH_REPO})."
+# The full commit: a 12-character prefix is the label, never the thing to compare.
+echo "Release ${tag} at commit ${sha} (${GH_REPO})."
 
 # Every run GitHub lists for the tag, any event, any commit. One JSON array. No
 # server-side event filter: a dispatched run must be SEEN, so it can be named as skipped.
 all_runs() {
   gh api "/repos/${GH_REPO}/actions/runs" -X GET -f branch="$tag" -f per_page=100 --paginate \
-    --jq '.workflow_runs[] | {id, name, path, event, status, conclusion, head_sha, html_url}' |
+    --jq '.workflow_runs[] | {id, name: (.name | gsub("[[:cntrl:]]"; "")), path, event, status,
+          conclusion, head_sha, html_url}' |
     jq -sc 'map(.wf = (.path | split("/") | last))'
 }
 
@@ -227,7 +261,8 @@ gate_env() {
 # Pending deployments of one run: {eid, env, can} per line.
 pending() {
   gh api "/repos/${GH_REPO}/actions/runs/$1/pending_deployments" -X GET \
-    --jq '.[] | {eid: .environment.id, env: .environment.name, can: .current_user_can_approve}' </dev/null
+    --jq '.[] | {eid: .environment.id, env: (.environment.name | gsub("[[:cntrl:]]"; "")),
+          can: .current_user_can_approve}' </dev/null
 }
 
 # The same into $PEND, but a failed read stops with exit 4 naming the run. Call it
@@ -283,7 +318,7 @@ release_live() {
   retry_read "where ${tag} points" tag_commit
   rel_commit=$READ_OUT
   if [ "$rel_commit" != "$sha" ]; then
-    echo "Release ${tag} points at ${rel_commit:0:12}, expected ${sha:0:12}. Nothing more approved."
+    echo "Release ${tag} points at ${rel_commit}, expected ${sha}. Nothing more approved."
     exit "$EXIT_FAILED"
   fi
   echo "Release ${tag} is live: ${url}"
@@ -314,8 +349,14 @@ approve_env() {
   # The approve POST is never retried: the first non-422 error is exit 4.
   if err=$(gh api -X POST "repos/${GH_REPO}/actions/runs/${run_id}/pending_deployments" \
     -F "environment_ids[]=${eid}" -f state=approved \
-    -f comment="Approved with scripts/approve-release.sh for ${tag} at ${sha:0:12}" 2>&1 </dev/null >/dev/null); then
+    -f comment="Approved with scripts/approve-release.sh for ${tag} at ${sha}" 2>&1 </dev/null >/dev/null); then
     echo "Approved ${env}."
+  elif grep -qE '\(HTTP 40[34]\)' <<<"$err"; then
+    # Not a blip, so not "safe to run again": re-running with the same token fails
+    # the same way. Name the two things that make GitHub refuse an approval.
+    echo "Token can't approve ${env}: check that the token (RELEASE_APPROVER_TOKEN in the Action) has Deployments: write and that you are a required reviewer of ${env}. ${err}"
+    echo "Approved so far: ${approved:-nothing}"
+    exit "$EXIT_FAILED"
   elif grep -qF "(HTTP 422)" <<<"$err" && grep -qF "$GH_NO_PENDING_MSG" <<<"$err"; then
     # Re-read before believing it: a failed re-read is exit 4, never "approved".
     retry_read "whether ${env} is still waiting on $(run_url "$run_id")" pending "$run_id"
@@ -339,12 +380,55 @@ approve_env() {
   approved="${approved:+${approved}, }${env}"
 }
 
+# --list: one verdict row (see Usage). Fields never hold \x1f or a newline: names
+# and environments are stripped of control characters where they are read.
+row() { printf 'row\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$@"; }
+
+# --list: one row per pending environment of a run that will not be approved, or
+# one row with environment "-" when nothing is pending on it.
+skip_rows() {
+  local id=$1 name=$2 url=$3 event=$4 head=$5 why=$6 line env any=no
+  read_pending "$id" # --list only: shown, never approved
+  while read -r line; do
+    [ -n "$line" ] || continue
+    env=$(jq -r .env <<<"$line")
+    row skip "$env" "$name" "$url" "$event" "$head" "$why"
+    any=yes
+  done <<<"$PEND"
+  [ "$any" = yes ] || row skip "-" "$name" "$url" "$event" "$head" "$why"
+}
+
+# --list: the release run(s) with the exact title, newer than the baseline,
+# already waiting (usually none yet: it starts after the publishers pass).
+list_release_rows() {
+  local id url line env
+  retry_read "the ${RUN_TITLE_PREFIX} runs for ${tag}" release_runs
+  while IFS=$'\t' read -r id url; do
+    [ -n "$id" ] || continue
+    read_pending "$id" # --list only
+    while read -r line; do
+      [ -n "$line" ] || continue
+      env=$(jq -r .env <<<"$line")
+      if [ "$env" = "$RELEASE_ENV" ]; then
+        row ok "$env" "$RUN_TITLE_PREFIX" "$url" workflow_run "-" ""
+      else
+        row skip "$env" "$RUN_TITLE_PREFIX" "$url" workflow_run "-" "not the ${RELEASE_ENV} environment"
+      fi
+    done <<<"$PEND"
+  done < <(jq -r --argjson b "$baseline" \
+    '.[] | select(.id > $b and .status == "waiting") | [.id, .html_url] | @tsv' <<<"$READ_OUT")
+}
+
 # Before the prompt: print what would be approved and record it as the consent.
-# Returns 1 if any of it is an approval you are not allowed to give.
+# Returns 1 if any of it is an approval you are not allowed to give. With --list
+# it prints verdict rows instead, and asks nothing about who may approve.
 record_consent() {
-  local runs=$1 all=$2 id url name wf want line eid env can bad=0
+  local runs=$1 all=$2 id url name wf want line eid env can bad=0 event head why
   while IFS=$'\t' read -r id url name wf; do
-    want=$(gate_env "$wf" "$name") || continue
+    if ! want=$(gate_env "$wf" "$name"); then
+      [ "$list_only" != true ] || skip_rows "$id" "$name" "$url" push "$sha" "not a release publisher"
+      continue
+    fi
     read_pending "$id" # before the prompt
     while read -r line; do
       [ -n "$line" ] || continue
@@ -352,7 +436,13 @@ record_consent() {
       env=$(jq -r .env <<<"$line")
       can=$(jq -r .can <<<"$line")
       if [ "$env" != "$want" ]; then
-        echo "  skipped: ${env}  ${name}  ${url} (not this workflow's environment)"
+        if [ "$list_only" = true ]; then
+          row skip "$env" "$name" "$url" push "$sha" "not this workflow's environment"
+        else
+          echo "  skipped: ${env}  ${name}  ${url} (not this workflow's environment)"
+        fi
+      elif [ "$list_only" = true ]; then
+        row ok "$env" "$name" "$url" push "$sha" ""
       elif [ "$can" != "true" ]; then
         echo "cannot approve ${env} (you are not a reviewer): ${name}  ${url}"
         bad=1
@@ -364,6 +454,26 @@ record_consent() {
   done < <(jq -r --arg g "$GATED" \
     '.[] | select(.status == "waiting" and (.wf as $w | $g | split(" ") | index($w)))
       | [.id, .html_url, .name, .wf] | @tsv' <<<"$runs")
+  if [ "$list_only" = true ]; then
+    # The same "not ours" set as below, with the reason spelled out for a human.
+    while IFS=$'\x1f' read -r id url name wf event head; do
+      [ -n "$id" ] || continue
+      if [ "$event" != push ]; then
+        why="a ${event} run is never approved"
+      elif [ "$head" != "$sha" ]; then
+        why="a different commit"
+      elif ! gate_env "$wf" "$name" >/dev/null; then
+        why="not a release publisher"
+      else
+        why="an older run of this workflow; only the newest is approved"
+      fi
+      skip_rows "$id" "$name" "$url" "$event" "$head" "$why"
+    done < <(jq -r --argjson mine "$(jq -c 'map(.id)' <<<"$runs")" \
+      '.[] | select(.status == "waiting" and (.id as $i | $mine | index($i) | not))
+        | [.id, .html_url, .name, .wf, .event, .head_sha] | map(. // "" | tostring)
+        | join("\u001f")' <<<"$all")
+    return 0
+  fi
   jq -r --argjson mine "$(jq -c 'map(.id)' <<<"$runs")" --arg why "$NOT_OURS" \
     '.[] | select(.status == "waiting" and (.id as $i | $mine | index($i) | not))
       | "  skipped: \(.name)  \(.html_url) \($why)"' <<<"$all"
@@ -436,7 +546,8 @@ while :; do
   retry_read "the runs for ${tag}" all_runs
   all=$READ_OUT
   runs=$(publisher_runs "$all")
-  release_live "$runs" # every pass, from the very first: it may already be out
+  # Every pass, from the very first: it may already be out. --list only reports.
+  [ "$list_only" = true ] || release_live "$runs"
 
   if [ -n "$runs" ]; then
     # Every pass — including the first one after your y, before anything is approved.
@@ -448,6 +559,12 @@ while :; do
         | [.[] | select(.wf as $w | $gated | index($w)) | select(.status == "waiting" or .status == "completed")]
         | length == ($gated | length)' <<<"$runs")
       if [ "$ready" = true ]; then
+        if [ "$list_only" = true ]; then
+          # The same selection the approve path is about to make; nothing POSTed.
+          record_consent "$runs" "$all"
+          list_release_rows
+          exit 0
+        fi
         echo "Waiting for approval:"
         if ! record_consent "$runs" "$all"; then
           echo "Nothing approved. Ask a required reviewer of that environment to approve it."
@@ -470,7 +587,10 @@ while :; do
           esac
         fi
         asked=true
-        deadline=$(($(date +%s) + timeout_s))
+        # A terminal y restarts the clock; --yes keeps the one from the start.
+        if [ "$assume_yes" != "true" ]; then
+          deadline=$(($(date +%s) + timeout_s))
+        fi
         continue # re-read the runs before approving anything
       fi
     else

@@ -1,0 +1,180 @@
+name: Approve release
+
+# One approval in GitHub approves all four release gates for a tag. WOR-1167.
+#
+# A release waits on four protected environments: pypi, npm-publish and
+# worthless-sh-production (the publishers), then release (Create GitHub Release).
+# scripts/approve-release.sh (WOR-1165) finds those runs for the tag, approves
+# them in order, and prints the Release URL. With --yes it requires
+# --expect-sha and skips its own `git verify-tag`; preflight verifies the tag
+# against the pinned maintainer public key instead (verify-tag.sh), and the
+# commit the owner checks against preflight's summary is the human check.
+#
+# GitHub accepts a deployment approval only from a human required reviewer, so
+# GITHUB_TOKEN cannot do it. The approve job uses the owner's fine-grained PAT,
+# stored as an ENVIRONMENT secret of `release-approver`. The secret is released
+# only after the owner approves that environment — that click is the human
+# decision. The preflight job runs first, with GITHUB_TOKEN only, and writes the
+# tag's commit and every waiting run to the run summary, so the owner sees what
+# will be approved before clicking. Setup and what this does NOT protect
+# against: RELEASING.md, "Approve from GitHub (one approval)". Pinned by
+# TestApproveReleaseWiring in tests/test_deploy_static.py.
+#
+# The GPG signing key is never involved: tagging stays on the maintainer's machine.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to approve, e.g. v0.3.15"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: approve-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    # The summary step waits up to 15 min for the publishers to reach their gates.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      commit: ${{ steps.summary.outputs.commit }}
+    steps:
+      # Every tag: the signature check below and `approve-release.sh --list` both
+      # read the tag from this checkout. fetch-tags alone is ignored at depth 1.
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      # The same pinned-key check the publishers run (verify-tag.sh; public key and
+      # fingerprint only, from repo Variables — the signing key never enters CI).
+      # verify-tag.sh binds the tag to the checked-out HEAD, and this job checks out
+      # main on purpose (its scripts must be main's), so it runs inside a detached
+      # worktree of the tag. Only main's verify-tag.sh runs; the tag's files are
+      # checked out there, never executed. No VERIFY_TAG_HEAD_BINDING waiver.
+      - name: Verify the tag against the pinned maintainer key
+        env:
+          VERIFY_TAG_REF: ${{ inputs.tag }}
+          MAINTAINER_PUBKEY: ${{ vars.MAINTAINER_GPG_PUBKEY }}
+          MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}
+        run: |
+          if ! [[ "$VERIFY_TAG_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must look like v1.2.3"
+            exit 1
+          fi
+          tag_tree="$RUNNER_TEMP/approve-release-tag"
+          git -c core.hooksPath=/dev/null worktree add --detach "$tag_tree" "refs/tags/$VERIFY_TAG_REF"
+          cd "$tag_tree"
+          bash "$GITHUB_WORKSPACE/.github/scripts/verify-tag.sh"
+
+      - name: Show what will be approved
+        id: summary
+        env:
+          TAG: ${{ inputs.tag }}
+          REF: ${{ github.ref }}
+          ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash .github/scripts/approve-release-preflight.sh
+
+  approve:
+    needs: preflight
+    # Skipped (never asks for the release-approver approval) unless main and the
+    # owner. preflight fails loudly in that case, so the run is red, not quiet.
+    # The approve step re-checks both as defence in depth.
+    if: github.ref == 'refs/heads/main' && github.triggering_actor == github.repository_owner
+    runs-on: ubuntu-latest
+    # Above the step's 85, which is above the script's 80 (see the step).
+    timeout-minutes: 90
+    environment: release-approver
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      # approve-release.sh resolves the tag with `git rev-parse <tag>^{commit}`
+      # in this checkout and refuses if GitHub's tag differs, so every tag must
+      # be here. fetch-tags alone is ignored at the default depth of 1.
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      # Exit codes from approve-release.sh: 0 live; 1 a run failed, the commit
+      # is wrong, or an approval cannot be given (nothing more approved);
+      # 2 timeout; 3 declined (not reachable with --yes); 4 a GitHub call failed
+      # after its reads were retried 3 times (it lists what was approved; safe
+      # to re-run this workflow); 64 bad usage or tag missing in this checkout.
+      # Any non-zero fails this run.
+      # --timeout-min 80 (the script's own default, passed explicitly) covers
+      # the slowest publisher (publish-docker.yml's longest job chain, 45 min
+      # today), then release-notes.yml's (20 min), plus margin. It ends before
+      # the step's timeout-minutes,
+      # so a stuck release fails as "timeout" (exit 2), not
+      # "cancelled". TestApproveReleaseWiring re-reads both files.
+      # Inputs reach shell only through env, never through ${{ }} inside run:,
+      # so a crafted input cannot become code (zizmor template-injection).
+      # EXPECTED_SHA is the commit preflight resolved and showed the owner; the
+      # script refuses if its own resolution of the tag disagrees.
+      - name: Approve the four release gates
+        timeout-minutes: 85
+        env:
+          TAG: ${{ inputs.tag }}
+          EXPECTED_SHA: ${{ needs.preflight.outputs.commit }}
+          REF: ${{ github.ref }}
+          ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ secrets.RELEASE_APPROVER_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          # Printed by approve-release.sh on exits 1, 2 and 4 instead of its
+          # local resume command, which means nothing to someone reading this log.
+          APPROVE_RESUME_HINT: "Actions → Approve release → Re-run failed jobs (needs another release-approver approval)"
+        run: |
+          # The environment's branch rule should already stop other refs; this
+          # holds even if that rule is loosened.
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::run this from main, not $REF"
+            exit 1
+          fi
+          if [ "$ACTOR" != "$OWNER" ]; then
+            echo "::error::only the repository owner may start this run"
+            exit 1
+          fi
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::RELEASE_APPROVER_TOKEN is empty. Store the owner's fine-grained PAT as an environment secret of release-approver (RELEASING.md)."
+            exit 1
+          fi
+          # [[ =~ ]] matches the whole string; grep would pass "v1.2.3<newline>junk".
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must look like v1.2.3"
+            exit 1
+          fi
+          if ! [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::preflight did not resolve the tag to a commit"
+            exit 1
+          fi
+          if [ ! -f scripts/approve-release.sh ]; then
+            echo "::error::scripts/approve-release.sh is missing from this checkout of main."
+            exit 1
+          fi
+          # One read with the PAT first, so an expired or revoked token fails here
+          # with a clear message. On a public repo any valid token can read
+          # /deployments, so this proves only that the token is alive; a token
+          # without Deployments: write fails at the first approval instead, where
+          # the script names it.
+          if ! gh api "repos/$GH_REPO/deployments?per_page=1" -X GET --silent; then
+            echo "::error::RELEASE_APPROVER_TOKEN is expired or revoked — rotate it (RELEASING.md). Nothing approved."
+            exit 1
+          fi
+          bash scripts/approve-release.sh "$TAG" --yes --timeout-min 80 --expect-sha "$EXPECTED_SHA"
