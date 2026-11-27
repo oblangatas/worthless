@@ -544,7 +544,7 @@ ignore:
     # or the CLI. src/worthless imports configparser nowhere. The CVE needs a
     # write path to inject into; there isn't one.
     reason: "CPython configparser write-injection; fix only in 3.15.0b4 (pre-release). Unreachable — swept whole image 2026-08-03: only pip writes via configparser and it is not resident. Tracking WOR-852."
-    expiry: "2027-02-01"  # set 2026-08-03 on the six-base measurement above, not blind.
+    expiry: "2027-01-25"  # set 2026-08-03 on the six-base measurement above, not blind.
 
   # ── Debian perl-base, install-time tooling only (WOR-852 Track D) ────
   # These seven became VISIBLE when the unmapped-findings gate landed
@@ -578,31 +578,31 @@ ignore:
   - vulnerability: CVE-2026-12087
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed (no upstream fix to take). Essential=yes so it cannot be removed. Unreachable — every perl consumer in the image is install-time tooling (dpkg/adduser/PAM); the runtime path is python only. Tracking WOR-852."
-    expiry: "2027-02-01"
+    expiry: "2027-01-25"
   - vulnerability: CVE-2026-13221
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
-    expiry: "2027-02-01"
+    expiry: "2027-01-25"
   - vulnerability: CVE-2026-57433
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
-    expiry: "2027-02-04"
+    expiry: "2027-01-20"
   - vulnerability: CVE-2026-48959
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
-    expiry: "2027-02-03"
+    expiry: "2027-01-22"
   - vulnerability: CVE-2026-48962
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
-    expiry: "2027-02-03"
+    expiry: "2027-01-22"
   - vulnerability: CVE-2026-57432
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
-    expiry: "2027-02-03"
+    expiry: "2027-01-22"
   - vulnerability: CVE-2026-7017
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
-    expiry: "2027-02-04"
+    expiry: "2027-01-20"
 
   # --- CVE-2026-14456 (QUIC server listener): waiver REMOVED 2026-11-18 -----
   # It argued bookworm's OpenSSL 3.0.20 had no QUIC server. The image has since
@@ -624,16 +624,24 @@ ignore:
   # RE-MEASURED 2026-11-26 (worthless-kpkkm), grype 0.114.0, DB built 2026-11-26
   # 06:22 UTC: an arm64 image built locally from v0.3.18 that day still installs
   # 3.5.9-1~deb13u1, and every CVE below is still High, fix=not-fixed, on both
-  # it and ghcr worthless-proxy:0.3.18 (amd64). The undefined-symbol sweep WAS
-  # re-run on 3.5.9 that day, but on arm64 only (759 ELFs). The amd64 sweep is
-  # still the 2026-11-20 one on 3.5.7. Expiries are staggered one CVE per date
-  # (its three package rules together), 2027-01-14 to 2027-02-23. Every date
-  # is a weekday, so the triples come up for re-argument one at a time.
+  # it and ghcr worthless-proxy:0.3.18 (amd64).
+  # SYMBOL SWEEP, arm64 + amd64 swept 2026-11-27 on 3.5.9-1~deb13u1 (dpkg status
+  # of each rootfs). amd64: ghcr.io/oblangatas/worthless-proxy:0.3.18 (revision
+  # 93b602c4) pulled with --platform linux/amd64, `docker create` + `docker
+  # export`, never run, no QEMU. arm64: the 2026-11-26 local build above, exported
+  # the same way. pyelftools over undefined .dynsym imports of every ELF:
+  # arm64 759 ELFs (757 with a .dynsym), amd64 760 ELFs (758 with a .dynsym).
+  # Both arches give the same importers for every symbol each reason names.
+  # This supersedes the 3.5.7 sweeps quoted in the section comments below.
+  # Expiries are staggered one CVE per date (its three package rules together),
+  # 2026-12-10 to 2027-02-23: #809's CRL and QUIC triples on 2026-12-10 and
+  # 2026-12-17, the rest from 2027-01-14. Every date is a weekday, so the
+  # triples come up for re-argument one at a time.
   #
   # Re-pinned 2026-11-21 (worthless-vk3a5): the image's apt-get upgrade now
   # installs 3.5.9-1~deb13u1. Grype (scan run 44921154407) still reports every
   # CVE below as not-fixed at 3.5.9; upstream fix remains 3.5.10. The symbol
-  # measurements below were taken on 3.5.7 and were NOT re-run on 3.5.9.
+  # measurements below were taken on 3.5.7 (re-run on 3.5.9 on 2026-11-27, above).
   # CVE-2026-35190 is no longer reported at 3.5.9 (cause not verified: Debian
   # backport or grype data change), so its entries were deleted. Section
   # headers below still name 3.5.7, the version they were measured on.
@@ -671,51 +679,51 @@ ignore:
   # At expiry, delete these if Debian has shipped; otherwise re-measure.
   - vulnerability: CVE-2026-107496
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rated it Low (advisory of 2026-11-10), and TLS never calls it. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: CMS_encrypt_ex is imported only by /usr/bin/openssl; _ssl and _hashlib import no CMS_* symbol. amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. WOR-1155."
+    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rated it Low (advisory of 2026-11-10), and TLS never calls it. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: CMS_encrypt_ex is imported only by /usr/bin/openssl; _ssl and _hashlib import no CMS_* symbol. WOR-1155."
     expiry: "2027-02-09"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-107496
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rated it Low (advisory of 2026-11-10), and TLS never calls it. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: CMS_encrypt_ex is imported only by /usr/bin/openssl; _ssl and _hashlib import no CMS_* symbol. amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. WOR-1155."
+    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rated it Low (advisory of 2026-11-10), and TLS never calls it. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: CMS_encrypt_ex is imported only by /usr/bin/openssl; _ssl and _hashlib import no CMS_* symbol. WOR-1155."
     expiry: "2027-02-09"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-107496
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rated it Low (advisory of 2026-11-10), and TLS never calls it. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: CMS_encrypt_ex is imported only by /usr/bin/openssl; _ssl and _hashlib import no CMS_* symbol. amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. WOR-1155."
+    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rated it Low (advisory of 2026-11-10), and TLS never calls it. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: CMS_encrypt_ex is imported only by /usr/bin/openssl; _ssl and _hashlib import no CMS_* symbol. WOR-1155."
     expiry: "2027-02-09"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-88823
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, providers and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
+    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, legacy provider, loader_attic engine and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
     expiry: "2027-02-16"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-88823
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, providers and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
+    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, legacy provider, loader_attic engine and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
     expiry: "2027-02-16"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-88823
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, providers and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
+    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, legacy provider, loader_attic engine and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
     expiry: "2027-02-16"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-95691
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: OSSL_QUIC_client_method is imported only by /usr/bin/openssl, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. WOR-1155."
+    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: OSSL_QUIC_client_method is imported only by /usr/bin/openssl, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). WOR-1155."
     expiry: "2027-02-02"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-95691
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: OSSL_QUIC_client_method is imported only by /usr/bin/openssl, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. WOR-1155."
+    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: OSSL_QUIC_client_method is imported only by /usr/bin/openssl, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). WOR-1155."
     expiry: "2027-02-02"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-95691
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: OSSL_QUIC_client_method is imported only by /usr/bin/openssl, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. WOR-1155."
+    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: OSSL_QUIC_client_method is imported only by /usr/bin/openssl, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). WOR-1155."
     expiry: "2027-02-02"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-95692
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, providers and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
+    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, legacy provider, loader_attic engine and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
     expiry: "2027-02-23"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-95692
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, providers and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
+    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, legacy provider, loader_attic engine and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
     expiry: "2027-02-23"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-95692
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, providers and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
+    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, legacy provider, loader_attic engine and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
     expiry: "2027-02-23"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
 
   # ── OpenSSL 3.5.7 (trixie), advisory of 2026-11-17 (WOR-1157) ──────────
@@ -751,27 +759,27 @@ ignore:
   # both batches (WOR-1157 closes when these entries merge).
   - vulnerability: CVE-2026-107493
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Use-after-free in PEM_X509_INFO_read_bio_ex() only when the caller passes its own non-NULL stack and keeps using it after a failed read; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: PEM_X509_INFO_read_bio is imported only by /usr/bin/openssl, which Worthless never runs; _ssl and _hashlib import no PEM_X509_INFO symbol. amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
+    reason: "Use-after-free in PEM_X509_INFO_read_bio_ex() only when the caller passes its own non-NULL stack and keeps using it after a failed read; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: PEM_X509_INFO_read_bio is imported only by /usr/bin/openssl, which Worthless never runs; _ssl and _hashlib import no PEM_X509_INFO symbol. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
     expiry: "2027-01-21"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-107493
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Use-after-free in PEM_X509_INFO_read_bio_ex() only when the caller passes its own non-NULL stack and keeps using it after a failed read; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: PEM_X509_INFO_read_bio is imported only by /usr/bin/openssl, which Worthless never runs; _ssl and _hashlib import no PEM_X509_INFO symbol. amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
+    reason: "Use-after-free in PEM_X509_INFO_read_bio_ex() only when the caller passes its own non-NULL stack and keeps using it after a failed read; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: PEM_X509_INFO_read_bio is imported only by /usr/bin/openssl, which Worthless never runs; _ssl and _hashlib import no PEM_X509_INFO symbol. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
     expiry: "2027-01-21"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-107493
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Use-after-free in PEM_X509_INFO_read_bio_ex() only when the caller passes its own non-NULL stack and keeps using it after a failed read; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: PEM_X509_INFO_read_bio is imported only by /usr/bin/openssl, which Worthless never runs; _ssl and _hashlib import no PEM_X509_INFO symbol. amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
+    reason: "Use-after-free in PEM_X509_INFO_read_bio_ex() only when the caller passes its own non-NULL stack and keeps using it after a failed read; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: PEM_X509_INFO_read_bio is imported only by /usr/bin/openssl, which Worthless never runs; _ssl and _hashlib import no PEM_X509_INFO symbol. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
     expiry: "2027-01-21"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-124709
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Unbounded memory growth in the OpenSSL QUIC SERVER when a peer resets a stream the server rejected; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: no ELF imports OSSL_QUIC_server_method or SSL_new_listener, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
+    reason: "Unbounded memory growth in the OpenSSL QUIC SERVER when a peer resets a stream the server rejected; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: no ELF imports OSSL_QUIC_server_method or SSL_new_listener, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
     expiry: "2027-01-26"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-124709
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Unbounded memory growth in the OpenSSL QUIC SERVER when a peer resets a stream the server rejected; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: no ELF imports OSSL_QUIC_server_method or SSL_new_listener, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
+    reason: "Unbounded memory growth in the OpenSSL QUIC SERVER when a peer resets a stream the server rejected; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: no ELF imports OSSL_QUIC_server_method or SSL_new_listener, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
     expiry: "2027-01-26"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-124709
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Unbounded memory growth in the OpenSSL QUIC SERVER when a peer resets a stream the server rejected; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: no ELF imports OSSL_QUIC_server_method or SSL_new_listener, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
+    reason: "Unbounded memory growth in the OpenSSL QUIC SERVER when a peer resets a stream the server rejected; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: no ELF imports OSSL_QUIC_server_method or SSL_new_listener, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
     expiry: "2027-01-26"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
 
   # ── OpenSSL 3.5.7 (trixie), CVE-2026-84786 DANE client (worthless-3g4u) ─
@@ -845,15 +853,15 @@ ignore:
   # calling SSL_dane_enable (for example a DANE-capable HTTP or SMTP client).
   - vulnerability: CVE-2026-84786
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only, and DANE is opt-in via SSL_dane_enable(). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: SSL_dane_enable, SSL_CTX_dane_enable and SSL_dane_tlsa_add are imported only by /usr/bin/openssl, which Worthless never runs; Python's _ssl imports no DANE symbol. amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Upstream fix PR openssl/openssl#33634 read 2026-11-26: CLOSED, not merged. Debian fix=not-fixed in 12/13/14/sid per the grype DB read 2026-11-20. Tracking worthless-3g4u."
+    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only, and DANE is opt-in via SSL_dane_enable(). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: SSL_dane_enable, SSL_CTX_dane_enable and SSL_dane_tlsa_add are imported only by /usr/bin/openssl, which Worthless never runs; Python's _ssl imports no DANE symbol. Upstream fix PR openssl/openssl#33634 read 2026-11-26: CLOSED, not merged. Debian fix=not-fixed in 12/13/14/sid per the grype DB read 2026-11-20. Tracking worthless-3g4u."
     expiry: "2027-01-14"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-84786
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only, and DANE is opt-in via SSL_dane_enable(). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: SSL_dane_enable, SSL_CTX_dane_enable and SSL_dane_tlsa_add are imported only by /usr/bin/openssl, which Worthless never runs; Python's _ssl imports no DANE symbol. amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Upstream fix PR openssl/openssl#33634 read 2026-11-26: CLOSED, not merged. Debian fix=not-fixed in 12/13/14/sid per the grype DB read 2026-11-20. Tracking worthless-3g4u."
+    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only, and DANE is opt-in via SSL_dane_enable(). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: SSL_dane_enable, SSL_CTX_dane_enable and SSL_dane_tlsa_add are imported only by /usr/bin/openssl, which Worthless never runs; Python's _ssl imports no DANE symbol. Upstream fix PR openssl/openssl#33634 read 2026-11-26: CLOSED, not merged. Debian fix=not-fixed in 12/13/14/sid per the grype DB read 2026-11-20. Tracking worthless-3g4u."
     expiry: "2027-01-14"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-84786
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only, and DANE is opt-in via SSL_dane_enable(). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep 2026-11-26, arm64 only, undefined dynamic symbols of all 759 ELFs: SSL_dane_enable, SSL_CTX_dane_enable and SSL_dane_tlsa_add are imported only by /usr/bin/openssl, which Worthless never runs; Python's _ssl imports no DANE symbol. amd64 symbols last swept 2026-11-20 on 3.5.7, not re-run. Upstream fix PR openssl/openssl#33634 read 2026-11-26: CLOSED, not merged. Debian fix=not-fixed in 12/13/14/sid per the grype DB read 2026-11-20. Tracking worthless-3g4u."
+    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only, and DANE is opt-in via SSL_dane_enable(). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: SSL_dane_enable, SSL_CTX_dane_enable and SSL_dane_tlsa_add are imported only by /usr/bin/openssl, which Worthless never runs; Python's _ssl imports no DANE symbol. Upstream fix PR openssl/openssl#33634 read 2026-11-26: CLOSED, not merged. Debian fix=not-fixed in 12/13/14/sid per the grype DB read 2026-11-20. Tracking worthless-3g4u."
     expiry: "2027-01-14"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
 
   # ── OpenSSL 3.5.9 (trixie), CVE-2026-121482 CRL check CPU (worthless-3g4u) ──
@@ -890,9 +898,11 @@ ignore:
   # get_crl_score, either after ctx->get_crl or via get_crl_delta ->
   # get_crl_sk.
   #
-  # Measured 2026-11-26 on local buildx images of main 93b602c4, both arches,
-  # openssl / libssl3t64 / openssl-provider-legacy 3.5.9-1~deb13u1:
-  #   ELFs (pyelftools, undefined .dynsym imports; 757 arm64, 758 amd64):
+  # #809's sweep, 2026-11-26, on local buildx images of main 93b602c4, both
+  # arches, openssl / libssl3t64 / openssl-provider-legacy 3.5.9-1~deb13u1.
+  # Re-run 2026-11-27 on the exported images in the header above: same importers.
+  #   ELFs (pyelftools, undefined .dynsym imports; ELFs with a .dynsym: 757
+  #   arm64, 758 amd64, of 759 / 760 ELFs in all):
   #     CMS_verify, PKCS7_verify, X509_STORE_add_crl -> /usr/bin/openssl only.
   #     X509_VERIFY_PARAM_set_flags -> Python's _ssl (driven by
   #       SSLContext.verify_flags) and /usr/bin/openssl.
@@ -910,6 +920,9 @@ ignore:
   #     (src/worthless/proxy/upstream.py:37), and ssl.create_default_context()
   #     only when an operator sets a CA bundle (:39). Neither sets a CRL
   #     verify flag. Worthless does no CMS / PKCS#7 verification.
+  #     An operator's WORTHLESS_UPSTREAM_CA_BUNDLE may contain CRL PEMs, and
+  #     load_verify_locations loads them, but they are never checked: no
+  #     verifier sets X509_V_FLAG_CRL_CHECK.
   #   No openssl.cnf in /etc/ssl turns on CRL checking (only the stock `ca`
   #     section's crl paths).
   #
@@ -931,15 +944,15 @@ ignore:
   # CMS / PKCS#7 messages.
   - vulnerability: CVE-2026-121482
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64): no verifier in the image sets X509_V_FLAG_CRL_CHECK (no VERIFY_CRL_CHECK_*); CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64, #809's sweep) and re-swept arm64 + amd64 2026-11-27 on 3.5.9 (759 / 760 ELFs), same result: no verifier in the image sets X509_V_FLAG_CRL_CHECK (no VERIFY_CRL_CHECK_*); CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
     expiry: "2026-12-10"
   - vulnerability: CVE-2026-121482
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64): no verifier in the image sets X509_V_FLAG_CRL_CHECK (no VERIFY_CRL_CHECK_*); CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64, #809's sweep) and re-swept arm64 + amd64 2026-11-27 on 3.5.9 (759 / 760 ELFs), same result: no verifier in the image sets X509_V_FLAG_CRL_CHECK (no VERIFY_CRL_CHECK_*); CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
     expiry: "2026-12-10"
   - vulnerability: CVE-2026-121482
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64): no verifier in the image sets X509_V_FLAG_CRL_CHECK (no VERIFY_CRL_CHECK_*); CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64, #809's sweep) and re-swept arm64 + amd64 2026-11-27 on 3.5.9 (759 / 760 ELFs), same result: no verifier in the image sets X509_V_FLAG_CRL_CHECK (no VERIFY_CRL_CHECK_*); CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
     expiry: "2026-12-10"
 
   # ── OpenSSL 3.5.9 (trixie), CVE-2026-107494 QUIC RETIRE_CONNECTION_ID (worthless-3g4u) ─
@@ -964,9 +977,11 @@ ignore:
   #
   # QUIC is opt-in: a program must create its connection with a QUIC method
   # (OSSL_QUIC_client_method / OSSL_QUIC_server_method / SSL_new_listener).
-  # Same argument as CVE-2026-95691 above. Measured 2026-11-26 on local buildx
-  # images of main 93b602c4, both arches, 3.5.9-1~deb13u1, pyelftools over
-  # undefined .dynsym imports (757 arm64, 758 amd64 ELFs):
+  # Same argument as CVE-2026-95691 above. #809's sweep, 2026-11-26, on local
+  # buildx images of main 93b602c4, both arches, 3.5.9-1~deb13u1, pyelftools
+  # over undefined .dynsym imports (ELFs with a .dynsym: 757 arm64, 758 amd64,
+  # of 759 / 760 in all); re-run 2026-11-27 on the header's exported images,
+  # same importers:
   #   OSSL_QUIC_client_method, SSL_is_quic, SSL_handle_events -> /usr/bin/openssl
   #     only (its `s_client -quic`). No ELF imports a QUIC server method or
   #     SSL_new_listener.
@@ -984,13 +999,13 @@ ignore:
   # Delete them at once if anything in the image starts speaking QUIC.
   - vulnerability: CVE-2026-107494
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64): only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64, #809's sweep) and re-swept arm64 + amd64 2026-11-27 on 3.5.9 (759 / 760 ELFs), same result: only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
     expiry: "2026-12-17"
   - vulnerability: CVE-2026-107494
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64): only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64, #809's sweep) and re-swept arm64 + amd64 2026-11-27 on 3.5.9 (759 / 760 ELFs), same result: only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
     expiry: "2026-12-17"
   - vulnerability: CVE-2026-107494
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64): only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64, #809's sweep) and re-swept arm64 + amd64 2026-11-27 on 3.5.9 (759 / 760 ELFs), same result: only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
     expiry: "2026-12-17"
