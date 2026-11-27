@@ -33,6 +33,17 @@ def test_publish_job_runs_an_npm_that_supports_trusted_publishing() -> None:
     assert int(str(node["with"]["node-version"]).split(".")[0]) >= 24
 
 
+def test_a_token_fallback_is_flagged_but_never_blocks_the_release() -> None:
+    # 0.3.17 and 0.3.18 fell back to NPM_TOKEN silently. The check must say so
+    # on the run, but must not fail it: a failed run holds the GitHub Release.
+    steps = _publish_job()["steps"]
+    check = next(s for s in steps if s.get("name", "").startswith("Check provenance"))
+    assert "dist.attestations" in check["run"]
+    assert "::error::" in check["run"]
+    assert "exit 1" not in check["run"]
+    assert not check.get("continue-on-error")  # fan-in flags continue-on-error jobs
+
+
 def test_publish_stays_behind_the_release_environment() -> None:
     # The trusted publisher on npmjs.com names this environment; renaming it
     # breaks OIDC publishing.
