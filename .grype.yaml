@@ -823,9 +823,11 @@ ignore:
   #   The DANE_* strings inside _ssl are OpenSSL's error-reason table,
   #     not calls. No openssl.cnf in /etc/ssl
   #     or /usr/lib/ssl mentions DANE.
-  #   Outbound TLS to providers uses ssl.create_default_context() /
-  #     SSLContext(PROTOCOL_TLS_CLIENT) in src/worthless/proxy, and Python's
-  #     ssl module has no DANE API. src has no dane/tlsa/pyOpenSSL reference,
+  #   Outbound TLS to providers uses httpx.create_ssl_context(trust_env=False)
+  #     by default (src/worthless/proxy/upstream.py:37), ssl.create_default_context()
+  #     only when a CA bundle is set (:39), and SSLContext(PROTOCOL_TLS_CLIENT)
+  #     to check that bundle (config.py:305). All are Python ssl contexts, and
+  #     Python's ssl module has no DANE API. src has no dane/tlsa/pyOpenSSL reference,
   #     and pyOpenSSL is not installed. Nothing at runtime runs /usr/bin/openssl.
   #
   # NOT COVERED: the cryptography 50.0.2 wheel bundles its own static OpenSSL
