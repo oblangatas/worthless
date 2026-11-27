@@ -468,7 +468,10 @@ class TestPrompt:
         for env, run_id in (("pypi", 101), ("npm-publish", 102), ("worthless-sh-production", 104)):
             assert env in proc.stdout, proc.stdout
             assert f"https://github.com/{REPO}/actions/runs/{run_id}" in proc.stdout, proc.stdout
-        assert SHA[:12] in proc.stdout, "the commit to check must be shown before approving"
+        assert f"at commit {SHA} " in proc.stdout, (
+            "the full 40-character commit must be shown before approving; a 12-character "
+            "prefix is a label, not something to compare"
+        )
 
     def test_answering_no_approves_nothing(self, tmp_path):
         proc, log = _approve(tmp_path, answer="n\n")
@@ -609,10 +612,61 @@ class TestFailures:
         # waiting -> approved -> live (exits before its deadline check). Counted from
         # the start, the deadline is 250 and the t=300 poll times out. Counted from
         # the y, it is 450, so t=300 and t=400 pass and t=500 finishes.
+        # Typed on a terminal: only a real y restarts the clock (see the --yes test).
         snaps = [_snap(), *_flow()]
-        proc, log = _approve(tmp_path, *YES, snaps=snaps, clock_step=100, timeout_s=250)
+        proc, log = _approve(tmp_path, answer="y\n", snaps=snaps, clock_step=100, timeout_s=250)
         assert proc.returncode == 0, _out(proc)
         assert ("201", "21") in _approvals(log)
+
+    def test_under_yes_the_deadline_counts_from_the_start(self, tmp_path):
+        # Same clock and runs as above. With --yes nobody answers, so the clock must
+        # not restart at "consent": the Action's step timeout (85 min) is above the
+        # script's 80 only if 80 counts from the start. Deadline 250: the t=300 poll
+        # times out (exit 2) instead of the run being killed as "cancelled".
+        snaps = [_snap(), *_flow()]
+        proc, log = _approve(tmp_path, *YES, snaps=snaps, clock_step=100, timeout_s=250)
+        assert proc.returncode == 2, _out(proc)
+        assert "Timed out" in _out(proc)
+        assert ("201", "21") not in _approvals(log)
+
+    def test_the_resume_hint_replaces_the_command_on_exits_1_2_and_4(self, tmp_path):
+        # The WOR-1167 Action's own hint, read from the workflow, so this proves the
+        # Action's exit messages carry it.
+        workflow = yaml.safe_load(
+            (REPO_ROOT / ".github" / "workflows" / "approve-release.yml").read_text()
+        )
+        (step,) = [
+            s
+            for s in workflow["jobs"]["approve"]["steps"]
+            if "scripts/approve-release.sh" in s.get("run", "")
+        ]
+        hint = step["env"]["APPROVE_RESUME_HINT"]
+        env = {"APPROVE_RESUME_HINT": hint}
+        failed_gate = _flow()[:3] + [_snap(_pubs("in_progress"), rn=[_rn("completed", "failure")])]
+        waiting_forever = [_snap([_run(101, "Publish to PyPI", "publish.yml", "in_progress")])]
+        cases = {
+            1: {"snaps": failed_gate, "clock_step": 100, "timeout_s": 1000},
+            2: {"snaps": waiting_forever},
+            4: {"post_fail": (12, "gh: Validation Failed (HTTP 422)")},
+        }
+        for code, kw in cases.items():
+            case = tmp_path / str(code)
+            case.mkdir()
+            proc, _ = _approve(case, *YES, extra_env=env, **kw)
+            assert proc.returncode == code, _out(proc)
+            assert hint in _out(proc), f"exit {code} must print the caller's resume hint"
+            assert RESUME not in _out(proc), (
+                f"exit {code} still tells the Action's reader to run a local command"
+            )
+
+    def test_a_resume_hint_with_control_characters_is_refused(self, tmp_path):
+        for n, bad in enumerate(("re-run\nrm -rf ~", "re-run\x1b[2J", "x" * 201)):
+            case = tmp_path / str(n)
+            case.mkdir()
+            proc, log = _approve(case, *YES, extra_env={"APPROVE_RESUME_HINT": bad})
+            assert proc.returncode == 64, _out(proc)
+            assert "APPROVE_RESUME_HINT" in _out(proc)
+            assert _approvals(log) == []
 
     def test_an_already_approved_environment_is_not_an_error(self, tmp_path):
         # The environment really is no longer pending (approved in the UI meanwhile).

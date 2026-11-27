@@ -1,6 +1,10 @@
-# Code that receives the owner's release-approver PAT (WOR-1167).
+# Code that receives the owner's release-approver PAT (WOR-1167), the tests that
+# pin it, and this file itself (or a PR could drop these lines first).
 # Only enforced when branch protection on main requires code-owner review;
-# see RELEASING.md, "Approve from GitHub (one click)".
+# see RELEASING.md, "Approve from GitHub (one approval)".
+/.github/CODEOWNERS @oblangatas
 /.github/workflows/approve-release.yml @oblangatas
 /.github/scripts/approve-release-preflight.sh @oblangatas
 /scripts/approve-release.sh @oblangatas
+/tests/test_deploy_static.py @oblangatas
+/tests/test_approve_release.py @oblangatas

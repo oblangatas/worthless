@@ -45,7 +45,13 @@
 # Reads from environment: GH_REPO (default: gh repo view), GH_TOKEN (optional),
 # APPROVE_POLL_SECONDS (default 20), APPROVE_TIMEOUT_SECONDS (overrides --timeout-min),
 # APPROVE_RETRY_DELAYS (default "2 5 10": a failed read is retried after each delay,
-# then exits 4; an approve POST is never retried).
+# then exits 4; an approve POST is never retried), APPROVE_RESUME_HINT (what to do
+# to resume, printed on exits 1, 2 and 4 instead of this command; plain printable
+# text, at most 200 characters. The WOR-1167 Action sets it to its own re-run path).
+#
+# The deadline counts from your y on a terminal. With --yes there is no y to wait
+# for, so it counts from the start: a caller with its own time limit (the Action's
+# step timeout) can rely on this ending first.
 
 set -euo pipefail
 
@@ -129,7 +135,16 @@ if [ -z "${GH_REPO:-}" ]; then
   GH_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 fi
 export GH_REPO
-readonly RESUME_CMD="scripts/approve-release.sh ${tag}"
+# Printable text only (no control characters): it is echoed verbatim into logs.
+resume_hint=${APPROVE_RESUME_HINT:-}
+if [ -n "$resume_hint" ]; then
+  # A pattern, not grep: grep splits on newlines, so it would never see one.
+  if [ "${#resume_hint}" -gt 200 ] || [[ "$resume_hint" == *[[:cntrl:]]* ]]; then
+    echo "APPROVE_RESUME_HINT must be plain printable text, at most 200 characters." >&2
+    exit "$EXIT_USAGE"
+  fi
+fi
+readonly RESUME_CMD="${resume_hint:-scripts/approve-release.sh ${tag}}"
 consent=""  # "run_id env_id env" per line: exactly what the prompt showed
 approved="" # env names approved so far, for the exit-4 report
 noted=""    # "run_id env_id" pairs already reported as not approved
@@ -180,7 +195,7 @@ if ! sha=$(git rev-parse --verify --quiet "refs/tags/${tag}^{commit}"); then
   exit "$EXIT_USAGE"
 fi
 if [ -n "$expect_sha" ] && [ "$expect_sha" != "$sha" ]; then
-  echo "Refusing: ${tag} points at ${sha:0:12}, but ${expect_sha:0:12} was expected. Nothing approved."
+  echo "Refusing: ${tag} points at ${sha}, but ${expect_sha} was expected. Nothing approved."
   exit "$EXIT_FAILED"
 fi
 if [ -z "$expect_sha" ] && ! git verify-tag "$tag" >/dev/null 2>&1; then
@@ -192,10 +207,11 @@ tag_commit() { gh api "/repos/${GH_REPO}/commits/${tag}" -X GET --jq .sha </dev/
 retry_read "where ${tag} points" tag_commit
 remote_sha=$READ_OUT
 if [ "$remote_sha" != "$sha" ]; then
-  echo "Refusing: ${tag} is ${sha:0:12} here but ${remote_sha:0:12} on GitHub. Nothing approved."
+  echo "Refusing: ${tag} is ${sha} here but ${remote_sha} on GitHub. Nothing approved."
   exit "$EXIT_FAILED"
 fi
-echo "Release ${tag} at commit ${sha:0:12} (${GH_REPO})."
+# The full commit: a 12-character prefix is the label, never the thing to compare.
+echo "Release ${tag} at commit ${sha} (${GH_REPO})."
 
 # Every run GitHub lists for the tag, any event, any commit. One JSON array. No
 # server-side event filter: a dispatched run must be SEEN, so it can be named as skipped.
@@ -470,7 +486,10 @@ while :; do
           esac
         fi
         asked=true
-        deadline=$(($(date +%s) + timeout_s))
+        # A terminal y restarts the clock; --yes keeps the one from the start.
+        if [ "$assume_yes" != "true" ]; then
+          deadline=$(($(date +%s) + timeout_s))
+        fi
         continue # re-read the runs before approving anything
       fi
     else

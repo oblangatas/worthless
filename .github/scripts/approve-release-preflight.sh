@@ -68,14 +68,49 @@ gate_env() {
   return 1
 }
 
+notes=""
+
+# release-approver is the one gate in front of the PAT. Its settings live in the
+# UI, so check them here: a required reviewer, and deployments from main only.
+# Read with GITHUB_TOKEN (actions: read). If it cannot be read, warn and go on.
+check_approver_env() {
+  local env_json reviewers custom policies
+  if ! env_json=$(gh api "repos/$GH_REPO/environments/release-approver" 2>/dev/null) ||
+    ! policies=$(gh api "repos/$GH_REPO/environments/release-approver/deployment-branch-policies" \
+      --jq '[.branch_policies[]? | "\(.type // "branch"):\(.name)"] | sort | join(",")
+            | gsub("[[:cntrl:]]"; "")' 2>/dev/null); then
+    echo "::warning::could not read the release-approver environment settings; check them by hand (RELEASING.md)"
+    notes+="**WARNING:** could not read the \`release-approver\` settings. Check by hand that it has you as required reviewer and deploys from \`main\` only."$'\n\n'
+    return 0
+  fi
+  reviewers=$(jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length' <<<"$env_json")
+  if [ "$reviewers" -lt 1 ]; then
+    echo "::error::release-approver has no required reviewer, so nothing stands between this run and the PAT. Add yourself (RELEASING.md)."
+    exit 1
+  fi
+  custom=$(jq -r '.deployment_branch_policy.custom_branch_policies // false' <<<"$env_json")
+  if [ "$custom" != true ] || [ "$policies" != "branch:main" ]; then
+    echo "::error::release-approver must deploy from main only (Selected branches and tags: main). Found: ${policies:-any branch}."
+    exit 1
+  fi
+}
+check_approver_env
+
 # Resolve the tag to its commit. An annotated tag points at a tag object, which
 # points at the commit; peel until we reach it (bounded, in case of a loop).
+# The first tag object carries GitHub's signature check; it is shown, not enforced.
 ref=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG")
 type=$(jq -r .object.type <<<"$ref")
 sha=$(jq -r .object.sha <<<"$ref")
+sig="none"
+sig_reason="lightweight tag, no tag object"
 for _ in 1 2 3 4 5; do
   [ "$type" = tag ] || break
   obj=$(gh api "repos/$GH_REPO/git/tags/$sha")
+  if [ "$sig" = none ]; then
+    sig=$(jq -r 'if .verification.verified == true then "verified" else "unverified" end' <<<"$obj")
+    sig_reason=$(jq -r '.verification.reason // "unknown" | gsub("[^a-z_]"; "")' <<<"$obj")
+  fi
   type=$(jq -r .object.type <<<"$obj")
   sha=$(jq -r .object.sha <<<"$obj")
 done
@@ -88,32 +123,51 @@ echo "commit=$sha" >>"$output"
 {
   echo "## Approve release $TAG"
   echo
-  echo "Tag commit: \`$sha\`"
+  echo "Tag commit (all 40 characters): \`$sha\`"
   echo
-  echo "Compare with \`git rev-parse ${TAG}^{commit}\` on your machine before you approve."
+  echo "Compare it in full with \`git rev-parse ${TAG}^{commit}\` on your machine before you approve."
   echo
+  if [ "$sig" = verified ]; then
+    echo "Tag signature: verified by GitHub (\`$sig_reason\`)."
+  else
+    echo "**WARNING: GitHub does not verify this tag's signature** (\`$sig_reason\`). Approve only if you checked the tag on your own machine."
+  fi
+  echo
+  printf '%s' "$notes"
   echo "| Run | Event | Head commit | Waiting on | Verdict |"
   echo "| --- | --- | --- | --- | --- |"
 } >>"$summary"
 
 # \x1f, not tab: read collapses consecutive whitespace separators, so an empty
-# field (a null head_branch) would shift every field after it.
+# field (a null head_branch) would shift every field after it. Control
+# characters are stripped first: they could forge a separator or a line.
 runs=$(gh api --paginate "repos/$GH_REPO/actions/runs?status=waiting&per_page=100" \
   --jq '.workflow_runs[] | [.id, .name, (.path // "" | split("/") | last), .event,
         .head_branch, .head_sha, .display_title, .html_url]
-        | map(. // "" | tostring) | join("\u001f")')
+        | map(. // "" | tostring | gsub("[[:cntrl:]]"; "")) | join("\u001f")')
+
+# approve-release.sh approves only the NEWEST push run per publisher workflow at
+# the tag's commit, from every run on the tag (any status). Same list here.
+tag_runs=$(gh api --paginate "repos/$GH_REPO/actions/runs?branch=$TAG&per_page=100" \
+  --jq '.workflow_runs[] | select(.event == "push")
+        | [(.path // "" | split("/") | last), .head_sha, .id] | map(tostring) | join(" ")')
+newest_of() {
+  awk -v w="$1" -v s="$sha" '$1 == w && $2 == s && $3 + 0 > m { m = $3 + 0 } END { print m + 0 }' \
+    <<<"$tag_runs"
+}
 
 n=0
 while IFS=$'\x1f' read -r id name wf event branch head title url; do
   [ -n "$id" ] || continue
   envs=$(gh api "repos/$GH_REPO/actions/runs/$id/pending_deployments" \
-    --jq '[.[].environment.name] | join(", ")')
+    --jq '[.[].environment.name] | join(", ") | gsub("[[:cntrl:]]"; "")')
   why=""
   expected=""
   if [ "$event" = push ]; then
     expected=$(gate_env "$wf" "$name") || why="not a release publisher"
     [ -n "$why" ] || [ "$branch" = "$TAG" ] || why="not this tag's push"
     [ -n "$why" ] || [ "$head" = "$sha" ] || why="a different commit"
+    [ -n "$why" ] || [ "$id" = "$(newest_of "$wf")" ] || why="older run, will not be approved"
   elif [ "$event" = workflow_run ] && [ "$wf" = "$RELEASE_WORKFLOW" ]; then
     expected=$RELEASE_ENV
     [ "$title" = "$RELEASE_RUN_TITLE_PREFIX $TAG $sha" ] || why="a release run for another tag"
@@ -131,7 +185,10 @@ while IFS=$'\x1f' read -r id name wf event branch head title url; do
   else
     verdict="**WILL NOT BE APPROVED** ($why)"
   fi
-  echo "| [$name]($url) | $event | \`${head:0:12}\` | $envs | $verdict |" >>"$summary"
+  # A `|` in a name would start a new table cell; escape it for Markdown.
+  name_md=${name//|/\\|}
+  envs_md=${envs//|/\\|}
+  echo "| [$name_md]($url) | $event | \`${head:0:12}\` | $envs_md | $verdict |" >>"$summary"
   n=$((n + 1))
 done <<<"$runs"
 

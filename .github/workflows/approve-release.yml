@@ -1,6 +1,6 @@
 name: Approve release
 
-# One click approves all four release gates for a tag. WOR-1167.
+# One approval in GitHub approves all four release gates for a tag. WOR-1167.
 #
 # A release waits on four protected environments: pypi, npm-publish and
 # worthless-sh-production (the publishers), then release (Create GitHub Release).
@@ -16,7 +16,7 @@ name: Approve release
 # decision. The preflight job runs first, with GITHUB_TOKEN only, and writes the
 # tag's commit and every waiting run to the run summary, so the owner sees what
 # will be approved before clicking. Setup and what this does NOT protect
-# against: RELEASING.md, "Approve from GitHub (one click)". Pinned by
+# against: RELEASING.md, "Approve from GitHub (one approval)". Pinned by
 # TestApproveReleaseWiring in tests/test_deploy_static.py.
 #
 # The GPG signing key is never involved: tagging stays on the maintainer's machine.
@@ -110,6 +110,9 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           GH_TOKEN: ${{ secrets.RELEASE_APPROVER_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          # Printed by approve-release.sh on exits 1, 2 and 4 instead of its
+          # local resume command, which means nothing to someone reading this log.
+          APPROVE_RESUME_HINT: "Actions → Approve release → Re-run failed jobs (needs another release-approver approval)"
         run: |
           # The environment's branch rule should already stop other refs; this
           # holds even if that rule is loosened.
@@ -136,6 +139,13 @@ jobs:
           fi
           if [ ! -f scripts/approve-release.sh ]; then
             echo "::error::scripts/approve-release.sh is missing from this checkout of main."
+            exit 1
+          fi
+          # One read with the PAT first, so an expired or under-scoped token fails
+          # here with a clear message. /deployments needs Deployments: read; this
+          # cannot prove write, which only an approval can.
+          if ! gh api "repos/$GH_REPO/deployments?per_page=1" -X GET --silent; then
+            echo "::error::RELEASE_APPROVER_TOKEN is expired or lacks Deployments: write — rotate it (RELEASING.md). Nothing approved."
             exit 1
           fi
           bash scripts/approve-release.sh "$TAG" --yes --timeout-min 80 --expect-sha "$EXPECTED_SHA"

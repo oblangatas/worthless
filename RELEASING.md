@@ -42,18 +42,18 @@ because that sentence was not enforced, and the same bug shipped twice.
    | Deploy Worker (worthless-sh) | `worthless-sh-production` |
 
    **Before each of these approvals, check the run shows your tag, at the commit
-   `git rev-parse --short v<version>^{commit}` prints.** Reject anything else, including re-runs of
+   `git rev-parse v<version>^{commit}` prints, all 40 characters.** Reject anything else, including re-runs of
    older tags you didn't start yourself (a rollback, say). A green signature step does not prove the run is yours — see
    [What a signed tag does NOT stop](#what-a-signed-tag-does-not-stop). The GHCR image
    (Publish Docker image to GHCR) publishes without an approval.
 
-   Steps 3 and 4 can also be done in one click: see
-   [Approve from GitHub (one click)](#approve-from-github-one-click).
+   Steps 3 and 4 can also be done with one approval in GitHub: see
+   [Approve from GitHub (one approval)](#approve-from-github-one-approval).
 
 4. **Approve the Release.** Once all four publishers are green, **Create GitHub Release** waits on
    the `release` environment. Its run shows `main`, not your tag — expected, because it runs from
    `main`. Check its **gate** job instead: the log must show `TAG: v<version>` and a `HEAD_SHA`
-   starting with that same commit. Then approve. It re-binds the tag to that commit, re-verifies the
+   equal to that same full commit. Then approve. It re-binds the tag to that commit, re-verifies the
    signature, and creates the Release.
 
 > **First proven on v0.3.13 (2026-10-13).** The Release step ran once per finished publisher and
@@ -111,7 +111,7 @@ notice one deleted afterwards.
 > item — see `engineering/release-gates.md`. The automated checks inside `tag-release.sh`
 > are preflight checks. Keep the two words apart.
 
-## Approve from GitHub (one click)
+## Approve from GitHub (one approval)
 
 The **Approve release** workflow (`.github/workflows/approve-release.yml`, WOR-1167) does steps 3
 and 4 for you. It runs the same `scripts/approve-release.sh` as step 3, as
@@ -127,21 +127,37 @@ the tag is at the commit preflight showed you. It approves the three publishers,
    skipped before any approval is requested: the preflight job goes red with the reason, and the
    approve job never asks for the `release-approver` approval. The step that holds the token checks
    both again, as defence in depth.
-2. The **preflight** job runs first, with the job's own token. Its summary on the run page shows
-   the tag's commit and every run waiting for approval. Each run is marked OK or **WILL NOT BE
-   APPROVED**, by the script's own rules: a publisher counts only as a push of your tag at its
-   commit, waiting on the one environment its workflow owns (see the table in step 3); the
-   Release run counts only by its exact `Create GitHub Release <tag> <commit>` title. A manual
-   dispatch, another commit, another branch or another tag's Release run is never approved.
-3. Compare the commit with `git rev-parse --short v<version>^{commit}` on your machine. Only if it
-   matches, approve the `release-approver` environment.
+2. The **preflight** job runs first, with the job's own token. It fails if `release-approver` has
+   no required reviewer or deploys from anything but `main` (if it cannot read those settings, it
+   says so and goes on). Its summary on the run page shows:
+   - the tag's full 40-character commit;
+   - GitHub's check of the tag's signature, with a **WARNING** row if GitHub does not verify it
+     (shown only; it does not stop the run);
+   - every run waiting for approval, marked OK or **WILL NOT BE APPROVED** by the script's own
+     rules: a publisher counts only as the newest push of your tag at its commit, waiting on the
+     one environment its workflow owns (see the table in step 3); the Release run counts only by
+     its exact `Create GitHub Release <tag> <commit>` title. A manual dispatch, another commit,
+     another branch, an older duplicate run or another tag's Release run is never approved.
+3. Compare the full 40-character commit with `git rev-parse v<version>^{commit}` on your machine,
+   all 40 characters. Only if it matches, approve the `release-approver` environment.
+
+   **On a phone you usually cannot do that comparison.** Then what you are trusting is the
+   preflight summary and its signature row: GitHub's copy of the tag, and GitHub's check of its
+   signature. That is weaker than step 3 at your machine; see
+   [What this does NOT protect against](#what-this-does-not-protect-against).
+
+Before the script runs, the approve step makes one read with the token, so an expired or
+under-scoped token fails with "RELEASE_APPROVER_TOKEN is expired or lacks Deployments: write"
+instead of mid-way. That read cannot prove write access; only an approval can.
 
 The run fails with the script's exit codes from step 3: 1 a run failed, the commit is wrong, or an
-approval cannot be given; 2 not finished in 80 minutes; 4 a GitHub call failed after retries (safe
-to run the workflow again); 64 the tag is not in the checkout. It also fails if the token is
-missing. 80 minutes is the script's own default: the slowest publisher (the Docker image's job
-chain, 45 minutes) plus the Release job chain (20 minutes) plus margin. Tests re-read both
-workflows.
+approval cannot be given; 2 not finished in 80 minutes; 4 a GitHub call failed after retries;
+64 the tag is not in the checkout. On 1, 2 and 4 the log says how to resume: **Actions → Approve
+release → Re-run failed jobs**, which asks for another `release-approver` approval. With `--yes`
+the 80 minutes count from the start of the script (on a terminal they count from your `y`), so
+the script always ends before the step's 85-minute limit. 80 minutes is the script's own default:
+the slowest publisher (the Docker image's job chain, 45 minutes) plus the Release job chain
+(20 minutes) plus margin. Tests re-read both workflows.
 The summary is a snapshot: the Create GitHub Release run usually appears only after you approve.
 
 ### Owner setup (once, by hand)
@@ -171,7 +187,9 @@ cannot approve. The job uses the owner's personal access token instead.
    `release-approver` → **Environment secrets** → **Add secret** → name `RELEASE_APPROVER_TOKEN`.
    An environment secret reaches a job only after that environment's reviewer approves the job.
 4. **Require code-owner review on `main`.** `.github/CODEOWNERS` names the owner for the workflow,
-   its preflight script and `scripts/approve-release.sh`. It only takes effect when the `main`
+   its preflight script, `scripts/approve-release.sh`, the tests that pin them
+   (`tests/test_deploy_static.py`, `tests/test_approve_release.py`) and `CODEOWNERS` itself, so a
+   pull request cannot drop those lines first. It only takes effect when the `main`
    branch protection or ruleset has **Require review from Code Owners** turned on.
 5. **Rotate every 30 days.** Generate a new token with the same settings, replace the secret, then
    delete the old token. If the secret is missing or expired, the run fails and no gate is

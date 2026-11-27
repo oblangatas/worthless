@@ -2720,7 +2720,7 @@ GUARD_MUTATIONS = [
         "          persist-credentials: false",
         "test_runs_no_untrusted_tag_content",
     ),
-    # --- one-click release approval (WOR-1167) -------------------------------
+    # --- one-approval release (WOR-1167) -------------------------------
     (
         "let a push start the approver",
         ".github/workflows/approve-release.yml",
@@ -2940,6 +2940,100 @@ GUARD_MUTATIONS = [
         "    timeout-minutes: 35\n",
         "    timeout-minutes: 60\n",
         "test_approver_outlasts_the_slowest_release_path",
+    ),
+    # --- PR #795 review round (sec + brutus) -------------------------------
+    (
+        "preflight calls an older duplicate run OK",
+        ".github/scripts/approve-release-preflight.sh",
+        '    [ -n "$why" ] || [ "$id" = "$(newest_of "$wf")" ] || '
+        'why="older run, will not be approved"',
+        "    :",
+        "test_preflight_marks_an_older_duplicate_run",
+    ),
+    (
+        "preflight says every tag is signed",
+        ".github/scripts/approve-release-preflight.sh",
+        'if .verification.verified == true then "verified" else "unverified" end',
+        '"verified"',
+        "test_preflight_shows_github_tag_signature_check",
+    ),
+    (
+        "preflight writes a raw `|` from a run name into the table",
+        ".github/scripts/approve-release-preflight.sh",
+        r"name_md=${name//|/\\|}",
+        "name_md=$name",
+        "test_preflight_escapes_names_in_the_summary",
+    ),
+    (
+        "preflight keeps control characters from run names",
+        ".github/scripts/approve-release-preflight.sh",
+        'tostring | gsub("[[:cntrl:]]"; "")',
+        "tostring",
+        "test_preflight_escapes_names_in_the_summary",
+    ),
+    (
+        "preflight accepts release-approver without a required reviewer",
+        ".github/scripts/approve-release-preflight.sh",
+        'if [ "$reviewers" -lt 1 ]; then',
+        "if false; then",
+        "test_preflight_checks_the_release_approver_environment",
+    ),
+    (
+        "preflight accepts release-approver deploying from any branch",
+        ".github/scripts/approve-release-preflight.sh",
+        'if [ "$custom" != true ] || [ "$policies" != "branch:main" ]; then',
+        "if false; then",
+        "test_preflight_checks_the_release_approver_environment",
+    ),
+    (
+        "approve step hands an untested PAT to the script",
+        ".github/workflows/approve-release.yml",
+        'if ! gh api "repos/$GH_REPO/deployments?per_page=1" -X GET --silent; then',
+        "if false; then",
+        "test_approver_stops_on_a_rejected_token",
+    ),
+    (
+        "the Action drops its resume hint",
+        ".github/workflows/approve-release.yml",
+        '          APPROVE_RESUME_HINT: "Actions → Approve release → Re-run failed jobs'
+        ' (needs another release-approver approval)"\n',
+        "",
+        "test_approver_hands_the_script_its_resume_hint",
+    ),
+    (
+        "tag-release.sh prints a short commit to compare",
+        "scripts/tag-release.sh",
+        'tag_commit=$(git rev-parse "${tag}^{commit}")',
+        'tag_commit=$(git rev-parse --short "${tag}^{commit}")',
+        "test_humans_compare_the_full_commit",
+    ),
+    (
+        "approve-release restarts the clock at consent under --yes",
+        "scripts/approve-release.sh",
+        '        if [ "$assume_yes" != "true" ]; then\n          deadline=',
+        "        if true; then\n          deadline=",
+        "test_under_yes_the_deadline_counts_from_the_start",
+    ),
+    (
+        "approve-release ignores the caller's resume hint",
+        "scripts/approve-release.sh",
+        'readonly RESUME_CMD="${resume_hint:-scripts/approve-release.sh ${tag}}"',
+        'readonly RESUME_CMD="scripts/approve-release.sh ${tag}"',
+        "test_the_resume_hint_replaces_the_command_on_exits_1_2_and_4",
+    ),
+    (
+        "approve-release echoes a resume hint with control characters",
+        "scripts/approve-release.sh",
+        'if [ "${#resume_hint}" -gt 200 ] || [[ "$resume_hint" == *[[:cntrl:]]* ]]; then',
+        "if false; then",
+        "test_a_resume_hint_with_control_characters_is_refused",
+    ),
+    (
+        "approve-release shows a 12-character commit as the thing to compare",
+        "scripts/approve-release.sh",
+        'echo "Release ${tag} at commit ${sha} (${GH_REPO})."',
+        'echo "Release ${tag} at commit ${sha:0:12} (${GH_REPO})."',
+        "test_lists_every_waiting_environment_with_its_run",
     ),
     # --- release watchdog (WOR-922) -----------------------------------------
     (
@@ -4205,10 +4299,19 @@ def _run_approver_step(
     actor: str = "owner",
     script_present: bool = True,
     expected_sha: str = "c" * 40,
+    token_works: bool = True,
 ) -> tuple[int, str | None, str]:
     """Run the REAL approve step's shell, the way Actions runs it, against a fake
-    approve-release.sh that records its argv. Returns (exit code, recorded argv,
-    stdout+stderr)."""
+    approve-release.sh that records its argv and a fake `gh` that accepts or
+    rejects the token. Returns (exit code, recorded argv, stdout+stderr)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        '[ "${FAKE_GH_OK:-1}" = 1 ] && exit 0\n'
+        'echo "gh: Bad credentials (HTTP 401)" >&2; exit 1\n'
+    )
+    (bindir / "gh").chmod(0o755)
     (tmp_path / "scripts").mkdir(exist_ok=True)
     record = tmp_path / "argv"
     record.unlink(missing_ok=True)
@@ -4217,7 +4320,8 @@ def _run_approver_step(
     if script_present:
         fake.write_text(f'#!/usr/bin/env bash\nprintf "%s " "$@" > "{record}"\n')
     env = {
-        "PATH": os.environ["PATH"],
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "FAKE_GH_OK": "1" if token_works else "0",
         "TAG": tag,
         "GH_TOKEN": gh_token,
         "GH_REPO": "o/r",
@@ -4307,12 +4411,41 @@ def _run_preflight(
     return proc, _read_or_empty(summary), _read_or_empty(output)
 
 
-def _preflight_api(runs: list[dict]) -> dict[str, object]:
-    """An annotated tag v1.2.3 -> tag object -> _TAG_COMMIT, plus waiting runs."""
+_GOOD_APPROVER_ENV = {
+    "name": "release-approver",
+    "protection_rules": [
+        {
+            "type": "required_reviewers",
+            "reviewers": [{"type": "User", "reviewer": {"login": "owner"}}],
+        }
+    ],
+    "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True},
+}
+_ENV_PATH = "repos/o/r/environments/release-approver"
+_POLICIES_PATH = f"{_ENV_PATH}/deployment-branch-policies"
+
+
+def _preflight_api(
+    runs: list[dict],
+    other_tag_runs: list[dict] = (),
+    verification: dict | None = None,
+) -> dict[str, object]:
+    """An annotated, GitHub-verified tag v1.2.3 -> tag object -> _TAG_COMMIT; a
+    correctly set-up release-approver; the waiting `runs`; and every run on the
+    tag (the waiting ones on its branch plus `other_tag_runs`)."""
     api: dict[str, object] = {
+        _ENV_PATH: _GOOD_APPROVER_ENV,
+        _POLICIES_PATH: {"branch_policies": [{"name": "main", "type": "branch"}]},
         "repos/o/r/git/ref/tags/v1.2.3": {"object": {"type": "tag", "sha": _TAG_OBJECT}},
-        f"repos/o/r/git/tags/{_TAG_OBJECT}": {"object": {"type": "commit", "sha": _TAG_COMMIT}},
+        f"repos/o/r/git/tags/{_TAG_OBJECT}": {
+            "object": {"type": "commit", "sha": _TAG_COMMIT},
+            "verification": verification or {"verified": True, "reason": "valid"},
+        },
         "repos/o/r/actions/runs?status=waiting&per_page=100": {"workflow_runs": runs},
+        "repos/o/r/actions/runs?branch=v1.2.3&per_page=100": {
+            "workflow_runs": [r for r in runs if r.get("head_branch") == "v1.2.3"]
+            + list(other_tag_runs)
+        },
     }
     for r in runs:
         api[f"repos/o/r/actions/runs/{r['id']}/pending_deployments"] = [
@@ -4567,8 +4700,9 @@ class TestApproveReleaseWiring:
             _waiting_run(6, "pages.yml", "Some deploy", "push", c, "github-pages"),
             # a publisher at the tag's commit, but pushed to main, not the tag
             _waiting_run(7, "publish.yml", "Publish to PyPI", "push", c, "pypi", branch="main"),
-            # a publisher waiting on an environment its workflow does not own
-            _waiting_run(8, "publish.yml", "Publish to PyPI", "push", c, "npm-publish"),
+            # a publisher waiting on an environment its workflow does not own (the
+            # only npm run at this commit, so "older run" is not why it is flagged)
+            _waiting_run(8, "publish-npm.yml", "Publish worthless-mcp to npm", "push", c, "pypi"),
             _waiting_run(9, "deploy-worker.yml", dw, "push", c, "worthless-sh-production"),
         ]
         proc, summary, output = _run_preflight(tmp_path, _preflight_api(runs))
@@ -4584,6 +4718,131 @@ class TestApproveReleaseWiring:
             "to main) and 8 (wrong environment for its workflow): approve-release.sh's rules"
         )
         assert "| pypi |" in rows[1] and "| release |" in rows[4]
+        # The owner acts on the REASON. "Older run" for a run at another commit is
+        # flagged, but misleads: the newest-run rule also catches 2, 3 and 7, so
+        # only the reason tells their own checks apart.
+        reasons = {
+            2: "a different commit",
+            3: "a workflow_dispatch run is never approved",
+            5: "a release run for another tag",
+            6: "not a release publisher",
+            7: "not this tag's push",
+            8: "waits on pypi, not npm-publish",
+        }
+        for i, reason in reasons.items():
+            assert f"({reason})" in rows[i], f"run {i} must say {reason!r}: {rows[i]}"
+
+    def test_preflight_marks_an_older_duplicate_run(self, tmp_path):
+        """approve-release.sh approves only the newest push run per publisher
+        workflow on the tag, whatever its status. An older waiting one is not OK."""
+        c = _TAG_COMMIT
+        runs = [
+            _waiting_run(1, "publish.yml", "Publish to PyPI", "push", c, "pypi"),
+            _waiting_run(3, "publish.yml", "Publish to PyPI", "push", c, "pypi"),
+        ]
+        proc, summary, _ = _run_preflight(tmp_path, _preflight_api(runs))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        rows = {i: next(ln for ln in summary.splitlines() if f"runs/{i})" in ln) for i in (1, 3)}
+        assert "older run" in rows[1] and "WILL NOT BE APPROVED" in rows[1], rows[1]
+        assert "| OK |" in rows[3], rows[3]
+        # A newer run that is no longer waiting still wins: both waiting ones are older.
+        newer = {**runs[0], "id": 5, "status": "completed"}
+        newer.pop("_env", None)
+        (tmp_path / "b").mkdir()
+        runs = [
+            _waiting_run(1, "publish.yml", "Publish to PyPI", "push", c, "pypi"),
+            _waiting_run(3, "publish.yml", "Publish to PyPI", "push", c, "pypi"),
+        ]
+        proc, summary, _ = _run_preflight(tmp_path / "b", _preflight_api(runs, [newer]))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert summary.count("older run") == 2, summary
+
+    def test_preflight_shows_github_tag_signature_check(self, tmp_path):
+        """Display only: on a phone this row is most of what the owner can check."""
+        proc, summary, _ = _run_preflight(tmp_path, _preflight_api([]))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "Tag signature: verified by GitHub" in summary and "WARNING" not in summary
+        (tmp_path / "b").mkdir()
+        api = _preflight_api([], verification={"verified": False, "reason": "unsigned"})
+        proc, summary, _ = _run_preflight(tmp_path / "b", api)
+        assert proc.returncode == 0, "the signature row is a warning, not a gate"
+        assert "WARNING: GitHub does not verify this tag's signature" in summary, summary
+        assert "`unsigned`" in summary
+        assert f"`{_TAG_COMMIT}`" in summary, "the full 40-character commit must be shown"
+
+    def test_preflight_escapes_names_in_the_summary(self, tmp_path):
+        evil = "Evil | fake \x1b[31mOK\x1f| x"
+        runs = [_waiting_run(1, "pages.yml", evil, "push", _TAG_COMMIT, "github-pages")]
+        proc, summary, _ = _run_preflight(tmp_path, _preflight_api(runs))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        (row,) = [ln for ln in summary.splitlines() if "runs/1)" in ln]
+        assert "\x1b" not in summary and "\x1f" not in summary, (
+            "control characters from a run name reached the summary"
+        )
+        cells = re.split(r"(?<!\\)\|", row)
+        assert len(cells) == 7, (
+            f"a `|` in a run name split the table row into {len(cells) - 2} cells: {row!r}"
+        )
+        assert "WILL NOT BE APPROVED" in row
+
+    def test_preflight_checks_the_release_approver_environment(self, tmp_path):
+        no_reviewer = {**_GOOD_APPROVER_ENV, "protection_rules": []}
+        any_branch = {**_GOOD_APPROVER_ENV, "deployment_branch_policy": None}
+        bad = {
+            "no required reviewer": {_ENV_PATH: no_reviewer},
+            "any branch may deploy": {_ENV_PATH: any_branch},
+            "main and dev": {
+                _POLICIES_PATH: {
+                    "branch_policies": [{"name": "main", "type": "branch"}, {"name": "dev"}]
+                }
+            },
+            "a tag pattern": {
+                _POLICIES_PATH: {"branch_policies": [{"name": "main", "type": "tag"}]}
+            },
+        }
+        for n, (label, override) in enumerate(bad.items()):
+            case = tmp_path / str(n)
+            case.mkdir()
+            proc, _, output = _run_preflight(case, {**_preflight_api([]), **override})
+            assert proc.returncode != 0 and "::error::release-approver" in proc.stdout, (
+                f"preflight passed with release-approver set up wrong ({label})"
+            )
+            assert "commit=" not in output
+        # Unreadable settings: warn and go on, never widen the token to read them.
+        case = tmp_path / "unreadable"
+        case.mkdir()
+        api = _preflight_api([])
+        del api[_ENV_PATH]
+        proc, summary, _ = _run_preflight(case, api)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "could not read the `release-approver` settings" in summary
+
+    def test_approver_stops_on_a_rejected_token(self, tmp_path):
+        rc, argv, out = _run_approver_step(tmp_path, "v1.2.3", "t", token_works=False)
+        assert rc != 0 and argv is None, "a rejected PAT must stop the step before the script"
+        assert "RELEASE_APPROVER_TOKEN is expired or lacks Deployments: write" in out, out
+        assert "rotate it" in out
+
+    def test_approver_hands_the_script_its_resume_hint(self):
+        hint = _approver_step()["env"].get("APPROVE_RESUME_HINT", "")
+        assert "Re-run failed jobs" in hint and "release-approver" in hint, (
+            "on exits 1, 2 and 4 the script must tell the Action's reader how to resume "
+            "here, not to run a local command (test_approve_release.py checks the script)"
+        )
+        assert len(hint) <= 200 and not re.search(r"[\x00-\x1f\x7f]", hint)
+
+    def test_humans_compare_the_full_commit(self):
+        """A 12-character prefix is a label. Every instruction to compare a commit
+        must use all 40 characters (sec review on PR #795)."""
+        for rel in (
+            "RELEASING.md",
+            ".claude/skills/release/SKILL.md",
+            "scripts/tag-release.sh",
+            ".github/scripts/approve-release-preflight.sh",
+        ):
+            text = (REPO_ROOT / rel).read_text()
+            assert "rev-parse --short" not in text, f"{rel} still compares a short commit"
+        assert "Compare it in full" in APPROVE_PREFLIGHT_SCRIPT.read_text()
 
     def test_preflight_gate_map_matches_the_script(self):
         """Preflight's verdicts are only honest while its copy of the script's
