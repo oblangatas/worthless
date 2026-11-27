@@ -43,6 +43,7 @@ from worthless.cli.platform import (
     fail_if_windows,
     pid_in_tree,
     popen_platform_kwargs,
+    python_module_argv,
 )
 from worthless.cli.process import (
     create_liveness_pipe,
@@ -476,9 +477,10 @@ def start_supervised_proxy(
     Foreground ``up`` supervises the crypto sidecar; we run it in a new session
     so the default command can return while the child keeps running.
 
-    ``sys.executable -m worthless``, not a PATH lookup: an older ``worthless``
-    earlier on PATH would otherwise be the one that runs — it answered /healthz
-    on a stale key and turned status green (worthless-l0s1).
+    This interpreter's own ``worthless``, not a PATH lookup: an older
+    ``worthless`` earlier on PATH would otherwise be the one that runs — it
+    answered /healthz on a stale key and turned status green (worthless-l0s1).
+    ``python_module_argv`` keeps the project's files off its import path.
     """
     # Absolute: the child starts inside the home, where a relative
     # WORTHLESS_HOME would point one level too deep.
@@ -487,7 +489,7 @@ def start_supervised_proxy(
     env["WORTHLESS_HOME"] = base_dir
     env["WORTHLESS_PORT"] = str(port)
 
-    cmd = [sys.executable, "-m", "worthless", "up", "--port", str(port)]
+    cmd = python_module_argv("worthless", "up", "--port", str(port))
 
     log_fd: int = -1
     try:

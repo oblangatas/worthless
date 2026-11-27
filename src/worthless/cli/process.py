@@ -27,7 +27,12 @@ import httpx
 
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.keystore import keyring_available
-from worthless.cli.platform import IS_WINDOWS, check_pid_alive, popen_platform_kwargs
+from worthless.cli.platform import (
+    IS_WINDOWS,
+    check_pid_alive,
+    popen_platform_kwargs,
+    python_module_argv,
+)
 
 # Imported as a module (not `from ... import set_dumpable_zero_or_log`) so tests
 # can monkeypatch the primitives — same pattern the sidecar entrypoint relies on.
@@ -436,9 +441,7 @@ def proxy_cmd(port: int, host: str = "127.0.0.1") -> list[str]:
             ``build_proxy_env()["WORTHLESS_HOST"]`` so the env dict
             is the single source of truth for the bind address.
     """
-    return [
-        sys.executable,
-        "-m",
+    return python_module_argv(
         "uvicorn",
         "worthless.proxy.app:create_app",
         "--factory",
@@ -446,7 +449,18 @@ def proxy_cmd(port: int, host: str = "127.0.0.1") -> list[str]:
         host,
         "--port",
         str(port),
-    ]
+        # uvicorn's --app-dir defaults to "" (the cwd) and it puts that at
+        # sys.path[0] itself, undoing python_module_argv: a project's
+        # secrets.py loaded inside the proxy that gets the Fernet key
+        # (worthless-x31h2, found live). Name the stdlib dir instead: it is
+        # already on sys.path, so uvicorn's insert changes nothing (site-packages
+        # here would jump ahead of the stdlib — PR #813 review).
+        "--app-dir",
+        _STDLIB_DIR,
+    )
+
+
+_STDLIB_DIR = str(Path(os.__file__).parent)  # the stdlib entry already on sys.path
 
 
 # ---------------------------------------------------------------------------
