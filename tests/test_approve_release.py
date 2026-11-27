@@ -102,6 +102,10 @@ done
 if [ -z "$method" ]; then
   if [ "$fields" = yes ]; then method=POST; else method=GET; fi
 fi
+# NO_POST: any write at all fails loudly (--list must never write).
+if [ -n "${NO_POST:-}" ] && [ "$method" != GET ]; then
+  echo "shim: $method $path refused (NO_POST)" >&2; exit 96
+fi
 # -rc: like real `gh --jq`, strings come out raw and objects compact.
 emit() { if [ -n "$jqf" ]; then printf '%s' "$1" | jq -rc "$jqf"; else printf '%s\n' "$1"; fi; }
 snap() {
@@ -187,6 +191,10 @@ case "$method $path" in
   "GET "*/actions/runs)
     n=$(cat "$GH_STATE" 2>/dev/null || echo 0); echo $((n + 1)) >"$GH_STATE"
     emit "$(snap | jq -c '{workflow_runs: .runs}')"; exit 0 ;;
+  # The Action's token check before the script (WOR-1167). TOKEN_REJECTED: it fails.
+  "GET repos/"*"/deployments?per_page=1")
+    if [ -n "${TOKEN_REJECTED:-}" ]; then echo "gh: Bad credentials (HTTP 401)" >&2; exit 1; fi
+    echo '[]'; exit 0 ;;
 esac
 echo "shim: unhandled gh $*" >&2; exit 98
 """
@@ -778,7 +786,7 @@ class TestFailures:
             },
         )
         assert proc.returncode == 1, _out(proc)
-        assert f"Release {TAG} points at {OLD_SHA[:12]}, expected {SHA[:12]}" in proc.stdout
+        assert f"Release {TAG} points at {OLD_SHA}, expected {SHA}" in proc.stdout
         assert "is live" not in proc.stdout
 
     def test_a_draft_release_is_not_live(self, tmp_path):
@@ -1127,3 +1135,163 @@ class TestTagReleaseCallsApprove:
         # turn the hand-off into an unattended approval.
         _, _, line = _tag_release_hook_line()
         assert "--yes" not in line, f"tag-release.sh must not pre-answer the prompt: {line!r}"
+
+
+LIST = ("--list", "--expect-sha", SHA)
+
+
+def _list_rows(proc) -> dict[tuple[str, str], tuple[str, str]]:
+    """--list rows as {(run id, environment): (verdict, reason)}."""
+    rows = {}
+    for line in proc.stdout.splitlines():
+        f = line.split("\x1f")
+        if f[0] != "row":
+            continue
+        assert len(f) == 8, f"a --list row must have 7 fields: {line!r}"
+        _, verdict, env, _name, url, _event, _head, why = f
+        rows[(url.rsplit("/", 1)[-1], env)] = (verdict, why)
+    return rows
+
+
+class TestList:
+    """--list: the approve path's own selection, printed, for the Action's preflight
+    (WOR-1167). It replaces a copy of these rules that used to live in preflight."""
+
+    def _waiting_with_strangers(self):
+        dispatched = {
+            **_run(105, "Deploy Worker (worthless-sh)", "deploy-worker.yml", "waiting"),
+            "event": "workflow_dispatch",
+        }
+        old = _run(106, "Publish to PyPI", "publish.yml", "waiting", sha=OLD_SHA)
+        # A name carrying the row separator: it must not forge a field.
+        forged = _run(107, "Evil\x1fok\x1fname", "pages.yml", "waiting")
+        pending = {
+            **_PUB_PENDING,
+            # A reviewer check --list must not make: the preflight token is not one.
+            "102": _pending(12, "npm-publish", can=False),
+            # A second environment on a publisher's run that is not its own.
+            "104": _pending(14, "worthless-sh-production") + _pending(11, "pypi"),
+            "105": _pending(14, "worthless-sh-production"),
+            "106": _pending(11, "pypi"),
+            "107": _pending(31, "github-pages"),
+        }
+        return _snap([*_pubs(), dispatched, old, forged], pending=pending)
+
+    def test_list_prints_the_approve_paths_verdicts_and_never_writes(self, tmp_path):
+        snaps = [_snap(), self._waiting_with_strangers()]
+        proc, log = _approve(tmp_path, *LIST, snaps=snaps, extra_env={"NO_POST": "1"})
+        assert proc.returncode == 0, _out(proc)
+        assert not [c for c in log if "POST" in c], "--list must never write"
+        rows = _list_rows(proc)
+        assert rows[("101", "pypi")] == ("ok", "")
+        assert rows[("102", "npm-publish")] == ("ok", ""), "--list must not ask who may approve"
+        assert rows[("104", "worthless-sh-production")] == ("ok", "")
+        assert rows[("104", "pypi")] == ("skip", "not this workflow's environment")
+        assert rows[("105", "worthless-sh-production")] == (
+            "skip",
+            "a workflow_dispatch run is never approved",
+        )
+        assert rows[("106", "pypi")] == ("skip", "a different commit")
+        assert rows[("107", "github-pages")] == ("skip", "not a release publisher")
+
+    def test_list_waits_for_the_publishers_then_times_out(self, tmp_path):
+        # Fake clock, 100 per poll, timeout 250: no gated run ever waits.
+        runs = [_run(101, "Publish to PyPI", "publish.yml", "in_progress")]
+        no_post = {"NO_POST": "1"}
+        proc, _ = _approve(
+            tmp_path, *LIST, snaps=[_snap(runs)], clock_step=100, timeout_s=250, extra_env=no_post
+        )
+        assert proc.returncode == 2, _out(proc)
+        assert "never all reached their approval step" in _out(proc)
+        assert not _list_rows(proc)
+        # Ready on the third poll: it waits, then lists.
+        (tmp_path / "b").mkdir()
+        snaps = [_snap(), _snap(runs), _snap(_pubs(), pending=_PUB_PENDING)]
+        proc, _ = _approve(
+            tmp_path / "b", *LIST, snaps=snaps, clock_step=100, timeout_s=1000, extra_env=no_post
+        )
+        assert proc.returncode == 0, _out(proc)
+        assert ("101", "pypi") in _list_rows(proc)
+
+    def test_list_needs_expect_sha_and_never_yes(self, tmp_path):
+        for n, args in enumerate((("--list",), ("--list", "--yes", "--expect-sha", SHA))):
+            case = tmp_path / str(n)
+            case.mkdir()
+            proc, log = _approve(case, *args, extra_env={"NO_POST": "1"})
+            assert proc.returncode == 64, _out(proc)
+            assert not [c for c in log if "POST" in c]
+
+    def test_a_403_on_approve_says_the_token_cannot_approve(self, tmp_path):
+        msg = "gh: Resource not accessible by personal access token (HTTP 403)"
+        proc, _ = _approve(tmp_path, *YES, post_fail=(12, msg))
+        assert proc.returncode == 1, _out(proc)
+        assert "Token can't approve npm-publish" in _out(proc)
+        assert "Deployments: write" in _out(proc) and "required reviewer" in _out(proc)
+        assert "safe to run again" not in _out(proc), (
+            "a refused token fails the same way again; do not say a re-run helps"
+        )
+
+
+def _action_step() -> tuple[str, dict]:
+    """The approve step of the WOR-1167 Action: its run text and its env."""
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "approve-release.yml").read_text()
+    )
+    (step,) = [
+        s
+        for s in workflow["jobs"]["approve"]["steps"]
+        if "scripts/approve-release.sh" in s.get("run", "")
+    ]
+    return step["run"], step["env"]
+
+
+class TestTheActionRunsTheRealScript:
+    """The approve step's real `run:` text drives the REAL approve-release.sh against
+    the fake GitHub above: $TAG, $EXPECTED_SHA and APPROVE_RESUME_HINT reach the
+    script as the workflow hands them over (gate 5 on PR #795)."""
+
+    def _run_step(self, tmp_path, expected_sha: str, **kw):
+        run, step_env = _action_step()
+
+        def put_script(repo: Path) -> None:
+            (repo / "scripts").mkdir()
+            shutil.copy(APPROVE_SCRIPT, repo / "scripts" / "approve-release.sh")
+
+        env = {
+            "TAG": TAG,
+            "EXPECTED_SHA": expected_sha,
+            "REF": "refs/heads/main",
+            "ACTOR": "owner",
+            "OWNER": "owner",
+            "GH_TOKEN": "t",
+            "APPROVE_RESUME_HINT": step_env["APPROVE_RESUME_HINT"],
+        }
+        return _approve(
+            tmp_path,
+            prepare=put_script,
+            cmd=["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", run],
+            extra_env=env,
+            **kw,
+        )
+
+    def test_happy_path_approves_all_four_and_reports_the_release(self, tmp_path):
+        proc, log = self._run_step(tmp_path, SHA)
+        assert proc.returncode == 0, _out(proc)
+        assert sorted(_approvals(log)) == [
+            ("101", "11"),
+            ("102", "12"),
+            ("104", "14"),
+            ("201", "21"),
+        ]
+        assert _approvals(log)[-1] == ("201", "21"), "the release gate comes last"
+        assert f"Release {TAG} is live" in proc.stdout, proc.stdout
+        comments = [a for c in log if "POST" in c for a in c if a.startswith("comment=")]
+        assert comments and all(SHA in c for c in comments), (
+            f"each approval comment must carry the full commit: {comments}"
+        )
+
+    def test_a_commit_mismatch_refuses_without_posting(self, tmp_path):
+        proc, log = self._run_step(tmp_path, OLD_SHA)
+        assert proc.returncode == 1, _out(proc)
+        assert "Refusing" in proc.stdout and OLD_SHA in proc.stdout, proc.stdout
+        assert not [c for c in log if "POST" in c], "a refused commit must approve nothing"

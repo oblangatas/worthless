@@ -14,6 +14,14 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - It reads the answer from the terminal only, so `yes | ./scripts/tag-release.sh` approves nothing.
   - It stops 80 minutes after your `y` (`--timeout-min` changes this) and prints the command to resume.
   - Not yet run against real GitHub; the first real release is the live test, before the Approve release Action (PR #795) merges.
+- **Maintainers: one approval in GitHub releases a tag** (WOR-1167).
+  Before: away from the terminal, the maintainer approved four runs one by one in the GitHub UI.
+  Now: Actions → **Approve release** → enter the tag. A preflight job checks the tag's signature against the pinned maintainer key and checks the `release-approver` environment. It waits until the publishers reach their approval step, then shows the tag's full commit and every waiting run, marked OK or WILL NOT BE APPROVED by `approve-release.sh`'s own rules. After you approve `release-approver`, it runs `scripts/approve-release.sh --yes --expect-sha <commit>` with your token.
+
+  **Limits.**
+  - Never run live. It needs owner setup after merge: the `release-approver` environment and a fine-grained token stored as its secret (RELEASING.md).
+  - The token is a standing credential that can approve every protected environment in the repo until it expires (30 days) or is deleted.
+  - Approving on a phone trusts the preflight summary: GitHub's copy of the tag and the key check on the runner, not a check on your own machine.
 
 ### Known issues
 - **The Docker image ships 2 more OpenSSL flaws that have no fix in Debian yet** ([#809](https://github.com/oblangatas/worthless/pull/809)).

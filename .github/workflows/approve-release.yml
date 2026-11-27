@@ -6,8 +6,9 @@ name: Approve release
 # worthless-sh-production (the publishers), then release (Create GitHub Release).
 # scripts/approve-release.sh (WOR-1165) finds those runs for the tag, approves
 # them in order, and prints the Release URL. With --yes it requires
-# --expect-sha and skips `git verify-tag` (the runner holds no signing key), so
-# the commit the owner checks against preflight's summary is the human check.
+# --expect-sha and skips its own `git verify-tag`; preflight verifies the tag
+# against the pinned maintainer public key instead (verify-tag.sh), and the
+# commit the owner checks against preflight's summary is the human check.
 #
 # GitHub accepts a deployment approval only from a human required reviewer, so
 # GITHUB_TOKEN cannot do it. The approve job uses the owner's fine-grained PAT,
@@ -37,17 +38,43 @@ concurrency:
 jobs:
   preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The summary step waits up to 15 min for the publishers to reach their gates.
+    timeout-minutes: 25
     permissions:
       contents: read
       actions: read
     outputs:
       commit: ${{ steps.summary.outputs.commit }}
     steps:
+      # Every tag: the signature check below and `approve-release.sh --list` both
+      # read the tag from this checkout. fetch-tags alone is ignored at depth 1.
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
+
+      # The same pinned-key check the publishers run (verify-tag.sh; public key and
+      # fingerprint only, from repo Variables — the signing key never enters CI).
+      # verify-tag.sh binds the tag to the checked-out HEAD, and this job checks out
+      # main on purpose (its scripts must be main's), so it runs inside a detached
+      # worktree of the tag. Only main's verify-tag.sh runs; the tag's files are
+      # checked out there, never executed. No VERIFY_TAG_HEAD_BINDING waiver.
+      - name: Verify the tag against the pinned maintainer key
+        env:
+          VERIFY_TAG_REF: ${{ inputs.tag }}
+          MAINTAINER_PUBKEY: ${{ vars.MAINTAINER_GPG_PUBKEY }}
+          MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}
+        run: |
+          if ! [[ "$VERIFY_TAG_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must look like v1.2.3"
+            exit 1
+          fi
+          tag_tree="$RUNNER_TEMP/approve-release-tag"
+          git -c core.hooksPath=/dev/null worktree add --detach "$tag_tree" "refs/tags/$VERIFY_TAG_REF"
+          cd "$tag_tree"
+          bash "$GITHUB_WORKSPACE/.github/scripts/verify-tag.sh"
 
       - name: Show what will be approved
         id: summary
@@ -141,11 +168,13 @@ jobs:
             echo "::error::scripts/approve-release.sh is missing from this checkout of main."
             exit 1
           fi
-          # One read with the PAT first, so an expired or under-scoped token fails
-          # here with a clear message. /deployments needs Deployments: read; this
-          # cannot prove write, which only an approval can.
+          # One read with the PAT first, so an expired or revoked token fails here
+          # with a clear message. On a public repo any valid token can read
+          # /deployments, so this proves only that the token is alive; a token
+          # without Deployments: write fails at the first approval instead, where
+          # the script names it.
           if ! gh api "repos/$GH_REPO/deployments?per_page=1" -X GET --silent; then
-            echo "::error::RELEASE_APPROVER_TOKEN is expired or lacks Deployments: write — rotate it (RELEASING.md). Nothing approved."
+            echo "::error::RELEASE_APPROVER_TOKEN is expired or revoked — rotate it (RELEASING.md). Nothing approved."
             exit 1
           fi
           bash scripts/approve-release.sh "$TAG" --yes --timeout-min 80 --expect-sha "$EXPECTED_SHA"

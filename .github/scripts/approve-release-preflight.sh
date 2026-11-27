@@ -2,35 +2,26 @@
 # Preflight for approve-release.yml (WOR-1167). Runs with the job's own
 # GITHUB_TOKEN, before the owner is asked to approve `release-approver`.
 #
-# It shows the owner what the PAT is about to approve: the tag's commit and
-# every run waiting on an environment, each marked OK or WILL NOT BE APPROVED.
-# The owner reads this summary, then taps Approve. It reads only; it approves
-# nothing. Pinned by TestApproveReleaseWiring in tests/test_deploy_static.py.
+# It shows the owner what the PAT is about to approve: the tag's full commit,
+# GitHub's check of the tag signature, and every run waiting on an environment,
+# each marked OK or WILL NOT BE APPROVED. The owner reads this summary, then taps
+# Approve. It reads only; it approves nothing. The tag's signature is verified
+# against the pinned maintainer key by a separate step of the same job, before
+# this one. Pinned by TestApproveReleaseWiring in tests/test_deploy_static.py.
 #
 # Inputs (env): TAG, GH_REPO, GH_TOKEN, REF, ACTOR, OWNER. Writes the summary
 # to $GITHUB_STEP_SUMMARY and `commit=<sha>` to $GITHUB_OUTPUT.
 #
-# The verdicts use scripts/approve-release.sh's own rules:
-#   - a publisher run is a `push` on the tag's branch, at the tag's commit,
-#     waiting only on the ONE environment its workflow owns (GATE_MAP below,
-#     a copy of the script's; a test keeps them equal);
-#   - the release run is release-notes.yml's `workflow_run` with the exact
-#     "<prefix> <tag> <commit>" title, waiting only on `release`;
-#   - anything else is never approved.
+# The verdicts are NOT decided here: `scripts/approve-release.sh --list` runs the
+# approve path's own selection and prints them. It also waits (up to
+# PREFLIGHT_WAIT_MIN) until the three gated publishers reach their approval step,
+# so the approve job's 80 minutes start with the gates present.
 #
 # What it does NOT do: it is a snapshot. The Create GitHub Release run only
-# appears after the publishers finish, so it is usually not listed yet. The
-# script, not this summary, decides what is approved.
+# appears after the publishers finish, so it is usually not listed yet.
 set -euo pipefail
 
-# release-notes.yml titles its runs "<prefix> <tag> <sha>" (its run-name).
-readonly RELEASE_RUN_TITLE_PREFIX="Create GitHub Release"
-readonly RELEASE_WORKFLOW="release-notes.yml"
-readonly RELEASE_ENV="release"
-# workflow file | workflow name | the one environment it may be approved for.
-readonly GATE_MAP="publish.yml|Publish to PyPI|pypi
-publish-npm.yml|Publish worthless-mcp to npm|npm-publish
-deploy-worker.yml|Deploy Worker (worthless-sh)|worthless-sh-production"
+readonly PREFLIGHT_WAIT_MIN=15
 
 : "${TAG:?TAG is required}" "${GH_REPO:?GH_REPO is required}"
 summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
@@ -56,17 +47,6 @@ if [ ! -f scripts/approve-release.sh ]; then
   echo "::error::scripts/approve-release.sh is missing from this checkout of main."
   exit 1
 fi
-
-gate_env() {
-  local f n e
-  while IFS='|' read -r f n e; do
-    if [ "$f" = "$1" ] && [ "$n" = "$2" ]; then
-      echo "$e"
-      return 0
-    fi
-  done <<<"$GATE_MAP"
-  return 1
-}
 
 notes=""
 
@@ -98,7 +78,8 @@ check_approver_env
 
 # Resolve the tag to its commit. An annotated tag points at a tag object, which
 # points at the commit; peel until we reach it (bounded, in case of a loop).
-# The first tag object carries GitHub's signature check; it is shown, not enforced.
+# The first tag object carries GitHub's signature check; it is shown, not enforced
+# (the pinned-key check in the step before this is the gate).
 ref=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG")
 type=$(jq -r .object.type <<<"$ref")
 sha=$(jq -r .object.sha <<<"$ref")
@@ -118,7 +99,28 @@ if [ "$type" != commit ] || ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
   echo "::error::$TAG does not resolve to a commit"
   exit 1
 fi
+
+# The approve path's own verdicts. Exit codes are approve-release.sh's.
+rc=0
+list_out=$(bash scripts/approve-release.sh "$TAG" --list --expect-sha "$sha" \
+  --timeout-min "$PREFLIGHT_WAIT_MIN" 2>&1) || rc=$?
+if [ "$rc" -ne 0 ]; then
+  printf '%s\n' "$list_out"
+  case "$rc" in
+    2) echo "::error::the publisher runs for $TAG did not all reach their approval step within ${PREFLIGHT_WAIT_MIN} min. Run Approve release again once they are waiting." ;;
+    4) echo "::error::a GitHub call failed while listing what is waiting. Run Approve release again." ;;
+    *) echo "::error::approve-release.sh --list stopped (exit $rc); nothing will be approved. See the lines above." ;;
+  esac
+  exit 1
+fi
 echo "commit=$sha" >>"$output"
+
+# Markdown table cell: escape backslashes first, then pipes, so a name ending in
+# `\` cannot turn the next `|` back into a column break.
+md() {
+  local s=${1//\\/\\\\}
+  printf '%s' "${s//|/\\|}"
+}
 
 {
   echo "## Approve release $TAG"
@@ -130,7 +132,7 @@ echo "commit=$sha" >>"$output"
   if [ "$sig" = verified ]; then
     echo "Tag signature: verified by GitHub (\`$sig_reason\`)."
   else
-    echo "**WARNING: GitHub does not verify this tag's signature** (\`$sig_reason\`). Approve only if you checked the tag on your own machine."
+    echo "**WARNING: GitHub does not verify this tag's signature** (\`$sig_reason\`). The pinned-key check passed, so check the key on your own machine before you approve."
   fi
   echo
   printf '%s' "$notes"
@@ -138,59 +140,17 @@ echo "commit=$sha" >>"$output"
   echo "| --- | --- | --- | --- | --- |"
 } >>"$summary"
 
-# \x1f, not tab: read collapses consecutive whitespace separators, so an empty
-# field (a null head_branch) would shift every field after it. Control
-# characters are stripped first: they could forge a separator or a line.
-runs=$(gh api --paginate "repos/$GH_REPO/actions/runs?status=waiting&per_page=100" \
-  --jq '.workflow_runs[] | [.id, .name, (.path // "" | split("/") | last), .event,
-        .head_branch, .head_sha, .display_title, .html_url]
-        | map(. // "" | tostring | gsub("[[:cntrl:]]"; "")) | join("\u001f")')
-
-# approve-release.sh approves only the NEWEST push run per publisher workflow at
-# the tag's commit, from every run on the tag (any status). Same list here.
-tag_runs=$(gh api --paginate "repos/$GH_REPO/actions/runs?branch=$TAG&per_page=100" \
-  --jq '.workflow_runs[] | select(.event == "push")
-        | [(.path // "" | split("/") | last), .head_sha, .id] | map(tostring) | join(" ")')
-newest_of() {
-  awk -v w="$1" -v s="$sha" '$1 == w && $2 == s && $3 + 0 > m { m = $3 + 0 } END { print m + 0 }' \
-    <<<"$tag_runs"
-}
-
 n=0
-while IFS=$'\x1f' read -r id name wf event branch head title url; do
-  [ -n "$id" ] || continue
-  envs=$(gh api "repos/$GH_REPO/actions/runs/$id/pending_deployments" \
-    --jq '[.[].environment.name] | join(", ") | gsub("[[:cntrl:]]"; "")')
-  why=""
-  expected=""
-  if [ "$event" = push ]; then
-    expected=$(gate_env "$wf" "$name") || why="not a release publisher"
-    [ -n "$why" ] || [ "$branch" = "$TAG" ] || why="not this tag's push"
-    [ -n "$why" ] || [ "$head" = "$sha" ] || why="a different commit"
-    [ -n "$why" ] || [ "$id" = "$(newest_of "$wf")" ] || why="older run, will not be approved"
-  elif [ "$event" = workflow_run ] && [ "$wf" = "$RELEASE_WORKFLOW" ]; then
-    expected=$RELEASE_ENV
-    [ "$title" = "$RELEASE_RUN_TITLE_PREFIX $TAG $sha" ] || why="a release run for another tag"
+while IFS=$'\x1f' read -r kind verdict env name url event head why; do
+  [ "$kind" = row ] || continue
+  if [ "$verdict" = ok ]; then
+    v="OK"
   else
-    why="a $event run is never approved"
+    v="**WILL NOT BE APPROVED** ($(md "$why"))"
   fi
-  if [ -z "$why" ]; then
-    [ -n "$envs" ] || why="nothing pending"
-    while read -r e; do
-      [ -z "$e" ] || [ "$e" = "$expected" ] || why="waits on $e, not $expected"
-    done < <(printf '%s\n' "$envs" | tr ',' '\n' | tr -d ' ')
-  fi
-  if [ -z "$why" ]; then
-    verdict="OK"
-  else
-    verdict="**WILL NOT BE APPROVED** ($why)"
-  fi
-  # A `|` in a name would start a new table cell; escape it for Markdown.
-  name_md=${name//|/\\|}
-  envs_md=${envs//|/\\|}
-  echo "| [$name_md]($url) | $event | \`${head:0:12}\` | $envs_md | $verdict |" >>"$summary"
+  echo "| [$(md "$name")]($url) | $(md "$event") | \`$head\` | $(md "$env") | $v |" >>"$summary"
   n=$((n + 1))
-done <<<"$runs"
+done <<<"$list_out"
 
 if [ "$n" -eq 0 ]; then
   echo "No run is waiting for approval yet. The approver waits for them." >>"$summary"

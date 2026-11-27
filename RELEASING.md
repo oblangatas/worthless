@@ -117,8 +117,9 @@ The **Approve release** workflow (`.github/workflows/approve-release.yml`, WOR-1
 and 4 for you. It runs the same `scripts/approve-release.sh` as step 3, as
 `scripts/approve-release.sh <tag> --yes --expect-sha <commit>`: no prompt, and it refuses unless
 the tag is at the commit preflight showed you. It approves the three publishers, waits for
-**Create GitHub Release**, approves it, and prints the Release URL. Unlike step 3, it does not run
-`git verify-tag`: the runner has no signing key. Your commit check below replaces it.
+**Create GitHub Release**, approves it, and prints the Release URL. Instead of step 3's local
+`git verify-tag`, preflight checks the tag's signature on the runner against the pinned maintainer
+key (below).
 
 **Use it:**
 
@@ -127,37 +128,46 @@ the tag is at the commit preflight showed you. It approves the three publishers,
    skipped before any approval is requested: the preflight job goes red with the reason, and the
    approve job never asks for the `release-approver` approval. The step that holds the token checks
    both again, as defence in depth.
-2. The **preflight** job runs first, with the job's own token. It fails if `release-approver` has
-   no required reviewer or deploys from anything but `main` (if it cannot read those settings, it
-   says so and goes on). Its summary on the run page shows:
+2. The **preflight** job runs first, with the job's own token. It fails red if:
+   - the tag is not validly signed by the pinned maintainer key. It runs the publishers' own
+     `.github/scripts/verify-tag.sh` with the public key and fingerprint from the repo Variables;
+     the signing key never enters CI;
+   - `release-approver` has no required reviewer or deploys from anything but `main` (if it cannot
+     read those settings, it says so and goes on);
+   - the three gated publishers have not all reached their approval step within 15 minutes.
+   Then its summary on the run page shows:
    - the tag's full 40-character commit;
-   - GitHub's check of the tag's signature, with a **WARNING** row if GitHub does not verify it
-     (shown only; it does not stop the run);
-   - every run waiting for approval, marked OK or **WILL NOT BE APPROVED** by the script's own
-     rules: a publisher counts only as the newest push of your tag at its commit, waiting on the
-     one environment its workflow owns (see the table in step 3); the Release run counts only by
-     its exact `Create GitHub Release <tag> <commit>` title. A manual dispatch, another commit,
-     another branch, an older duplicate run or another tag's Release run is never approved.
+   - GitHub's own check of the tag's signature (display only; the pinned-key check above is the
+     gate);
+   - every run waiting for approval, marked OK or **WILL NOT BE APPROVED** with the reason. The
+     verdicts come from `scripts/approve-release.sh --list`, which runs the approve path's own
+     selection and approves nothing: only the newest push of your tag at its commit, waiting on
+     the one environment its workflow owns (see the table in step 3), and the Release run by its
+     exact `Create GitHub Release <tag> <commit>` title.
 3. Compare the full 40-character commit with `git rev-parse v<version>^{commit}` on your machine,
    all 40 characters. Only if it matches, approve the `release-approver` environment.
 
    **On a phone you usually cannot do that comparison.** Then what you are trusting is the
-   preflight summary and its signature row: GitHub's copy of the tag, and GitHub's check of its
-   signature. That is weaker than step 3 at your machine; see
+   preflight summary: GitHub's copy of the tag, the pinned-key check on the runner, and GitHub's
+   signature row. That is weaker than step 3 at your machine; see
    [What this does NOT protect against](#what-this-does-not-protect-against).
 
-Before the script runs, the approve step makes one read with the token, so an expired or
-under-scoped token fails with "RELEASE_APPROVER_TOKEN is expired or lacks Deployments: write"
-instead of mid-way. That read cannot prove write access; only an approval can.
+Before the script runs, the approve step makes one read with the token, so an expired or revoked
+token fails with "RELEASE_APPROVER_TOKEN is expired or revoked" instead of mid-way. On a public
+repository any valid token can make that read, so it proves only that the token is alive. A token
+without **Deployments: write**, or an owner who is not a required reviewer, fails at the first
+approval: the script says the token can't approve and exits 1.
 
 The run fails with the script's exit codes from step 3: 1 a run failed, the commit is wrong, or an
 approval cannot be given; 2 not finished in 80 minutes; 4 a GitHub call failed after retries;
-64 the tag is not in the checkout. On 1, 2 and 4 the log says how to resume: **Actions → Approve
-release → Re-run failed jobs**, which asks for another `release-approver` approval. With `--yes`
-the 80 minutes count from the start of the script (on a terminal they count from your `y`), so
-the script always ends before the step's 85-minute limit. 80 minutes is the script's own default:
-the slowest publisher (the Docker image's job chain, 45 minutes) plus the Release job chain
-(20 minutes) plus margin. Tests re-read both workflows.
+64 the tag is not in the checkout. On 2 and 4, and on 1 when a run failed, the log says how to
+resume: **Actions → Approve release → Re-run failed jobs**, which asks for another
+`release-approver` approval. With `--yes` the 80 minutes count from the start of the script (on a
+terminal they count from your `y`), so the script is set to end (80 min) before the step's
+85-minute limit. Preflight's wait for the publishers is separate, so the 80 minutes start with the
+gates present. 80 minutes is the script's own default: the slowest publisher (the Docker image's
+job chain, 45 minutes) plus the Release job chain (20 minutes) plus margin. Tests re-read both
+workflows.
 The summary is a snapshot: the Create GitHub Release run usually appears only after you approve.
 
 ### Owner setup (once, by hand)
@@ -212,11 +222,12 @@ cannot approve. The job uses the owner's personal access token instead.
 - **Deployments: write does more than approve.** The token can also create and delete deployment
   records and statuses in this repository. No workflow here triggers on those events, so this is
   record tampering, not code execution.
-- **A wrong commit, or an unsigned tag.** The preflight summary and the script check each run's
-  commit against the tag. They cannot tell whether the tag points at the commit you meant, and in
-  this workflow nothing verifies the tag's signature (`--yes --expect-sha` skips `git verify-tag`).
-  Both come from GitHub's copy of the tag, which anyone with push access can move. Comparing the
-  commit with your own signed tag on your machine, before approving, is the only check.
+- **A wrong commit that you signed.** Preflight checks that the tag is signed by the pinned
+  maintainer key, and the script checks each run's commit against the tag. Neither can tell
+  whether the tag points at the commit you meant: a validly signed older or mistaken tag passes.
+  The key check trusts the repo Variables that hold the public key and fingerprint; anyone who can
+  change both can make another key pass (see "What a signed tag does NOT stop"). Comparing the
+  commit with your own tag on your machine, before approving, is the check that catches both.
 - **This workflow does not hold the signing key.** Tagging stays on the maintainer's machine, so
   this workflow cannot create a release by itself. Someone still has to push a signed tag.
 
