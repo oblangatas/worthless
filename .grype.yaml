@@ -26,63 +26,14 @@
 # a Monday rather than at a release tag. Re-MEASURE per-arch before extending.
 
 ignore:
-  - vulnerability: CVE-2026-85091
-    package:
-      name: zlib1g
-      type: deb
-    # High, fix=not-fixed. Debian's tracker lists zlib as vulnerable in
-    # bookworm, trixie AND forky/sid — "(unstable) (unfixed)", Debian bug
-    # 1146895. There is nowhere to upgrade to, so this survives the Debian 13
-    # move (worthless-tw1g) rather than being solved by it.
-    #
-    # The flaw is a heap overflow in gz_vacate(), reachable only by calling
-    # gzprintf()/gzvprintf() after a non-blocking gzwrite() stall. That is
-    # zlib's gzip FILE api — NOT the deflate/inflate stream api that HTTP
-    # content-encoding uses, which is what a proxy actually exercises.
-    #
-    # MEASURED 2026-09-08 inside the built trixie image, not inferred:
-    #   - swept every executable and shared object: 951 files scanned,
-    #     0 referencing `gzprintf` or `gzvprintf`
-    #   - CPython's zlib module exposes no gz* API at all (compress/
-    #     decompress/compressobj/decompressobj only); Python's gzip module
-    #     is built on decompressobj, never zlib's gz file api
-    #   - zlib runtime 1.3.1
-    # So the vulnerable entry points are not reachable from anything shipped
-    # in this image.
-    #
-    # LIMIT: measured on arm64 (Apple Silicon build). The weekly arm64/amd64
-    # scans are what would surface divergence. Re-measure before extending.
-    reason: "zlib gz_vacate() overflow reachable only via gzprintf/gzvprintf; 951 binaries in the image reference neither, and CPython's zlib exposes no gz* API. Unfixed in every Debian release including sid (bug 1146895). Tracking worthless-tw1g."
-    expiry: "2026-12-08"
-
-  - vulnerability: CVE-2026-76844
-    package:
-      name: zlib1g
-      type: deb
-    # High, fix=not-fixed. Same zlib gzFile-API class as CVE-2026-85091 above.
-    # Hidden on main until 2026-11-06: the fixed-only gate failed first, so
-    # the "Unmapped High/Critical findings" step never ran (WOR-1109).
-    #
-    # The flaw: gz_write() returns after a failed write() without resetting
-    # strm.next_in, and a later gz* write overflows the heap. That is zlib's
-    # gzip FILE api (gzopen/gzdopen/gzwrite), not the deflate/inflate stream
-    # api that HTTP content-encoding and CPython's zlib module use.
-    #
-    # MEASURED 2026-11-06 inside main's image (4b4da0cf, amd64), every ELF
-    # under /usr /lib /bin /sbin /opt /app /home searched for gzwrite, gzopen,
-    # gzdopen, gzprintf, gzputs:
-    #   - libz itself, dpkg-deb and libapt-pkg reference them; nothing else
-    #   - CPython's zlib.cpython-313 module references none
-    #   - zlib1g 1:1.3.dfsg+really1.3.1-1+b1
-    # Unlike CVE-2026-85091, the calls ARE present, in the package manager.
-    # Nothing runs dpkg or apt at runtime: /entrypoint.sh doesn't, and
-    # src/worthless never invokes either. A `docker exec` user who runs dpkg
-    # by hand already has a shell in the container.
-    #
-    # Re-measure at expiry with the same sweep; delete when Debian ships a
-    # fixed zlib1g, or the day anything at runtime calls dpkg or apt.
-    reason: "zlib gz_write() overflow reachable only via the gzFile API. Measured 2026-11-06 in the image: only libz, dpkg-deb and libapt-pkg reference it; CPython's zlib module does not, and nothing runs dpkg/apt at runtime. Debian fix=not-fixed. Tracking WOR-1109."
-    expiry: "2026-12-08"  # same re-measure date as CVE-2026-85091; do not blind-extend.
+  # CVE-2026-85091 and CVE-2026-76844 (zlib gzFile API): waivers REMOVED
+  # 2026-11-26 (worthless-kpkkm). Measured that day with grype 0.114.0, DB built 2026-11-26 06:22 UTC, ignore-free config, on an arm64 image
+  # built locally 2026-11-26 from 93b602c4 (v0.3.18) and on ghcr worthless-proxy:0.3.18 amd64:
+  # neither CVE matches any package. The image's apt-get upgrade now installs
+  # zlib1g 1:1.3.dfsg+really1.3.1-1+deb13u1, and grype's Debian 13 record for
+  # CVE-2026-85091 is "< 1:1.3.dfsg+really1.3.1-1+deb13u1", so it is fixed. For
+  # CVE-2026-76844, today's database has no Debian record at all. Both
+  # would have failed the expiry gate on 2026-12-08 while silencing nothing.
 
   - vulnerability: CVE-2026-15308
     package:
@@ -108,69 +59,16 @@ ignore:
     # Linear: WOR-691 — bump the Docker base image when a stable 3.13.x or
     # 3.14.x backport ships, then DELETE this entry rather than extending it.
     reason: "Upstream fix only in Python 3.15.0 (pre-release). Re-measured 2026-08-02 across 3.13/3.14 slim bookworm+trixie: all still affected. Tracking WOR-691."
-    expiry: "2027-01-31"  # extended on a fresh measurement, not blind. Re-measure before extending again.
+    expiry: "2027-01-27"  # extended on a fresh measurement, not blind. Re-measure before extending again.
 
-  # ── CPython, base-image only (worthless-kzfq) ───────────────────────
-  # Both arrived with the grype DB refresh of 2026-09-10 and turned every open
-  # PR red without a line of code changing — the same failure mode as the sharp
-  # advisory this branch also fixes. Unlike that one, here the fix really is
-  # unreachable, and this is the measurement rather than the assumption.
-  #
-  # MEASURED 2026-09-10 (grype 0.114.0), bases pulled fresh from the registry:
-  #
-  #   python:3.13-slim-trixie  3.13.15  BOTH present   <- the base this image uses
-  #   python:3.14-slim-trixie  3.14.7   BOTH present   <- a full minor ahead
-  #
-  # Grype's only fixed version for both is 3.15.0rc2 — a RELEASE CANDIDATE.
-  # Shipping an RC interpreter to users is the worse trade, the same call the
-  # CVE-2026-15308 entry above already made and re-measured.
-  #
-  # NOT parked on the bulk 2027-01-31 date that 21 other entries share. That
-  # clustering is how dated waivers quietly become permanent; these two get
-  # their own date so they are re-argued on their own evidence.
-  #
-  # To close: when CPython backports to a stable 3.13.x or 3.14.x, bump the
-  # base and DELETE these entries rather than extending them.
-  - vulnerability: CVE-2026-17084
-    package:
-      name: python
-      type: binary
-    reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
-    expiry: "2026-12-08"
-
-  # ── tempfile.TemporaryDirectory cleanup race (worthless-11ix) ───────
-  # A race in TemporaryDirectory's cleanup: an attacker who can modify the
-  # tree mid-cleanup swaps a directory for a symlink, so files OUTSIDE the
-  # temp dir get deleted, or their permissions and flags reset.
-  #
-  # Grype lists the fix as 3.15.0. 3.15 has been stable since 2026-10-09,
-  # but the image can't leave 3.13 yet (see the CVE-2026-82049 note below),
-  # and the advisory records no 3.13 backport, so there is nowhere to
-  # upgrade — the base image already runs 3.13.18 (repinned 2026-10-30), the
-  # newest 3.13 there is.
-  #
-  # MEASURED 2026-10-05 against the built image, not asserted:
-  #   1. `tempfile.TemporaryDirectory` — the vulnerable class — appears
-  #      ZERO times in src/. Worthless uses mkdtemp and mkstemp, which have
-  #      no auto-cleanup and so never reach the racing finalizer.
-  #   2. We do call shutil.rmtree on mkdtemp dirs (openclaw/skill.py,
-  #      cli/sidecar_lifecycle.py), which is the same underlying path the
-  #      advisory names. In this image that path is the SAFE one:
-  #      shutil.rmtree.avoids_symlink_attacks is True on Linux 3.13.16 and
-  #      3.13.18 (re-read 2026-10-30), read from inside the container. The
-  #      advisory's own caveat applies only where that flag is False.
-  #   3. The residual on all platforms is file-flag reset, a BSD/macOS
-  #      chflags concern that does not exist on this Linux image.
-  #
-  # The attacker also needs concurrent write access inside the container's
-  # temp tree — they are already executing there.
-  #
-  # To close: drop this when CPython backports to 3.13.x, or when 3.15 is
-  # stable and worthless-jsx6 moves the base image.
-  - vulnerability: CVE-2026-12345
-    package: {name: python, type: binary}
-    reason: "Race in tempfile.TemporaryDirectory cleanup: a directory swapped for a symlink mid-cleanup deletes or re-permissions files outside the temp tree. Fix listed as 3.15.0; the image can't leave 3.13 yet (worthless-epnw), and no 3.13 backport exists — the image already runs 3.13.18 (repinned 2026-10-30), the newest 3.13. Measured 2026-10-05 on the built image: TemporaryDirectory appears zero times in src/ (worthless uses mkdtemp/mkstemp, which have no auto-cleanup finalizer), and where we do call shutil.rmtree on those dirs, shutil.rmtree.avoids_symlink_attacks reads True inside the container, which is the condition the advisory says removes the deletion attack. Remaining file-flag reset is a BSD/macOS chflags concern, absent on Linux. Tracking worthless-11ix."
-    expiry: "2026-12-31"
+  # CVE-2026-17084, CVE-2026-15806 (worthless-kzfq) and CVE-2026-12345
+  # (tempfile.TemporaryDirectory cleanup race, worthless-11ix): waivers
+  # REMOVED 2026-11-26 (worthless-kpkkm). Measured that day with grype 0.114.0, DB built 2026-11-26 06:22 UTC, ignore-free config, on an arm64 image
+  # built locally 2026-11-26 from 93b602c4 (v0.3.18) and on ghcr worthless-proxy:0.3.18 amd64:
+  # none of the three matches anything. The image runs python 3.13.18. Today's
+  # NVD ranges stop below it: "< 3.13.16" for 17084 and 15806, "< 3.13.18" for
+  # 12345. All three would have failed the expiry gate in December (12-08,
+  # 12-08, 12-31) while silencing nothing.
 
   # ── libstdc++ erase_if, nothing here links it (worthless-11ix) ──────
   # A use-after-free in libstdc++: erase_if on a binary heap priority queue
@@ -229,7 +127,7 @@ ignore:
       type: deb
       version: 14.2.0-19
     reason: "Use-after-free in libstdc++ erase_if on a binary heap priority queue; hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05), so there is nowhere to upgrade. Measured 2026-10-05 on the built image: 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. Base-image gcc runtime only; no Worthless code path reaches a C++ priority queue. Tracking worthless-11ix. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version: the rule at 14.2.0-19 suppressed 3 of 3 matches, at 99.9.9-99 it suppressed 0 of 3. Both gates honour the version: grype by its own matching, and check_grype_unmapped_findings because `version` is carried into the scope and compared there too — without that the pin bound nothing on the gate that actually blocks, since the grype step runs only-fixed and never sees a not-fixed finding. Residual breadth: this still covers any Debian package at exactly 14.2.0-19, which today is only the three gcc-14 binaries reported, but would silently cover a future gcc-14-sourced addition."
-    expiry: "2027-01-31"
+    expiry: "2027-01-27"
 
   # Second advisory, same libstdc++, same measurement. An integer overflow in
   # the aligned `operator new`: a large enough request wraps and under-allocates,
@@ -248,7 +146,7 @@ ignore:
       type: deb
       version: 14.2.0-19
     reason: "Integer overflow in libstdc++'s aligned operator new: a large request wraps to an undersized allocation, so the caller writes past the block. Hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05). Re-measured 2026-10-05 inside the repinned image (Python 3.13.16) and again 2026-10-30 on Python 3.13.18 (amd64 and arm64): 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. operator new is the C++ allocation operator and no Worthless code is C++; the gcc runtime is present only because the base image ships it. Tracking worthless-11ix. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version: the rule at 14.2.0-19 suppressed 3 of 3 matches, at 99.9.9-99 it suppressed 0 of 3. Both gates honour the version: grype by its own matching, and check_grype_unmapped_findings because `version` is carried into the scope and compared there too — without that the pin bound nothing on the gate that actually blocks, since the grype step runs only-fixed and never sees a not-fixed finding. Residual breadth: this still covers any Debian package at exactly 14.2.0-19, which today is only the three gcc-14 binaries reported, but would silently cover a future gcc-14-sourced addition."
-    expiry: "2027-01-31"
+    expiry: "2027-01-27"
 
   # CVE-2026-82049 (CPython tarfile extraction filters) was suppressed here
   # and is now DELETED rather than extended. Repinning the base image to
@@ -267,13 +165,6 @@ ignore:
   # surface reports clean with no caveat (worthless-epnw), and the
   # Dockerfile copies the python3.13 site-packages path by name.
 
-
-  - vulnerability: CVE-2026-15806
-    package:
-      name: python
-      type: binary
-    reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
-    expiry: "2026-12-08"
 
   # socket.getaddrinfo() truncates a host or port at a null byte, which can
   # slip an attacker-chosen address past an allowlist. Turned main's required
@@ -307,9 +198,16 @@ ignore:
       name: python
       version: 3.13.18
       type: binary
-    reason: "getaddrinfo() null-byte truncation in CPython. Measured 2026-11-06: image python 3.13.18 affected; 3.13 backport GH-160974 still open (3.14/3.15 backports merged 2026-11-06); NVD's '< 3.16.0' range will match even a fixed 3.13.x. Unreachable: httpx refuses a NUL in host/port before lookup, and host/port come only from the stored or registered base_url (tests/test_upstream_host_reachability.py, test_proxy.py). Tracking WOR-1108."
-    expiry: "2026-12-08"  # re-measure; see RETIRING above. Do not blind-extend.
+    reason: "getaddrinfo() null-byte truncation in CPython. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still Medium, fixed only in 3.16.0, matched on python 3.13.18 in a fresh arm64 build of v0.3.18 and in ghcr worthless-proxy:0.3.18 amd64. python:3.13-slim-trixie pulled 2026-11-26 (digest 7249d558) is still 3.13.18, so there is no newer 3.13 base. The 3.13 backport GH-160974 is still OPEN (read 2026-11-26). NVD's '< 3.16.0' range will match even a fixed 3.13.x. Unreachable: httpx refuses a NUL in host/port before lookup, and host/port come only from the stored or registered base_url; tests/test_upstream_host_reachability.py and test_proxy.py's host-steering test pass on 2026-11-26. Tracking WOR-1108."
+    expiry: "2027-01-12"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
 
+  # RE-MEASURED 2026-11-26 (worthless-kpkkm), for this block and
+  # CVE-2026-116566 above: grype 0.114.0 (DB built 2026-11-26) still matches all
+  # four on python 3.13.18, Medium, fixed only in 3.16.0, both on a fresh arm64
+  # build of v0.3.18 and on ghcr 0.3.18 amd64. python:3.13-slim-trixie pulled
+  # that day is still 3.13.18. Expiries are staggered two per date, 2027-01-12
+  # and 2027-01-19.
+  #
   # ── CPython 3.13.18, grype database of 2026-11-18 (WOR-1157) ───────────
   # Three Mediums arrived with that database and fail the fixable-only gate
   # (--fail-on medium) on every PR. Same shape as CVE-2026-116566 above:
@@ -347,64 +245,34 @@ ignore:
       name: python
       version: 3.13.18
       type: binary
-    reason: "http.cookiejar lets an expired Set-Cookie delete another domain's stored cookie. Runs in the proxy's shared httpx client, but only a configured upstream can send the response, it already receives the real key, and Worthless never authenticates by cookie, so the deletion gains it nothing. Measured 2026-11-18: image python 3.13.18 is the newest 3.13; NVD's '< 3.16.0' matches every 3.13.x. Added in WOR-1157; re-check owned by WOR-1098."
-    expiry: "2026-12-15"
+    reason: "http.cookiejar lets an expired Set-Cookie delete another domain's stored cookie. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still Medium, fixed only in 3.16.0, matched on python 3.13.18 in a fresh arm64 build of v0.3.18 and in ghcr worthless-proxy:0.3.18 amd64. python:3.13-slim-trixie pulled 2026-11-26 (digest 7249d558) is still 3.13.18, so there is no newer 3.13 base. It runs in the proxy's shared httpx client (httpx 0.28.1 in the image, 2026-11-26), but only a configured upstream can send the response, and that upstream already receives the real key. src/worthless has zero cookie references (grep 2026-11-26), and Worthless authenticates to providers by header, so the deletion gains the upstream nothing. Added in WOR-1157; re-check owned by WOR-1098."
+    expiry: "2027-01-12"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-115559
     package:
       name: python
       version: 3.13.18
       type: binary
-    reason: "imaplib STARTTLS keeps plaintext read-ahead bytes after the handshake. Measured 2026-11-18: no module in src, deploy or the image's site-packages imports imaplib. Image python 3.13.18 is the newest 3.13; NVD's '< 3.16.0' matches every 3.13.x. Added in WOR-1157; re-check owned by WOR-1098."
-    expiry: "2026-12-15"
+    reason: "imaplib STARTTLS keeps plaintext read-ahead bytes after the handshake. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still Medium, fixed only in 3.16.0, matched on python 3.13.18 in a fresh arm64 build of v0.3.18 and in ghcr worthless-proxy:0.3.18 amd64. python:3.13-slim-trixie pulled 2026-11-26 (digest 7249d558) is still 3.13.18, so there is no newer 3.13 base. Nothing imports imaplib: zero hits in src, deploy, or the image's site-packages (grep 2026-11-26). Added in WOR-1157; re-check owned by WOR-1098."
+    expiry: "2027-01-19"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-115791
     package:
       name: python
       version: 3.13.18
       type: binary
-    reason: "The tarfile/zipfile/gzip command-line tools can extract a module that shadows the stdlib and then run it. Measured 2026-11-18: nothing in src, deploy, the Dockerfile, entrypoint.sh or site-packages runs those tools, and running one needs a shell in the container. Image python 3.13.18 is the newest 3.13; NVD's '< 3.16.0' matches every 3.13.x. Added in WOR-1157; re-check owned by WOR-1098."
-    expiry: "2026-12-15"
+    reason: "The tarfile/zipfile/gzip command-line tools can extract a module that shadows the stdlib and then run it. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still Medium, fixed only in 3.16.0, matched on python 3.13.18 in a fresh arm64 build of v0.3.18 and in ghcr worthless-proxy:0.3.18 amd64. python:3.13-slim-trixie pulled 2026-11-26 (digest 7249d558) is still 3.13.18, so there is no newer 3.13 base. Nothing in src, deploy, the Dockerfile, entrypoint.sh or the image's site-packages runs `-m tarfile|zipfile|gzip` (grep 2026-11-26), and running one needs a shell in the container. Added in WOR-1157; re-check owned by WOR-1098."
+    expiry: "2027-01-19"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
 
-  # ── perl's POD formatter, base-image only (WOR-934) ─────────────────
-  # Arrived with the grype DB refresh of 2026-09-2x and turned main red. It is
-  # fix=not-fixed, so `only-fixed: true` drops it and the fixed-only gate never
-  # sees it — check_grype_unmapped_findings.py is what caught it, which is the
-  # job that hook exists to do.
-  #
-  # The flaw (MEASURED from grype's own record, 2026-09-27): Pod::Text before
-  # 6.1.1 exhausts CPU and memory formatting a POD document whose `=over`
-  # nesting drives the margin to the output width — the line-splitting
-  # substitution then matches the empty string and the loop never consumes
-  # input. Reaching it requires FORMATTING AN ATTACKER-SUPPLIED POD DOCUMENT.
-  #
-  # Reachability, MEASURED IN THE BUILT IMAGE 2026-09-27 — and the honest
-  # answer is stronger than "we don't call it". The vulnerable module is NOT
-  # PRESENT:
-  #
-  #   dpkg -l | grep "^ii  perl"    ->  perl-base only (no perl, no
-  #                                     perl-modules-5.40)
-  #   find / -name Text.pm -path '*Pod*'  ->  empty
-  #   command -v perldoc / pod2text       ->  absent, both
-  #
-  # grype matched the perl-base VERSION, not vulnerable code on disk. Pod::Text
-  # ships in perl-modules, which this image does not install. There is no
-  # perldoc or pod2text to run even by hand after `docker exec`.
-  #
-  # An earlier version of this entry argued from `grep -rl perl` over our
-  # entrypoint and deploy scripts. That was weaker AND rots: it says nothing
-  # about the Python package, a future subprocess call, or the healthcheck.
-  # File existence does not rot.
-  #
-  # Debian has no fixed version, so there is nothing to bump to — and nothing
-  # to wait for either. Re-measure at expiry by re-running the three commands
-  # above: this entry dies the day perl-modules appears in the image (then it
-  # is really reachable and needs a fix), or the day grype stops matching
-  # perl-base for it.
-  - vulnerability: CVE-2026-82560
-    package:
-      name: perl-base
-      type: deb
-    reason: "Pod::Text <6.1.1 CPU/memory exhaustion when formatting an attacker-supplied POD document. THE MODULE IS NOT IN THE IMAGE: measured 2026-09-27, only perl-base is installed (no perl-modules-5.40), `find / -name Text.pm -path '*Pod*'` is empty, and perldoc/pod2text do not exist. Grype matched the perl-base version, not vulnerable code on disk. Debian fix=not-fixed, so there is nothing to upgrade to. Re-measure by re-running those commands; this dies when perl-modules appears. Tracking WOR-934."
-    expiry: "2026-12-31"  # no fix exists; re-measure for a fixed perl-base, do not blind-extend.
+  # CVE-2026-82560 (perl Pod::Text, WOR-934): waiver REMOVED 2026-11-26
+  # (worthless-kpkkm). Measured that day with grype 0.114.0, DB built 2026-11-26 06:22 UTC, ignore-free config, on an arm64 image
+  # built locally 2026-11-26 from 93b602c4 (v0.3.18) and on ghcr worthless-proxy:0.3.18 amd64:
+  # grype still matches perl-base 5.40.1-6+deb13u1 (High), but Debian's state
+  # is now `wont-fix`, not `not-fixed`. Neither gate fails on `wont-fix`. The
+  # fixed-only scan drops it, and check_grype_unmapped_findings gates only
+  # unknown and not-fixed. So the waiver suppressed nothing. If Debian moves it
+  # back to not-fixed, the unmapped gate fails, and the waiver must be argued
+  # again. The module is still absent: on 2026-11-26 the image has perl-base
+  # only (no perl-modules-5.40), `find / -name Text.pm -path '*Pod*'` is empty,
+  # and perldoc and pod2text do not exist.
 
   # ── CPython tarfile, base-image only (WOR-852 Track B) ──────────────
   # All three are tarfile bugs in the digest-pinned python:3.13-slim-bookworm
@@ -518,7 +386,7 @@ ignore:
     # tarfile.extractall() 'data'/'tar' filter bypass via a crafted archive
     # where a hardlink references a symlink stored at a deeper name.
     reason: "CPython tarfile; fix only in 3.15.0b4 (pre-release). Unreachable — no tarfile/archive use in src/worthless. Tracking WOR-852."
-    expiry: "2027-01-31"  # extended 2026-08-02 on the re-measurement above, not blind.
+    expiry: "2027-01-28"  # extended 2026-08-02 on the re-measurement above, not blind.
 
   - vulnerability: CVE-2026-11972
     package:
@@ -527,7 +395,7 @@ ignore:
     # tarfile streaming mode (mode="r|") mishandles EOF, making archive
     # parsing take exponentially longer — a DoS against archive parsing.
     reason: "CPython tarfile; fix only in 3.15.0b4 (pre-release). Unreachable — no tarfile/archive use in src/worthless. Tracking WOR-852."
-    expiry: "2027-01-31"  # extended 2026-08-02 on the re-measurement above, not blind.
+    expiry: "2027-01-28"  # extended 2026-08-02 on the re-measurement above, not blind.
 
   - vulnerability: CVE-2026-4360
     package:
@@ -583,7 +451,7 @@ ignore:
     # the finding becomes gate-visible AND becomes retirable by a base bump.
     # That refresh is the single event to watch, and what the expiry re-checks.
     reason: "CPython tarfile; fixed upstream in v3.13.15/v3.14.7 (GH-151988) but grype's NVD record has no version data, so it reports on every version — a base bump does NOT retire this entry. Unreachable: no archive use in src/worthless, enforced by tests/test_archive_reachability.py. WOR-852."
-    expiry: "2027-01-31"  # aligned with its block-mates; re-measure the NVD record, not the image.
+    expiry: "2027-01-28"  # aligned with its block-mates; re-measure the NVD record, not the image.
 
   # ── CPython Mediums, base-image only (WOR-852 Track C) ──────────────
   # These four became gating when the scan cutoff moved from `high` to
@@ -627,7 +495,7 @@ ignore:
     # is NOT resident after importing worthless.proxy + worthless.cli.
     # Worthless speaks HTTP to LLM providers; it has no mail client.
     reason: "CPython imaplib injection; fix only in 3.15.0a6 (pre-release). Unreachable — imaplib not imported first-party and not resident at runtime. Tracking WOR-852."
-    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
+    expiry: "2027-01-29"  # set 2026-08-03 on the six-base measurement above, not blind.
 
   - vulnerability: CVE-2025-15367
     package:
@@ -636,7 +504,7 @@ ignore:
     # poplib: same newline-injection shape as CVE-2025-15366, POP3 instead of
     # IMAP. Measured identically: not imported first-party, not resident.
     reason: "CPython poplib injection; fix only in 3.15.0a6 (pre-release). Unreachable — poplib not imported first-party and not resident at runtime. Tracking WOR-852."
-    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
+    expiry: "2027-01-29"  # set 2026-08-03 on the six-base measurement above, not blind.
 
   - vulnerability: CVE-2026-12003
     package:
@@ -650,7 +518,7 @@ ignore:
     # Planting that landmark needs write access beside the interpreter, which
     # the non-root runtime user does not have.
     reason: "CPython VPATH sys.path; fix only in 3.15.0b3 (pre-release). Unreachable — installed layout, no Modules/setup.local, non-root runtime. Tracking WOR-852."
-    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
+    expiry: "2027-01-29"  # set 2026-08-03 on the six-base measurement above, not blind.
 
   - vulnerability: CVE-2026-0864
     package:
@@ -676,7 +544,7 @@ ignore:
     # or the CLI. src/worthless imports configparser nowhere. The CVE needs a
     # write path to inject into; there isn't one.
     reason: "CPython configparser write-injection; fix only in 3.15.0b4 (pre-release). Unreachable — swept whole image 2026-08-03: only pip writes via configparser and it is not resident. Tracking WOR-852."
-    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
+    expiry: "2027-01-25"  # set 2026-08-03 on the six-base measurement above, not blind.
 
   # ── Debian perl-base, install-time tooling only (WOR-852 Track D) ────
   # These seven became VISIBLE when the unmapped-findings gate landed
@@ -710,31 +578,31 @@ ignore:
   - vulnerability: CVE-2026-12087
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed (no upstream fix to take). Essential=yes so it cannot be removed. Unreachable — every perl consumer in the image is install-time tooling (dpkg/adduser/PAM); the runtime path is python only. Tracking WOR-852."
-    expiry: "2027-01-31"
+    expiry: "2027-01-25"
   - vulnerability: CVE-2026-13221
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
-    expiry: "2027-01-31"
+    expiry: "2027-01-25"
   - vulnerability: CVE-2026-57433
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
-    expiry: "2027-01-31"
+    expiry: "2027-01-20"
   - vulnerability: CVE-2026-48959
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
-    expiry: "2027-01-31"
+    expiry: "2027-01-22"
   - vulnerability: CVE-2026-48962
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
-    expiry: "2027-01-31"
+    expiry: "2027-01-22"
   - vulnerability: CVE-2026-57432
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
-    expiry: "2027-01-31"
+    expiry: "2027-01-22"
   - vulnerability: CVE-2026-7017
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
-    expiry: "2027-01-31"
+    expiry: "2027-01-20"
 
   # --- CVE-2026-14456 (QUIC server listener): waiver REMOVED 2026-11-18 -----
   # It argued bookworm's OpenSSL 3.0.20 had no QUIC server. The image has since
@@ -753,10 +621,27 @@ ignore:
   # `openssl` entry carrying a bookworm argument would have excused a re-fire
   # on 3.5.7 that nobody measured. WOR-1157.
 
+  # RE-MEASURED 2026-11-26 (worthless-kpkkm), grype 0.114.0, DB built 2026-11-26
+  # 06:22 UTC: an arm64 image built locally from v0.3.18 that day still installs
+  # 3.5.9-1~deb13u1, and every CVE below is still High, fix=not-fixed, on both
+  # it and ghcr worthless-proxy:0.3.18 (amd64).
+  # SYMBOL SWEEP, arm64 + amd64 swept 2026-11-27 on 3.5.9-1~deb13u1 (dpkg status
+  # of each rootfs). amd64: ghcr.io/oblangatas/worthless-proxy:0.3.18 (revision
+  # 93b602c4) pulled with --platform linux/amd64, `docker create` + `docker
+  # export`, never run, no QEMU. arm64: the 2026-11-26 local build above, exported
+  # the same way. pyelftools over undefined .dynsym imports of every ELF:
+  # arm64 759 ELFs (757 with a .dynsym), amd64 760 ELFs (758 with a .dynsym).
+  # Both arches give the same importers for every symbol each reason names.
+  # This supersedes the 3.5.7 sweeps quoted in the section comments below.
+  # Expiries are staggered one CVE per date (its three package rules together),
+  # 2026-12-10 to 2027-02-23: #809's CRL and QUIC triples on 2026-12-10 and
+  # 2026-12-17, the rest from 2027-01-14. Every date is a weekday, so the
+  # triples come up for re-argument one at a time.
+  #
   # Re-pinned 2026-11-21 (worthless-vk3a5): the image's apt-get upgrade now
   # installs 3.5.9-1~deb13u1. Grype (scan run 44921154407) still reports every
   # CVE below as not-fixed at 3.5.9; upstream fix remains 3.5.10. The symbol
-  # measurements below were taken on 3.5.7 and were NOT re-run on 3.5.9.
+  # measurements below were taken on 3.5.7 (re-run on 3.5.9 on 2026-11-27, above).
   # CVE-2026-35190 is no longer reported at 3.5.9 (cause not verified: Debian
   # backport or grype data change), so its entries were deleted. Section
   # headers below still name 3.5.7, the version they were measured on.
@@ -794,52 +679,52 @@ ignore:
   # At expiry, delete these if Debian has shipped; otherwise re-measure.
   - vulnerability: CVE-2026-107496
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rates it Low, TLS and QUIC never call it. Worthless never builds CMS/S-MIME: measured 2026-11-17, only _ssl and _hashlib link the system libssl in the image, neither exposes CMS. fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). WOR-1155."
-    expiry: "2026-12-15"
+    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rated it Low (advisory of 2026-11-10), and TLS never calls it. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: CMS_encrypt_ex is imported only by /usr/bin/openssl; _ssl and _hashlib import no CMS_* symbol. WOR-1155."
+    expiry: "2027-02-09"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-107496
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rates it Low, TLS and QUIC never call it. Worthless never builds CMS/S-MIME: measured 2026-11-17, only _ssl and _hashlib link the system libssl in the image, neither exposes CMS. fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). WOR-1155."
-    expiry: "2026-12-15"
+    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rated it Low (advisory of 2026-11-10), and TLS never calls it. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: CMS_encrypt_ex is imported only by /usr/bin/openssl; _ssl and _hashlib import no CMS_* symbol. WOR-1155."
+    expiry: "2027-02-09"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-107496
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rates it Low, TLS and QUIC never call it. Worthless never builds CMS/S-MIME: measured 2026-11-17, only _ssl and _hashlib link the system libssl in the image, neither exposes CMS. fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). WOR-1155."
-    expiry: "2026-12-15"
+    reason: "Infinite loop in CMS_encrypt()/CMS_encrypt_ex() with an EC recipient certificate of group order 1; OpenSSL rated it Low (advisory of 2026-11-10), and TLS never calls it. Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: CMS_encrypt_ex is imported only by /usr/bin/openssl; _ssl and _hashlib import no CMS_* symbol. WOR-1155."
+    expiry: "2027-02-09"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-88823
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD. OpenSSL rates it Low. AES-GCM-SIV is not a TLS cipher and Python's ssl/_hashlib expose no EVP cipher API; Worthless uses only Fernet, hashes and HKDF (measured 2026-11-17). fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). WOR-1155."
-    expiry: "2026-12-15"
+    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, legacy provider, loader_attic engine and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
+    expiry: "2027-02-16"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-88823
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD. OpenSSL rates it Low. AES-GCM-SIV is not a TLS cipher and Python's ssl/_hashlib expose no EVP cipher API; Worthless uses only Fernet, hashes and HKDF (measured 2026-11-17). fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). WOR-1155."
-    expiry: "2026-12-15"
+    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, legacy provider, loader_attic engine and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
+    expiry: "2027-02-16"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-88823
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD. OpenSSL rates it Low. AES-GCM-SIV is not a TLS cipher and Python's ssl/_hashlib expose no EVP cipher API; Worthless uses only Fernet, hashes and HKDF (measured 2026-11-17). fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). WOR-1155."
-    expiry: "2026-12-15"
+    reason: "AES-GCM-SIV: a zero-length AAD update drops earlier AAD; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, legacy provider, loader_attic engine and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
+    expiry: "2027-02-16"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-95691
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server. OpenSSL rates it Low. Python's ssl module has no QUIC API; httpx/uvicorn speak HTTP/1.1 and H2 over TCP; uv.lock has no aioquic/http3 (measured 2026-11-17). fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). WOR-1155."
-    expiry: "2026-12-15"
+    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: OSSL_QUIC_client_method is imported only by /usr/bin/openssl, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). WOR-1155."
+    expiry: "2027-02-02"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-95691
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server. OpenSSL rates it Low. Python's ssl module has no QUIC API; httpx/uvicorn speak HTTP/1.1 and H2 over TCP; uv.lock has no aioquic/http3 (measured 2026-11-17). fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). WOR-1155."
-    expiry: "2026-12-15"
+    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: OSSL_QUIC_client_method is imported only by /usr/bin/openssl, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). WOR-1155."
+    expiry: "2027-02-02"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-95691
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server. OpenSSL rates it Low. Python's ssl module has no QUIC API; httpx/uvicorn speak HTTP/1.1 and H2 over TCP; uv.lock has no aioquic/http3 (measured 2026-11-17). fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). WOR-1155."
-    expiry: "2026-12-15"
+    reason: "Use-after-free read in the OpenSSL QUIC CLIENT on a retransmitted CRYPTO frame from a malicious server; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: OSSL_QUIC_client_method is imported only by /usr/bin/openssl, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). WOR-1155."
+    expiry: "2027-02-02"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-95692
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds. OpenSSL rates it Low. AES-GCM-SIV is not a TLS cipher and Python's ssl/_hashlib expose no EVP cipher API; Worthless uses only Fernet, hashes and HKDF (measured 2026-11-17). fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). WOR-1155."
-    expiry: "2026-12-15"
+    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, legacy provider, loader_attic engine and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
+    expiry: "2027-02-23"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-95692
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds. OpenSSL rates it Low. AES-GCM-SIV is not a TLS cipher and Python's ssl/_hashlib expose no EVP cipher API; Worthless uses only Fernet, hashes and HKDF (measured 2026-11-17). fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). WOR-1155."
-    expiry: "2026-12-15"
+    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, legacy provider, loader_attic engine and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
+    expiry: "2027-02-23"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-95692
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds. OpenSSL rates it Low. AES-GCM-SIV is not a TLS cipher and Python's ssl/_hashlib expose no EVP cipher API; Worthless uses only Fernet, hashes and HKDF (measured 2026-11-17). fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). WOR-1155."
-    expiry: "2026-12-15"
+    reason: "AES-GCM-SIV: an IV shorter than the nonce length reads out of bounds; OpenSSL rated it Low (advisory of 2026-11-10). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: the generic EVP cipher entry points (EVP_CIPHER_fetch, EVP_get_cipherbyname, EVP_*Init_ex) are imported only by OpenSSL's own libssl, legacy provider, loader_attic engine and /usr/bin/openssl; _ssl and _hashlib import none. Worthless imports only Fernet, hashes and HKDF from cryptography (grep of src 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155)."
+    expiry: "2027-02-23"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
 
   # ── OpenSSL 3.5.7 (trixie), advisory of 2026-11-17 (WOR-1157) ──────────
   # Second batch, same shape as WOR-1155 above: OpenSSL rates all three LOW,
@@ -874,28 +759,28 @@ ignore:
   # both batches (WOR-1157 closes when these entries merge).
   - vulnerability: CVE-2026-107493
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Use-after-free in PEM_X509_INFO_read_bio_ex() only when the caller passes its own non-NULL stack and keeps using it after a failed read; OpenSSL rates it Low and states OpenSSL itself never does this. Measured 2026-11-18 (amd64 + arm64): the only ELF importing PEM_X509_INFO_read* is /usr/bin/openssl, which Worthless never runs; Python's _ssl reads PEM with PEM_read_bio_X509 and SSL_CTX_load_verify_locations, which passes NULL. fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). Added in WOR-1157; re-check owned by WOR-1155."
-    expiry: "2026-12-15"
+    reason: "Use-after-free in PEM_X509_INFO_read_bio_ex() only when the caller passes its own non-NULL stack and keeps using it after a failed read; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: PEM_X509_INFO_read_bio is imported only by /usr/bin/openssl, which Worthless never runs; _ssl and _hashlib import no PEM_X509_INFO symbol. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
+    expiry: "2027-01-21"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-107493
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Use-after-free in PEM_X509_INFO_read_bio_ex() only when the caller passes its own non-NULL stack and keeps using it after a failed read; OpenSSL rates it Low and states OpenSSL itself never does this. Measured 2026-11-18 (amd64 + arm64): the only ELF importing PEM_X509_INFO_read* is /usr/bin/openssl, which Worthless never runs; Python's _ssl reads PEM with PEM_read_bio_X509 and SSL_CTX_load_verify_locations, which passes NULL. fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). Added in WOR-1157; re-check owned by WOR-1155."
-    expiry: "2026-12-15"
+    reason: "Use-after-free in PEM_X509_INFO_read_bio_ex() only when the caller passes its own non-NULL stack and keeps using it after a failed read; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: PEM_X509_INFO_read_bio is imported only by /usr/bin/openssl, which Worthless never runs; _ssl and _hashlib import no PEM_X509_INFO symbol. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
+    expiry: "2027-01-21"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-107493
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Use-after-free in PEM_X509_INFO_read_bio_ex() only when the caller passes its own non-NULL stack and keeps using it after a failed read; OpenSSL rates it Low and states OpenSSL itself never does this. Measured 2026-11-18 (amd64 + arm64): the only ELF importing PEM_X509_INFO_read* is /usr/bin/openssl, which Worthless never runs; Python's _ssl reads PEM with PEM_read_bio_X509 and SSL_CTX_load_verify_locations, which passes NULL. fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). Added in WOR-1157; re-check owned by WOR-1155."
-    expiry: "2026-12-15"
+    reason: "Use-after-free in PEM_X509_INFO_read_bio_ex() only when the caller passes its own non-NULL stack and keeps using it after a failed read; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: PEM_X509_INFO_read_bio is imported only by /usr/bin/openssl, which Worthless never runs; _ssl and _hashlib import no PEM_X509_INFO symbol. Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
+    expiry: "2027-01-21"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-124709
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Unbounded memory growth in the OpenSSL QUIC SERVER when a peer resets a stream the server rejected; OpenSSL rates it Low (slow DoS on a long-lived QUIC connection). Measured 2026-11-18 (amd64 + arm64): no ELF in the image imports OSSL_QUIC_server_method or SSL_new_listener, Python's ssl module has no QUIC API, and uv.lock has no aioquic/http3. fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). Added in WOR-1157; re-check owned by WOR-1155."
-    expiry: "2026-12-15"
+    reason: "Unbounded memory growth in the OpenSSL QUIC SERVER when a peer resets a stream the server rejected; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: no ELF imports OSSL_QUIC_server_method or SSL_new_listener, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
+    expiry: "2027-01-26"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-124709
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Unbounded memory growth in the OpenSSL QUIC SERVER when a peer resets a stream the server rejected; OpenSSL rates it Low (slow DoS on a long-lived QUIC connection). Measured 2026-11-18 (amd64 + arm64): no ELF in the image imports OSSL_QUIC_server_method or SSL_new_listener, Python's ssl module has no QUIC API, and uv.lock has no aioquic/http3. fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). Added in WOR-1157; re-check owned by WOR-1155."
-    expiry: "2026-12-15"
+    reason: "Unbounded memory growth in the OpenSSL QUIC SERVER when a peer resets a stream the server rejected; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: no ELF imports OSSL_QUIC_server_method or SSL_new_listener, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
+    expiry: "2027-01-26"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-124709
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Unbounded memory growth in the OpenSSL QUIC SERVER when a peer resets a stream the server rejected; OpenSSL rates it Low (slow DoS on a long-lived QUIC connection). Measured 2026-11-18 (amd64 + arm64): no ELF in the image imports OSSL_QUIC_server_method or SSL_new_listener, Python's ssl module has no QUIC API, and uv.lock has no aioquic/http3. fix=not-fixed: not fixed in Debian trixie 3.5.9-1~deb13u1 (upstream fix 3.5.10). Added in WOR-1157; re-check owned by WOR-1155."
-    expiry: "2026-12-15"
+    reason: "Unbounded memory growth in the OpenSSL QUIC SERVER when a peer resets a stream the server rejected; OpenSSL rated it Low (advisory of 2026-11-17). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: no ELF imports OSSL_QUIC_server_method or SSL_new_listener, and _ssl imports no QUIC symbol. uv.lock has no aioquic/http3/pylsqpack (read 2026-11-26). Not covered: cryptography 50.0.2's bundled OpenSSL 4.0.3 (WOR-1155). Added in WOR-1157; re-check owned by WOR-1155."
+    expiry: "2027-01-26"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
 
   # ── OpenSSL 3.5.7 (trixie), CVE-2026-84786 DANE client (worthless-3g4u) ─
   # Turned main's required `scan` red on 2026-11-20 (b49a2007). The flaw: a TLS
@@ -946,9 +831,11 @@ ignore:
   #   The DANE_* strings inside _ssl are OpenSSL's error-reason table,
   #     not calls. No openssl.cnf in /etc/ssl
   #     or /usr/lib/ssl mentions DANE.
-  #   Outbound TLS to providers uses ssl.create_default_context() /
-  #     SSLContext(PROTOCOL_TLS_CLIENT) in src/worthless/proxy, and Python's
-  #     ssl module has no DANE API. src has no dane/tlsa/pyOpenSSL reference,
+  #   Outbound TLS to providers uses httpx.create_ssl_context(trust_env=False)
+  #     by default (src/worthless/proxy/upstream.py:37), ssl.create_default_context()
+  #     only when a CA bundle is set (:39), and SSLContext(PROTOCOL_TLS_CLIENT)
+  #     to check that bundle (config.py:305). All are Python ssl contexts, and
+  #     Python's ssl module has no DANE API. src has no dane/tlsa/pyOpenSSL reference,
   #     and pyOpenSSL is not installed. Nothing at runtime runs /usr/bin/openssl.
   #
   # NOT COVERED: the cryptography 50.0.2 wheel bundles its own static OpenSSL
@@ -966,16 +853,16 @@ ignore:
   # calling SSL_dane_enable (for example a DANE-capable HTTP or SMTP client).
   - vulnerability: CVE-2026-84786
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 on arm64 (main b49a2007) and amd64 (ghcr 0.3.17 @ 3dc5d05d): only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. Source: grype DB (Debian/Red Hat/Ubuntu records); Debian fix=not-fixed in 12/13/14/sid. Tracking worthless-3g4u."
-    expiry: "2026-12-15"
+    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only, and DANE is opt-in via SSL_dane_enable(). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: SSL_dane_enable, SSL_CTX_dane_enable and SSL_dane_tlsa_add are imported only by /usr/bin/openssl, which Worthless never runs; Python's _ssl imports no DANE symbol. Upstream fix PR openssl/openssl#33634 read 2026-11-26: CLOSED, not merged. Debian fix=not-fixed in 12/13/14/sid per the grype DB read 2026-11-20. Tracking worthless-3g4u."
+    expiry: "2027-01-14"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-84786
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 on arm64 (main b49a2007) and amd64 (ghcr 0.3.17 @ 3dc5d05d): only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. Source: grype DB (Debian/Red Hat/Ubuntu records); Debian fix=not-fixed in 12/13/14/sid. Tracking worthless-3g4u."
-    expiry: "2026-12-15"
+    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only, and DANE is opt-in via SSL_dane_enable(). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: SSL_dane_enable, SSL_CTX_dane_enable and SSL_dane_tlsa_add are imported only by /usr/bin/openssl, which Worthless never runs; Python's _ssl imports no DANE symbol. Upstream fix PR openssl/openssl#33634 read 2026-11-26: CLOSED, not merged. Debian fix=not-fixed in 12/13/14/sid per the grype DB read 2026-11-20. Tracking worthless-3g4u."
+    expiry: "2027-01-14"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
   - vulnerability: CVE-2026-84786
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only. DANE is opt-in via SSL_dane_enable(). Measured 2026-11-20 on arm64 (main b49a2007) and amd64 (ghcr 0.3.17 @ 3dc5d05d): only /usr/bin/openssl imports SSL_dane_*, which Worthless never runs; Python's _ssl imports none and Python's ssl has no DANE API. Source: grype DB (Debian/Red Hat/Ubuntu records); Debian fix=not-fixed in 12/13/14/sid. Tracking worthless-3g4u."
-    expiry: "2026-12-15"
+    reason: "NULL dereference in a DANE-enabled TLS client on an unusual certificate + TLSA combination; DoS only, and DANE is opt-in via SSL_dane_enable(). Re-measured 2026-11-26 (grype 0.114.0, DB built 2026-11-26): still High and fix=not-fixed at 3.5.9-1~deb13u1, on a fresh arm64 build of v0.3.18 (its apt-get upgrade still installs 3.5.9) and on ghcr worthless-proxy:0.3.18 amd64. Symbol sweep: arm64 + amd64 swept 2026-11-27 on 3.5.9, undefined dynamic symbols of every ELF (arm64 759, amd64 760), same result on both: SSL_dane_enable, SSL_CTX_dane_enable and SSL_dane_tlsa_add are imported only by /usr/bin/openssl, which Worthless never runs; Python's _ssl imports no DANE symbol. Upstream fix PR openssl/openssl#33634 read 2026-11-26: CLOSED, not merged. Debian fix=not-fixed in 12/13/14/sid per the grype DB read 2026-11-20. Tracking worthless-3g4u."
+    expiry: "2027-01-14"  # re-measured 2026-11-26 (worthless-kpkkm); staggered, re-measure before extending.
 
   # ── OpenSSL 3.5.9 (trixie), CVE-2026-121482 CRL check CPU (worthless-3g4u) ──
   # Turned main's required `scan` red on 2026-11-23 (scheduled run
@@ -1011,9 +898,11 @@ ignore:
   # get_crl_score, either after ctx->get_crl or via get_crl_delta ->
   # get_crl_sk.
   #
-  # Measured 2026-11-24 on local buildx images of main 93b602c4, both arches,
-  # openssl / libssl3t64 / openssl-provider-legacy 3.5.9-1~deb13u1:
-  #   ELFs (pyelftools, undefined .dynsym imports; 757 arm64, 758 amd64):
+  # #809's sweep, 2026-11-26, on local buildx images of main 93b602c4, both
+  # arches, openssl / libssl3t64 / openssl-provider-legacy 3.5.9-1~deb13u1.
+  # Re-run 2026-11-27 on the exported images in the header above: same importers.
+  #   ELFs (pyelftools, undefined .dynsym imports; ELFs with a .dynsym: 757
+  #   arm64, 758 amd64, of 759 / 760 ELFs in all):
   #     CMS_verify, PKCS7_verify, X509_STORE_add_crl -> /usr/bin/openssl only.
   #     X509_VERIFY_PARAM_set_flags -> Python's _ssl (driven by
   #       SSLContext.verify_flags) and /usr/bin/openssl.
@@ -1023,11 +912,17 @@ ignore:
   #     libssl.so.3 imports X509_STORE_CTX_set_flags to copy the caller's
   #       flags; it sets no CRL flag itself.
   #   Python (all 2440 .py files in the image): nothing sets
-  #     ssl.VERIFY_CRL_CHECK_LEAF / VERIFY_CRL_CHECK_CHAIN or loads a CRL. The
-  #     only matches are pip's vendored truststore, macOS/Windows branches.
-  #     Outbound provider TLS uses ssl.create_default_context() /
-  #     SSLContext(PROTOCOL_TLS_CLIENT) in src/worthless/proxy, which leave
-  #     CRL checking off. Worthless does no CMS / PKCS#7 verification.
+  #     ssl.VERIFY_CRL_CHECK_LEAF / VERIFY_CRL_CHECK_CHAIN, so no verifier sets
+  #     X509_V_FLAG_CRL_CHECK. The only matches are pip's vendored truststore,
+  #     macOS/Windows branches.
+  #     Outbound provider TLS builds its context in _upstream_ssl_context():
+  #     httpx.create_ssl_context(trust_env=False) by default
+  #     (src/worthless/proxy/upstream.py:37), and ssl.create_default_context()
+  #     only when an operator sets a CA bundle (:39). Neither sets a CRL
+  #     verify flag. Worthless does no CMS / PKCS#7 verification.
+  #     An operator's WORTHLESS_UPSTREAM_CA_BUNDLE may contain CRL PEMs, and
+  #     load_verify_locations loads them, but they are never checked: no
+  #     verifier sets X509_V_FLAG_CRL_CHECK.
   #   No openssl.cnf in /etc/ssl turns on CRL checking (only the stock `ca`
   #     section's crl paths).
   #
@@ -1049,16 +944,16 @@ ignore:
   # CMS / PKCS#7 messages.
   - vulnerability: CVE-2026-121482
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-24 on main 93b602c4 (arm64 + amd64): nothing in the image sets VERIFY_CRL_CHECK_* or loads a CRL; CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
-    expiry: "2026-12-08"
+    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64, #809's sweep) and re-swept arm64 + amd64 2026-11-27 on 3.5.9 (759 / 760 ELFs), same result: no verifier in the image sets X509_V_FLAG_CRL_CHECK (no VERIFY_CRL_CHECK_*); CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-10"
   - vulnerability: CVE-2026-121482
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-24 on main 93b602c4 (arm64 + amd64): nothing in the image sets VERIFY_CRL_CHECK_* or loads a CRL; CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
-    expiry: "2026-12-08"
+    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64, #809's sweep) and re-swept arm64 + amd64 2026-11-27 on 3.5.9 (759 / 760 ELFs), same result: no verifier in the image sets X509_V_FLAG_CRL_CHECK (no VERIFY_CRL_CHECK_*); CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-10"
   - vulnerability: CVE-2026-121482
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-24 on main 93b602c4 (arm64 + amd64): nothing in the image sets VERIFY_CRL_CHECK_* or loads a CRL; CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
-    expiry: "2026-12-08"
+    reason: "CPU DoS in crl_crldp_check (OpenSSL rates it Low), reached only when a verifier turns on X509_V_FLAG_CRL_CHECK. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64, #809's sweep) and re-swept arm64 + amd64 2026-11-27 on 3.5.9 (759 / 760 ELFs), same result: no verifier in the image sets X509_V_FLAG_CRL_CHECK (no VERIFY_CRL_CHECK_*); CMS_verify/PKCS7_verify are imported only by /usr/bin/openssl, which Worthless never runs. Upstream fix openssl/openssl#33546 (3.5.10, unreleased); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-10"
 
   # ── OpenSSL 3.5.9 (trixie), CVE-2026-107494 QUIC RETIRE_CONNECTION_ID (worthless-3g4u) ─
   # First in grype's database built 2026-11-26, as High. The flaw: the QUIC
@@ -1082,9 +977,11 @@ ignore:
   #
   # QUIC is opt-in: a program must create its connection with a QUIC method
   # (OSSL_QUIC_client_method / OSSL_QUIC_server_method / SSL_new_listener).
-  # Same argument as CVE-2026-95691 above. Measured 2026-11-26 on local buildx
-  # images of main 93b602c4, both arches, 3.5.9-1~deb13u1, pyelftools over
-  # undefined .dynsym imports (757 arm64, 758 amd64 ELFs):
+  # Same argument as CVE-2026-95691 above. #809's sweep, 2026-11-26, on local
+  # buildx images of main 93b602c4, both arches, 3.5.9-1~deb13u1, pyelftools
+  # over undefined .dynsym imports (ELFs with a .dynsym: 757 arm64, 758 amd64,
+  # of 759 / 760 in all); re-run 2026-11-27 on the header's exported images,
+  # same importers:
   #   OSSL_QUIC_client_method, SSL_is_quic, SSL_handle_events -> /usr/bin/openssl
   #     only (its `s_client -quic`). No ELF imports a QUIC server method or
   #     SSL_new_listener.
@@ -1102,13 +999,13 @@ ignore:
   # Delete them at once if anything in the image starts speaking QUIC.
   - vulnerability: CVE-2026-107494
     package: {name: openssl, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64): only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
-    expiry: "2026-12-08"
+    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64, #809's sweep) and re-swept arm64 + amd64 2026-11-27 on 3.5.9 (759 / 760 ELFs), same result: only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-17"
   - vulnerability: CVE-2026-107494
     package: {name: libssl3t64, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64): only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
-    expiry: "2026-12-08"
+    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64, #809's sweep) and re-swept arm64 + amd64 2026-11-27 on 3.5.9 (759 / 760 ELFs), same result: only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-17"
   - vulnerability: CVE-2026-107494
     package: {name: openssl-provider-legacy, version: "3.5.9-1~deb13u1", type: deb}
-    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64): only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
-    expiry: "2026-12-08"
+    reason: "Unbounded RETIRE_CONNECTION_ID queue in the OpenSSL QUIC stack; memory DoS from a malicious QUIC peer. OpenSSL rates it Low. Measured 2026-11-26 on main 93b602c4 (arm64 + amd64, #809's sweep) and re-swept arm64 + amd64 2026-11-27 on 3.5.9 (759 / 760 ELFs), same result: only /usr/bin/openssl imports a QUIC method, which Worthless never runs; Python's ssl has no QUIC API and no QUIC package is installed. Upstream fix in 3.5.10 (2026-12-01); Debian fix=not-fixed in 13/14/sid. Tracking worthless-3g4u."
+    expiry: "2026-12-17"
